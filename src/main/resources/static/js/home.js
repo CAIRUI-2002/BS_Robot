@@ -1,0 +1,3083 @@
+// home.js
+// 功能：
+// 1. GPR 探地雷达数据处理与三维可视化
+// 2. ROS 机器人运动控制 (WebSocket + Stomp + 长按连续发送)
+// 3. 多面板切换 (GPR / Robot)
+
+(function () {
+    // ==========================================
+    // 0. 全局配置与状态
+    // ==========================================
+
+    // ✅ 资深写法（推荐）：自动跟随当前网页的 IP 地址
+    // 这样无论你是用 localhost、127.0.0.1 还是 172.x.x.x 访问，
+    // 它都会自动去连同一个 IP 的 8000 端口。
+    const ARM_BACKEND_URL = "http://" + window.location.hostname + ":8080";
+    const ARM_API_BASE = "http://10.21.31.200:5000";
+
+    // ====== 🌊 自适应检测全局变量 ======
+    const HISTORY_SIZE = 50;  // 记录最近 50 帧的数据作为背景参考
+    let signalBaselineQueue = []; // 存储历史信号强度
+// 灵敏度系数：值越小越灵敏，值越大越抗干扰
+// 3.0 代表偏离正常波动范围 3 倍才算故障 (统计学上的 99.7% 置信度)
+    // 改为 let，允许动态修改，默认值 3.0
+    let sensitivityFactor = 3.0;
+
+    // ====== 🌊 峰值监测全局变量 ======
+// 存储最近 50 帧的 { deviation: 偏离度, val: 信号强度 }
+    let mutationWindow = [];
+// 用于界面滚动显示的队列 [历史2, 历史1, 当前]
+    let mutationDisplayHistory = [0, 0, 0];
+
+
+    // GPR 相关
+    let showAnnotation = false;      // 标注开关状态
+    let annotation3DGroups = [];     // 存储 3D 标注对象
+    let gprResult = null;            // 缓存 GPR 结果
+
+    // ROS 机器人相关
+    let stompClient = null;          // WebSocket 客户端
+    let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
+    let isArmBusy = false;           // ✅ 补充定义：机械臂忙碌状态锁
+
+    // ⚙️ 机器人运动参数配置
+    const SPEEDS = {
+        LINEAR: 0.5,   // 前进/后退线速度 (m/s)
+        ANGULAR: 1.0,   // 转向角速度 (rad/s)
+        STRAFE: 0.3    // ✅ 新增：横向移动速度 (m/s) (螃蟹步通常慢一点)
+    };
+// ✅ 新增：机器狗模式定义 (通过 linear.z 传递)
+    // 对应 C++ enum StateName: kStandUp=1, kRLControl=6
+    const MODES = {
+        IDLE: 0.0,      // 空闲
+        STAND: 1.0,     // 站立
+        DAMPING: 2.0,   // 阻尼
+        WALK: 3.0,      // ✅ 常规足式模式 (之前验证过能横移)
+        LIE_DOWN: 4.0   // 趴下
+    };
+
+    // GPR 算法配置
+    const CONFIG = {
+        brightnessThreshold: 200,
+        minRadius: 3,
+        radiusPadding: 6
+    };
+
+    // 管道连接配置
+    const LINK_CONFIG = {
+        maxZDiff: 0.1,
+        maxYDiff: 0.1
+    };
+
+    // ==========================================
+    // 1. 辅助算法与工具函数
+    // ==========================================
+
+    function $(id) { return document.getElementById(id); }
+
+    function setStatus(text, type) {
+        const statusSpan = $("gprStatus");
+        // 如果在 GPR 面板没找到状态栏，尝试找机械臂面板的状态栏(如果有的话)
+        // 这里主要更新 GPR 面板的状态
+        if (!statusSpan) {
+            console.log(`[系统状态] ${text}`); // 备用日志
+            return;
+        }
+        statusSpan.textContent = text || "";
+        statusSpan.classList.remove("error", "success");
+        if (type) statusSpan.classList.add(type);
+    }
+    // ✅ 新增：更新界面上的数值显示 (挂载到 window 以便 HTML 调用)
+    window.updateSpeedLabel = function(id, val) {
+        const el = document.getElementById(id);
+        if(el) el.textContent = val;
+        // 自动模式的数值显示也在这里顺便更新，但发送请求单独处理
+        if(id === 'valAutoX') document.getElementById('valAutoX').textContent = val;
+        if(id === 'valAutoY') document.getElementById('valAutoY').textContent = val;
+    };
+
+    // ✅ 新增：发送自动巡线速度给后端 (挂载到 window 以便 HTML 调用)
+    window.updateAutoSpeed = function() {
+        const vx = document.getElementById('autoSpeedX').value;
+        const vy = document.getElementById('autoSpeedY').value;
+
+        // 更新UI数字
+        document.getElementById('valAutoX').textContent = vx;
+        document.getElementById('valAutoY').textContent = vy;
+
+        // 发送 fetch 请求
+        const url = `/api/pipeline/speed?vx=${vx}&vy=${vy}`;
+        console.log(`📡 更新自动巡线速度: vx=${vx}, vy=${vy}`);
+
+        fetch(url, { method: "POST" })
+            .then(res => res.text()) // 假设后端返回字符串 "ok"
+            .then(msg => console.log("速度更新反馈:", msg))
+            .catch(err => console.error("速度更新失败:", err));
+    };
+
+    // 连通域检测算法 (GPR)
+    function detectBlobs(matrix) {
+        if (!matrix || !matrix.length) return [];
+        const rows = matrix.length;
+        const cols = matrix[0].length;
+        const visited = new Uint8Array(rows * cols);
+        const blobs = [];
+
+        let min = Infinity, max = -Infinity;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const v = matrix[r][c];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+
+        const range = max - min + 1e-9;
+        const realThreshold = min + (CONFIG.brightnessThreshold / 255.0) * range;
+
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const idx = r * cols + c;
+                if (visited[idx]) continue;
+                if (matrix[r][c] > realThreshold) {
+                    const blob = floodFill(matrix, r, c, rows, cols, visited, realThreshold);
+                    if (blob.radius > CONFIG.minRadius) {
+                        blobs.push(blob);
+                    }
+                }
+            }
+        }
+        return blobs;
+    }
+
+    function floodFill(matrix, startR, startC, rows, cols, visited, threshold) {
+        const queue = [{ r: startR, c: startC }];
+        visited[startR * cols + startC] = 1;
+        let minR = startR, maxR = startR;
+        let minC = startC, maxC = startC;
+        while (queue.length > 0) {
+            const curr = queue.shift();
+            if (curr.r < minR) minR = curr.r;
+            if (curr.r > maxR) maxR = curr.r;
+            if (curr.c < minC) minC = curr.c;
+            if (curr.c > maxC) maxC = curr.c;
+            const neighbors = [
+                { r: curr.r - 1, c: curr.c }, { r: curr.r + 1, c: curr.c },
+                { r: curr.r, c: curr.c - 1 }, { r: curr.r, c: curr.c + 1 }
+            ];
+            for (let n of neighbors) {
+                if (n.r >= 0 && n.r < rows && n.c >= 0 && n.c < cols) {
+                    const nIdx = n.r * cols + n.c;
+                    if (!visited[nIdx] && matrix[n.r][n.c] > threshold) {
+                        visited[nIdx] = 1;
+                        queue.push(n);
+                    }
+                }
+            }
+        }
+        const centerR = (minR + maxR) / 2;
+        const centerC = (minC + maxC) / 2;
+        const radius = Math.max((maxR - minR), (maxC - minC)) / 2;
+        return { row: centerR, col: centerC, radius: radius };
+    }
+
+    // ==========================================
+    // 2. 页面初始化逻辑 (DOMContentLoaded)
+    // ==========================================
+
+    document.addEventListener("DOMContentLoaded", function () {
+        // ==========================================
+// ✅ 新增：灵敏度滑条控制
+// ==========================================
+        const sensSlider = document.getElementById('sensitivitySlider');
+        const sensDisplay = document.getElementById('sensitivityDisplay');
+
+        if (sensSlider && sensDisplay) {
+            // 初始化显示
+            sensDisplay.textContent = parseFloat(sensSlider.value).toFixed(1);
+            // 更新全局变量
+            sensitivityFactor = parseFloat(sensSlider.value);
+
+            // 监听滑动事件
+            sensSlider.addEventListener('input', function() {
+                const val = parseFloat(this.value);
+                sensitivityFactor = val; // 更新算法使用的变量
+                sensDisplay.textContent = val.toFixed(1); // 更新界面显示
+
+                // 可选：打印日志确认
+                // console.log("灵敏度已调整为:", sensitivityFactor);
+            });
+        }
+        // --- A. 获取 DOM ---
+        const btn3D = $("btn3DReconstruct");
+        const btnRobotNav = $("btnRobotNav");
+        const btnPathFault = $("btnPathFault");
+        // ✅ 获取新增的机械臂切换按钮
+        const btnShowArm = $("btnShowArm");
+
+        const gprPanel = $("gprPanel");
+        const robotPanel = $("robotNavPanel");
+        // ✅ 获取新增的机械臂控制面板 (如果按照之前步骤添加了 id="armPanel")
+        // 如果你的 HTML 中没有 id="armPanel"，请给那个包含 .control-group-box 的 div 加上 id="armPanel"
+        // 建议：直接复用 robot-right-col 的父级容器作为 armPanel
+        // 或者我们假设 armPanel 是一个新的独立 div，如果不存就在 switchMainPanel 里做兼容
+        const armPanel = $("armPanel");
+        // ✅ 新增：获取故障定点面板
+        const pathFaultPanel = $("pathFaultPanel");
+
+        const btnStart = $("btnStartGpr");
+        const segmentSelect = $("segmentSelect");
+        const btnAnno = $("btnToggleAnnotation");
+
+        const btnDogStand = $("btnDogStand");  // 机器狗站立
+        const btnDogWalk = $("btnDogControl"); // 运动控制
+
+        // ✅ G. 站立/趴下 切换按钮 (保持 Mode 1 和 Mode 4)
+        if (btnDogStand) {
+            let isDogStanding = false;
+
+            btnDogStand.addEventListener('click', function() {
+                if (!isDogStanding) {
+                    // === 站立 ===
+                    console.log("🚀 指令: 机器狗站立 (Mode 1)");
+                    sendMoveCommand(0.0, 0.0, 0.0, MODES.STAND, true);
+
+                    this.textContent = "机器狗趴下";
+                    this.classList.add("active");
+                    setStatus("发送指令：站立模式", "success");
+                    isDogStanding = true;
+                } else {
+                    // === 趴下 ===
+                    console.log("🚀 指令: 机器狗趴下 (Mode 4)");
+                    sendMoveCommand(0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
+
+                    this.textContent = "机器狗站立";
+                    this.classList.remove("active");
+                    setStatus("发送指令：趴下模式", "warning");
+                    isDogStanding = false;
+                }
+            });
+        }
+
+        // ✅ H. 运动控制按钮 (回退到 Mode 3)
+        if (btnDogWalk) {
+            btnDogWalk.addEventListener('click', function() {
+                console.log("点击: 进入常规运动模式 (Mode 3)");
+                // 发送 Mode 3
+                sendMoveCommand(0.0, 0.0, 0.0, MODES.WALK, true);
+                setStatus("发送指令：常规运动模式", "success");
+            });
+        }
+
+        // --- B. 初始化 WebSocket 连接 (机器狗) ---
+        connectWebSocket();
+
+        // --- C. 面板切换逻辑 (升级版) ---
+        function switchMainPanel(target) {
+            console.log("切换面板模式至:", target);
+
+            // 1. 隐藏所有面板
+            if (gprPanel) { gprPanel.classList.add("hidden"); gprPanel.style.display = 'none'; }
+            if (robotPanel) { robotPanel.classList.add("hidden"); robotPanel.style.display = 'none'; }
+            if (armPanel) { armPanel.classList.add("hidden"); armPanel.style.display = 'none'; }
+            if (pathFaultPanel) { pathFaultPanel.classList.add("hidden"); pathFaultPanel.style.display = 'none'; } // ✅ 隐藏新面板
+
+            // 2. 显示目标面板
+            if (target === 'gpr' && gprPanel) {
+                gprPanel.classList.remove("hidden");
+                gprPanel.style.display = 'flex';
+                scrollToMain();
+            } else if (target === 'robot' && robotPanel) {
+                robotPanel.classList.remove("hidden");
+                robotPanel.style.display = 'flex';
+                scrollToMain();
+            } else if (target === 'arm' && armPanel) {
+                armPanel.classList.remove("hidden");
+                armPanel.style.display = 'flex';
+                scrollToMain();
+            } else if (target === 'pathFault' && pathFaultPanel) { // ✅ 新增：显示故障面板
+                pathFaultPanel.classList.remove("hidden");
+                pathFaultPanel.style.display = 'flex';
+                scrollToMain();
+            }
+        }
+
+        function scrollToMain() {
+            const mainArea = $("mainArea");
+            if (mainArea) mainArea.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        // --- D. 绑定底部导航按钮 ---
+        if (btn3D) btn3D.addEventListener("click", () => switchMainPanel('gpr'));
+        if (btnRobotNav) btnRobotNav.addEventListener("click", () => switchMainPanel('robot'));
+        // ✅ 绑定左侧系统栏“设备”按钮 -> 切换到机械臂
+        if (btnShowArm) {
+            btnShowArm.addEventListener("click", () => switchMainPanel('arm'));
+        }
+
+        if (btnPathFault) {
+            btnPathFault.addEventListener("click", () => switchMainPanel('pathFault'));
+        }
+
+        // --- E. 绑定 GPR 按钮 ---
+        if (btnStart) btnStart.addEventListener("click", startGprProcessing);
+
+        if (btnAnno) {
+            btnAnno.addEventListener("click", function () {
+                showAnnotation = !showAnnotation;
+                this.textContent = "显示标注: " + (showAnnotation ? "ON" : "OFF");
+                this.classList.toggle("active", showAnnotation);
+                if (segmentSelect && !segmentSelect.disabled) {
+                    const idx = parseInt(segmentSelect.value, 10);
+                    if (!isNaN(idx)) showSegment(idx);
+                }
+                annotation3DGroups.forEach(g => g.visible = showAnnotation);
+            });
+        }
+        if (segmentSelect) segmentSelect.disabled = true;
+
+        // --- F. 绑定机器人运动控制按钮 (长按连续发送) ---
+        // ✅ 修改：加入了侧边栏的 ID (btnSide...)
+        const motionBtnIds = [
+            // 主控制台按钮
+            'btnMoveForward', 'btnMoveBackward',
+            'btnTurnLeft', 'btnTurnRight',
+            'btnStopMove',
+            'btnStrafeLeft', 'btnStrafeRight',
+
+            // ✅ 新增：侧边栏按钮
+            'btnSideMoveForward', 'btnSideMoveBackward',
+            'btnSideTurnLeft', 'btnSideTurnRight',
+            'btnSideStop',
+            'btnSideStrafeLeft', 'btnSideStrafeRight'
+        ];
+
+        motionBtnIds.forEach(id => {
+            const btn = $(id);
+            if (btn) {
+                // 鼠标/手指按下 -> 开始 (启动定时器)
+                btn.addEventListener('mousedown', () => handleMotion(id, 'start'));
+                btn.addEventListener('touchstart', (e) => { e.preventDefault(); handleMotion(id, 'start'); }, { passive: false });
+
+                // 鼠标/手指松开或移出 -> 停止 (清除定时器)
+                btn.addEventListener('mouseup', () => handleMotion(id, 'stop'));
+                btn.addEventListener('mouseleave', () => handleMotion(id, 'stop'));
+                btn.addEventListener('touchend', (e) => { e.preventDefault(); handleMotion(id, 'stop'); });
+            }
+        });
+        // ✅ G. 绑定新增的模式切换按钮 (防重复终极版)
+        if (btnDogStand) {
+            // 使用 dataset 在 DOM 元素上存储状态，防止变量污染
+            // 0 = 趴下, 1 = 站立
+            btnDogStand.dataset.status = "0";
+
+            // ⚡️ 核心修改：使用 onclick 而不是 addEventListener
+            // 这样即使 JS 被加载两遍，第二次的也会覆盖第一次，保证只有一个事件生效
+            btnDogStand.onclick = function() {
+
+                // --- 1. 防止快速点击 (防抖 1秒) ---
+                const now = Date.now();
+                const lastTime = parseInt(this.dataset.lastClick || "0");
+                if (now - lastTime < 1000) {
+                    console.warn("⚠️ 点击太快，已拦截");
+                    return;
+                }
+                this.dataset.lastClick = now;
+
+                // --- 2. 获取当前状态 ---
+                const isStanding = this.dataset.status === "1";
+
+                if (!isStanding) {
+                    // === 当前是趴下 -> 切换为站立 ===
+                    console.log("🚀 [执行] 切换到: 站立 (Mode 1)");
+
+                    // 发送指令
+                    sendMoveCommand(0.0, 0.0, 0.0, MODES.STAND, true);
+
+                    // 更新 UI
+                    this.textContent = "机器狗趴下";
+                    this.classList.add("active");
+                    setStatus("发送指令：站立模式", "success");
+
+                    // 更新状态
+                    this.dataset.status = "1";
+
+                } else {
+                    // === 当前是站立 -> 切换为趴下 ===
+                    console.log("🚀 [执行] 切换到: 趴下 (Mode 4)");
+
+                    // 发送指令
+                    sendMoveCommand(0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
+
+                    // 更新 UI
+                    this.textContent = "机器狗站立";
+                    this.classList.remove("active");
+                    setStatus("发送指令：趴下模式", "warning");
+
+                    // 更新状态
+                    this.dataset.status = "0";
+                }
+            };
+        }
+
+        if (btnDogWalk) {
+            btnDogWalk.addEventListener('click', function() {
+                console.log("点击: 运动控制模式");
+                // 发送控制指令：Mode = 6
+                sendMoveCommand(0.0, 0.0, 0.0, 3.0, true); // 3.0 对应后端的 "常规模式"
+                setStatus("发送指令：运动控制模式", "success");
+            });
+        }
+        // ==========================================
+        // ✅ 新增：定时获取机械臂实时角度
+        // ==========================================
+
+        // 1. 确保端口正确 (你的 Python 代码是 5000)
+        // 如果你之前的 ARM_BACKEND_URL 定义在文件开头且是 8080，请修改它，或者在这里覆盖它
+        // ✅ 新代码 (正确：指向机械臂的 IP 10.21.31.200)
+        const ARM_API = "http://10.21.31.200:5000";
+        // 🔴 状态标志位：是否已记录过错误（防止日志重复打印）
+        let hasLoggedArmError = false;
+
+        function fetchArmAngles() {
+            // 1. 如果正在忙于发送控制指令（防止串口冲突），跳过本次读取，稍后重试
+            if (typeof isArmBusy !== 'undefined' && isArmBusy) {
+                setTimeout(fetchArmAngles, 100);
+                return;
+            }
+
+            // 2. 定义下一次请求的延迟时间 (默认 100ms = 10Hz)
+            let nextDelay = 100;
+
+            // 设置超时控制器 (500ms 超时)
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 500);
+
+            // 发起请求
+            fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal })
+                .then(res => {
+                    clearTimeout(timeoutId); // 清除超时
+                    if (!res.ok) {
+                        throw new Error("Network response was not ok");
+                    }
+                    return res.json();
+                })
+                .then(data => {
+                    // --- ✅ 连接成功逻辑 ---
+
+                    // 如果之前报过错，说明刚从断线中恢复
+                    if (hasLoggedArmError) {
+                        console.log("%c✅ 机械臂连接已恢复！切换回高速模式。", "color: green; font-weight: bold;");
+                        hasLoggedArmError = false; // 重置错误锁
+
+                        // 恢复界面亮度 (可选)
+                        const container = document.getElementById('armDataDisplay');
+                        if(container) container.style.opacity = "1";
+                    }
+
+                    // 更新界面数值
+                    if (Array.isArray(data) && data.length === 6) {
+                        for(let i=0; i<6; i++) {
+                            // 注意：你的HTML里ID是 disp_j1 ... disp_j6
+                            const el = document.getElementById('disp_j' + (i+1));
+                            if(el) {
+                                let val = data[i];
+                                // 视觉死区过滤：小于 0.5 度显示为 0.0，防止数字乱跳
+                                if (Math.abs(val) < 0.5) val = 0.0;
+                                el.textContent = val.toFixed(1);
+                            }
+                        }
+                    }
+                })
+                .catch(err => {
+                    clearTimeout(timeoutId);
+
+                    // --- ❌ 连接失败逻辑 ---
+
+                    // 只有当“之前没报过错”时，才打印警告，防止控制台黄字刷屏
+                    if (!hasLoggedArmError) {
+                        console.warn("⚠️ 机械臂未连接 (后端未启动?)，转为低速心跳模式 (2s/次) 以防刷屏。");
+                        hasLoggedArmError = true; // 上锁
+
+                        // 让界面变暗表示离线 (可选)
+                        const container = document.getElementById('armDataDisplay');
+                        if(container) container.style.opacity = "0.5";
+                    }
+
+                    // 🔥 关键：连接失败时，将下次请求推迟到 2000ms 后
+                    // 这能让浏览器的红色报错频率降低 20 倍！
+                    nextDelay = 2000;
+                })
+                .finally(() => {
+                    // 🔄 递归调用：无论成功失败，都通过 setTimeout 发起下一次请求
+                    setTimeout(fetchArmAngles, nextDelay);
+                });
+        }
+
+        // 🔥 启动第一次请求 (不要再用 setInterval 了！)
+        fetchArmAngles();
+    });
+
+    // ==========================================
+    // 3. WebSocket 与 机器人控制函数
+    // ==========================================
+
+    function connectWebSocket() {
+        console.log("正在尝试建立 WebSocket 连接 (机器狗)...");
+        if (typeof SockJS === 'undefined' || typeof Stomp === 'undefined') {
+            console.error("缺少 SockJS 或 Stomp 库");
+            updateConnectionUI(false);
+            return;
+        }
+
+        const socket = new SockJS('/ws');
+        stompClient = Stomp.over(socket);
+        stompClient.debug = null;
+
+        stompClient.connect({}, function (frame) {
+            console.log('%c✅ WebSocket 连接成功！', 'color: green; font-weight: bold;');
+            updateConnectionUI(true);
+
+            // ==================================================
+            // 🌟 新增：订阅管线仪数据 (关键修改在这里)
+            // ==================================================
+            stompClient.subscribe('/topic/pipeline', function (message) {
+                try {
+                    // 后端 template.convertAndSend 发送的是整数 (0, 1, 2)
+                    // message.body 也是字符串 "0", "1", "2"
+                    var signal = parseInt(message.body);
+
+                    // 如果解析失败，或者后端改发了 JSON，做个兼容
+                    if (isNaN(signal)) {
+                        var data = JSON.parse(message.body);
+                        signal = data.signal || data;
+                    }
+
+                    // 调用你在文件末尾定义的那个函数
+                    updatePipelineDisplay(signal);
+                    // ✅✅✅ [新增] 将信号存入全局变量，供 Three.js 读取
+                    window.g_pipelineSignal = signal;
+
+                    // (可选) 打印日志方便调试
+                    // console.log("收到管线信号:", signal);
+                } catch (e) {
+                    console.error("管线数据解析错误:", e);
+                }
+            });
+
+        }, function (error) {
+            console.error('WebSocket 连接失败:', error);
+            updateConnectionUI(false);
+        });
+    }
+
+    // ✅ 新增：专门用于更新左侧连接状态 UI 的函数
+    function updateConnectionUI(isConnected) {
+        const badge = $("robotConnectionBadge");
+        if (!badge) return;
+
+        if (isConnected) {
+            badge.textContent = "在线";
+            badge.className = "status-badge online"; // 切换为绿色样式
+        } else {
+            badge.textContent = "离线";
+            badge.className = "status-badge offline"; // 切换为红色样式
+        }
+    }
+
+    // 优化后的运动处理函数 (已集成滑条速度控制)
+    function handleMotion(btnId, action) {
+        // --- 停止逻辑 (最高优先级) ---
+        if (action === 'stop' || btnId === 'btnStopMove' || btnId === 'btnSideStop') {
+            // 1. 立即清除定时器
+            if (motionTimer) {
+                clearInterval(motionTimer);
+                motionTimer = null;
+            }
+            // 2. 立即发送停止指令
+            // ✅ 修复：第4个参数(mode/z) 必须是数字 0.0
+            sendMoveCommand(0.0, 0.0, 0.0, 0.0, false); // 第5个参数 false 代表不打印日志
+
+            // 20ms后再补一发，确保停止
+            setTimeout(() => {
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+            }, 20);
+            return;
+        }
+
+        // --- 开始逻辑 ---
+        if (motionTimer) return;
+
+        // ============================================================
+        // 🚀 核心修改：动态读取滑条数值
+        // ============================================================
+
+        // 1. 获取 DOM 元素 (防止页面未加载完报错，加个判断)
+        const elSpeedX = document.getElementById('manualSpeedX');
+        const elSpeedY = document.getElementById('manualSpeedY');
+
+        // 2. 解析数值 (如果获取不到，使用默认兜底值 0.5 和 0.3)
+        // 注意：input[type=range] 的 value 是字符串，需要 parseFloat 转换
+        const manualX = elSpeedX ? parseFloat(elSpeedX.value) : 0.5;
+        const manualY = elSpeedY ? parseFloat(elSpeedY.value) : 0.3;
+
+        // 3. 转向速度 (目前保持固定，如需滑条可按同样方式添加)
+        const manualW = 1.0;
+
+        // 4. 根据按钮分配速度
+        let v = 0.0;
+        let w = 0.0;
+        let y = 0.0;
+
+        switch (btnId) {
+            // --- 前进 ---
+            case 'btnMoveForward':
+            case 'btnSideMoveForward':
+                v = manualX; break;
+
+            // --- 后退 ---
+            case 'btnMoveBackward':
+            case 'btnSideMoveBackward':
+                v = -manualX; break;
+
+            // --- 左转 ---
+            case 'btnTurnLeft':
+            case 'btnSideTurnLeft':
+                w = manualW; break;
+
+            // --- 右转 ---
+            case 'btnTurnRight':
+            case 'btnSideTurnRight':
+                w = -manualW; break;
+
+            // --- 左横移 ---
+            case 'btnStrafeLeft':
+            case 'btnSideStrafeLeft':
+                y = manualY; break;
+
+            // --- 右横移 ---
+            case 'btnStrafeRight':
+            case 'btnSideStrafeRight':
+                y = -manualY; break;
+        }
+
+        // ============================================================
+
+        if (v !== 0 || w !== 0 || y !== 0) {
+            // 5. 立即发送第一帧
+            // 参数说明: v(前后), w(旋转), y(横移), mode(0.0=保持当前), showLog
+            sendMoveCommand(v, w, y, 0.0, true);
+
+            // 6. 开启心跳包 (长按连续发送)
+            motionTimer = setInterval(() => {
+                sendMoveCommand(v, w, y, 0.0, false);
+            }, 150);
+        }
+    }
+
+    // ✅ 修改后的发送函数：增加 mode (通过 linear.z 传递)
+    // 参数：v(前后), w(旋转), y(横移), mode(站立=1/运动=6), showLog
+    // ✅ 修改后的发送函数：增加了 UI 状态更新
+    function sendMoveCommand(v, w, y, mode = 0.0, showLog = true) {
+        if (stompClient && stompClient.connected) {
+            const payload = JSON.stringify({
+                'v': v,
+                'w': w,
+                'y': y || 0.0,
+                'z': mode || 0.0
+            });
+            stompClient.send("/app/move", {}, payload);
+
+            // ============================================
+            // 🌟 新增：实时更新左侧“运行模式”文字
+            // ============================================
+            const modeLabel = document.getElementById("currentModeLabel");
+            if (modeLabel && mode !== 0.0) {
+                let text = "未知";
+                switch (mode) {
+                    case 1.0: text = "站立 (锁定)"; break;
+                    case 3.0: text = "运动 (常规)"; break;
+                    case 4.0: text = "趴下 (休眠)"; break;
+                    case 6.0: text = "轮式/特殊"; break;
+                    default: text = "未知模式";
+                }
+                // 自动巡线是特殊的运动模式，我们在 toggle 按钮那里单独处理，这里先更新基础模式
+                modeLabel.textContent = text;
+
+                // 给文字换个颜色提醒
+                modeLabel.style.color = (mode === 3.0) ? "#00ff00" : "#eaf6ff";
+            }
+
+            if (showLog) {
+                if (mode !== 0) {
+                    console.log(`🚀 发送模式切换: Mode=${mode}`);
+                } else {
+                    console.log(`🚀 发送运动: v=${v}, w=${w}, y=${y}`);
+                }
+            }
+        } else {
+            if (showLog) console.warn("⚠️ WebSocket 未连接，无法发送指令");
+        }
+    }
+
+    // 调用后端接口
+    function startGprProcessing() {
+        const input = $("folderPathInput");
+        if (!input) return;
+
+        const folderPath = input.value.trim();
+        if (!folderPath) {
+            alert("请先输入服务器上的数据文件夹路径！");
+            return;
+        }
+
+        setStatus("正在处理，请稍候……", null);
+
+        fetch("/api/gpr/process?folderPath=" + encodeURIComponent(folderPath), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({})   // 如需自定义参数，可在这里传 GprConfig
+        })
+            .then(function (res) {
+                if (!res.ok) {
+                    throw new Error("后端返回错误状态：" + res.status);
+                }
+                return res.json();
+            })
+            .then(function (data) {
+                if (!data || !data.segments || !data.segments.length) {
+                    throw new Error("返回数据为空或格式不正确");
+                }
+                setStatus("处理完成。当前显示的是第 1 段 B 扫结果。", "success");
+                renderGprResults(data);
+            })
+            .catch(function (err) {
+                console.error(err);
+                setStatus("处理失败：" + err.message, "error");
+            });
+    }
+
+    // 渲染一次完整结果：填充下拉框 + 默认显示第 1 段 + 画 Z 字 3D
+    function renderGprResults(result) {
+        if (!result || !result.segments || !result.segments.length) {
+            throw new Error("返回数据中没有 segments");
+        }
+        gprResult = result;
+
+        // ✅ 数据加载成功后，显示标注按钮
+        const btnAnno = $("btnToggleAnnotation");
+        if (btnAnno) btnAnno.style.display = "inline-block";
+
+        const segmentSelect = $("segmentSelect");
+        if (segmentSelect) {
+            segmentSelect.innerHTML = "";
+            result.segments.forEach(function (seg, idx) {
+                const opt = document.createElement("option");
+                opt.value = String(idx);
+                const vStr = seg.vBest != null ? (" v*=" + seg.vBest.toFixed(4) + " m/ns") : "";
+                const name = seg.fileName || ("剖面" + (idx + 1));
+                opt.textContent = (idx + 1) + " - " + name + vStr;
+                segmentSelect.appendChild(opt);
+            });
+            segmentSelect.disabled = false;
+            segmentSelect.onchange = function () {
+                const index = parseInt(segmentSelect.value, 10);
+                if (!isNaN(index)) showSegment(index);
+            };
+            segmentSelect.value = "0";
+        }
+
+        showSegment(0);
+        render3DZigzagAll(result, true);
+    }
+
+    // 显示指定索引的剖面（2D）
+    function showSegment(index) {
+        if (!gprResult || !gprResult.segments) return;
+        if (index < 0 || index >= gprResult.segments.length) return;
+
+        const seg = gprResult.segments[index];
+
+        if (seg.rawData) {
+            render2DCanvas("raw2dCanvas", seg.rawData);
+        }
+        if (seg.migratedData) {
+            render2DCanvas("mig2dCanvas", seg.migratedData);
+        }
+
+        setStatus("处理完成。当前显示的是第 " + (index + 1) + " 段 B 扫结果。", "success");
+    }
+
+    // ====================== 2D 灰度图绘制 ======================
+
+    function render2DCanvas(canvasId, matrix) {
+        const canvas = $(canvasId);
+        if (!canvas || !matrix || !matrix.length || !matrix[0].length) return;
+
+        const rows = matrix.length;
+        const cols = matrix[0].length;
+        const maxCanvasWidth = 500;
+        const maxCanvasHeight = 500;
+
+        let scaleX = 1, scaleY = 1;
+        if (cols > maxCanvasWidth) scaleX = cols / maxCanvasWidth;
+        if (rows > maxCanvasHeight) scaleY = rows / maxCanvasHeight;
+
+        const stepX = Math.ceil(scaleX);
+        const stepY = Math.ceil(scaleY);
+        const w = Math.ceil(cols / stepX);
+        const h = Math.ceil(rows / stepY);
+
+        canvas.width = w;
+        canvas.height = h;
+
+        const ctx = canvas.getContext("2d");
+        const imgData = ctx.createImageData(w, h);
+
+        let min = Infinity, max = -Infinity;
+        for (let r = 0; r < rows; r += stepY) {
+            for (let c = 0; c < cols; c += stepX) {
+                const v = matrix[r][c];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+        if (max === min) max = min + 1e-9;
+
+        let idx = 0;
+        for (let y = 0, r = 0; r < rows; r += stepY, y++) {
+            for (let x = 0, c = 0; c < cols; c += stepX, x++) {
+                const v = matrix[r][c];
+                let norm = (v - min) / (max - min);
+                norm = Math.pow(norm, 0.7);
+                const gray = Math.max(0, Math.min(255, Math.round(norm * 255)));
+                imgData.data[idx++] = gray;
+                imgData.data[idx++] = gray;
+                imgData.data[idx++] = gray;
+                imgData.data[idx++] = 255;
+            }
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        // ✅ 绘制标注红圈 (仅针对偏移后剖面 mig2dCanvas)
+        if (canvasId === "mig2dCanvas" && showAnnotation) {
+            const blobs = detectBlobs(matrix);
+
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#ff0000"; // 红色
+            ctx.shadowColor = "red";
+            ctx.shadowBlur = 5;
+
+            blobs.forEach(blob => {
+                ctx.beginPath();
+                const cx = blob.col / stepX;
+                const cy = blob.row / stepY;
+                const r = (blob.radius + CONFIG.radiusPadding) / Math.max(stepX, stepY);
+
+                ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+                ctx.stroke();
+            });
+        }
+    }
+
+    // ====================== Z 字型三维拼接 ======================
+
+    // 渲染所有剖面，按 Z 字路径拼接到一个三维坐标系（带交互 + 轴）
+    function render3DZigzagAll(result, useMigrated) {
+        const container = $("threeContainer");
+        if (!container) return;
+
+        if (typeof THREE === "undefined") {
+            setStatus("three.js 未成功加载，无法显示三维视图。", "error");
+            console.error("THREE is not defined. 检查 three.min.js 是否正确引入。");
+            return;
+        }
+
+        const segments = result.segments || [];
+        if (!segments.length) return;
+
+        // 清空旧内容
+        container.innerHTML = "";
+        annotation3DGroups = []; // ✅ 清空旧的标注组
+
+        // 记录每个剖面的标注圆心和半径，用于后续用圆柱连接
+        const segmentAnnoCenters = [];
+        const allCenters = [];
+        let globalCenterId = 0;
+
+        // 1. 统计所有剖面的幅值范围（统一色标）
+        let vMin = Infinity;
+        let vMax = -Infinity;
+        segments.forEach(seg => {
+            const mat = useMigrated ? seg.migratedData : seg.rawData;
+            if (!mat) return;
+            const rows = mat.length;
+            const cols = mat[0].length;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const v = mat[r][c];
+                    if (v < vMin) vMin = v;
+                    if (v > vMax) vMax = v;
+                }
+            }
+        });
+        if (vMax === vMin) vMax = vMin + 1e-9;
+
+        // 2. three.js 基本场景（不使用任何灯光）
+        let width = container.clientWidth;
+        let height = container.clientHeight;
+        if (!width || !height) {
+            width = 800;
+            height = 500;
+            container.style.minWidth = "800px";
+            container.style.minHeight = "500px";
+        }
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xffffff);
+
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(width, height);
+        renderer.toneMapping = THREE.NoToneMapping;
+        container.appendChild(renderer.domElement);
+
+        // 所有剖面和路径统一放在 world 组里
+        const world = new THREE.Group();
+        scene.add(world);
+
+        // 3. 计算几何包围盒 + 最大深度（单位：m）
+        const bounds = {
+            minX: Infinity, maxX: -Infinity,
+            minY: Infinity, maxY: -Infinity,
+            minZ: Infinity, maxZ: -Infinity
+        };
+        let maxDepth = 0.0;  // 真实深度（正值，单位 m）
+
+        // 3.1 逐段构建 Z 字平面
+        segments.forEach((seg, segIndex) => {
+            const mat = useMigrated ? seg.migratedData : seg.rawData;
+            const geo = seg.geometry;
+            if (!mat || !geo) return;
+
+            // 记录该段最大深度
+            if (geo.zAxis && geo.zAxis.length > 0) {
+                const d = geo.zAxis[geo.zAxis.length - 1]; // 单位 m
+                if (d > maxDepth) maxDepth = d;
+            }
+
+            const mesh = buildSegmentMesh(mat, geo, vMin, vMax, bounds);
+            world.add(mesh);
+
+            // ✅ 3D 标注圆环 + 记录圆心和半径
+            if (useMigrated && seg.migratedData) {
+                const blobs = detectBlobs(seg.migratedData);
+                const annoGroup = new THREE.Group();
+
+                const phi = geo.phiRad || 0.0;
+                const startX = geo.startX || 0.0;
+                const startY = geo.startY || 0.0;
+                const cosPhi = Math.cos(phi);
+                const sinPhi = Math.sin(phi);
+
+                const rows = seg.migratedData.length;
+                const cols = seg.migratedData[0].length;
+
+                // 1. 获取或计算坐标轴数据
+                const zAxis = (geo.zAxis && geo.zAxis.length === rows)
+                    ? geo.zAxis
+                    : Array.from({ length: rows }, (_, i) => i * 0.02);
+
+                const uAxis = (geo.uAxis && geo.uAxis.length === cols)
+                    ? geo.uAxis
+                    : Array.from({ length: cols }, (_, i) => i * 0.02);
+
+                // 2. 计算比例尺 (关键步骤：计算 1 个像素代表多少米)
+                const widthInMeters = uAxis[cols - 1] - uAxis[0];
+                const scaleX = widthInMeters / cols;
+
+                const heightInMeters = zAxis[rows - 1] - zAxis[0];
+                const scaleY = heightInMeters / rows;
+
+                const metersPerPixel = (scaleX + scaleY) / 2 || 0.02;
+
+                // 当前剖面的标注列表
+                const centersThisSeg = [];
+
+                blobs.forEach(blob => {
+                    // --- A. 位置计算 ---
+                    const rIdx = Math.min(Math.max(0, Math.round(blob.row)), rows - 1);
+                    const depth = zAxis[rIdx];   // z 轴上的物理坐标 (m, down)
+
+                    const cIdx = Math.min(Math.max(0, Math.round(blob.col)), cols - 1);
+                    const uVal = uAxis[cIdx];
+
+                    const worldX = startX + uVal * cosPhi;
+                    const worldZ = startY + uVal * sinPhi; // 注意：这里在 addAxes 里被解释为 y(m)
+                    const worldY = -depth;                 // 深度向下为负（worldY）
+
+                    // --- B. 半径动态计算 ---
+                    const pixelRadius = blob.radius + CONFIG.radiusPadding;
+                    const ringRadius = (pixelRadius * metersPerPixel) * 0.6;
+                    const tubeThickness = 0.01;
+
+                    const geometry = new THREE.TorusGeometry(ringRadius, tubeThickness, 16, 32);
+                    const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                    const ring = new THREE.Mesh(geometry, material);
+
+                    // --- C. 姿态与定位 ---
+                    ring.position.set(worldX, worldY, worldZ);
+                    ring.rotation.y = -phi;
+
+                    annoGroup.add(ring);
+
+                    // 记录圆心和半径 + 在坐标轴上的投影
+                    const centerObj = {
+                        id: globalCenterId++,
+                        center: new THREE.Vector3(worldX, worldY, worldZ),
+                        radius: ringRadius,
+                        zCoord: depth,   // 对应 z 轴的坐标值 (m, down)
+                        yCoord: worldZ,  // 对应 y 轴的坐标值 (m)
+                        segIndex: segIndex
+                    };
+                    centersThisSeg.push(centerObj);
+                    allCenters[centerObj.id] = centerObj;
+                });
+
+                annoGroup.visible = showAnnotation;
+                world.add(annoGroup);
+                annotation3DGroups.push(annoGroup);
+
+                // 保存当前剖面的标注中心
+                segmentAnnoCenters.push(centersThisSeg);
+            }
+        });
+
+        // ================= 3.2 剖面之间的圆柱连接（按管道分组、不同颜色） =================
+        if (segmentAnnoCenters.length >= 2) {
+            const edges = [];
+
+            // 1) 构建“相邻剖面”的连接边
+            for (let i = 0; i < segmentAnnoCenters.length - 1; i++) {
+                const listA = segmentAnnoCenters[i];
+                const listB = segmentAnnoCenters[i + 1];
+
+                listA.forEach(a => {
+                    listB.forEach(b => {
+                        // “同一水平面”：z 轴投影差得小
+                        const zDiff = Math.abs(a.zCoord - b.zCoord);
+                        // “同一垂直面”：y 轴投影差得小
+                        const yDiff = Math.abs(a.yCoord - b.yCoord);
+
+                        if (zDiff <= LINK_CONFIG.maxZDiff &&
+                            yDiff <= LINK_CONFIG.maxYDiff) {
+
+                            const radius = (a.radius + b.radius) / 2;
+                            const cylinder = createHollowCylinderBetween(
+                                a.center,
+                                b.center,
+                                radius
+                            );
+                            if (cylinder) {
+                                edges.push({
+                                    aId: a.id,
+                                    bId: b.id,
+                                    mesh: cylinder
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+
+            // 2) 用并查集根据 edges 做“管道分组”（连通分量）
+            if (edges.length > 0 && allCenters.length > 0) {
+                const parent = new Array(allCenters.length);
+                for (let i = 0; i < allCenters.length; i++) parent[i] = i;
+
+                function find(x) {
+                    if (parent[x] !== x) parent[x] = find(parent[x]);
+                    return parent[x];
+                }
+
+                function union(x, y) {
+                    const fx = find(x);
+                    const fy = find(y);
+                    if (fx !== fy) parent[fy] = fx;
+                }
+
+                edges.forEach(e => union(e.aId, e.bId));
+
+                // 按根节点把边分组 -> 每组是一条管道
+                const pipelinesMap = new Map(); // root -> [meshes]
+                edges.forEach(e => {
+                    const root = find(e.aId);
+                    let arr = pipelinesMap.get(root);
+                    if (!arr) {
+                        arr = [];
+                        pipelinesMap.set(root, arr);
+                    }
+                    arr.push(e.mesh);
+                });
+
+                // 3) 给每条管道分配不同颜色，并单独建组
+                const connPipelinesGroup = new THREE.Group();
+                let pipelineIndex = 0;
+                const pipelineCount = pipelinesMap.size;
+
+                pipelinesMap.forEach(meshes => {
+                    const pipelineGroup = new THREE.Group();
+
+                    // 使用 HSL 均匀取色，颜色区分度比较高
+                    const color = new THREE.Color().setHSL(
+                        pipelineCount > 0 ? (pipelineIndex / pipelineCount) : 0,
+                        0.8,
+                        0.5
+                    );
+                    pipelineIndex++;
+
+                    meshes.forEach(mesh => {
+                        if (mesh.material && mesh.material.color) {
+                            mesh.material.color.copy(color);
+                        }
+                        pipelineGroup.add(mesh);
+                    });
+
+                    connPipelinesGroup.add(pipelineGroup);
+                });
+
+                connPipelinesGroup.visible = showAnnotation;
+                world.add(connPipelinesGroup);
+                annotation3DGroups.push(connPipelinesGroup);
+            }
+        }
+
+        // 3.3 路径折线（放在底部）
+        if (Array.isArray(result.pathX) && Array.isArray(result.pathY) &&
+            result.pathX.length === result.pathY.length) {
+
+            const n = result.pathX.length;
+            const points = [];
+            for (let i = 0; i < n; i++) {
+                const x = result.pathX[i];  // x 方向（m）
+                const z = result.pathY[i];  // 横向（m）
+                const y = -maxDepth;        // 底部（最大深度处）
+                points.push(new THREE.Vector3(x, y, z));
+            }
+            const pathGeom = new THREE.BufferGeometry().setFromPoints(points);
+            const pathMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            world.add(new THREE.Line(pathGeom, pathMat));
+        }
+
+        // 3.4 画三维坐标轴（x(m), y(m), z(m,down)）
+        if (maxDepth > 0) {
+            addAxes(scene, bounds, maxDepth);
+        }
+
+        // 4. 相机围绕“数据中心”绕圈观察
+        const centerX = (bounds.minX + bounds.maxX) / 2;
+        const centerY = (bounds.minY + bounds.maxY) / 2;
+        const centerZ = (bounds.minZ + bounds.maxZ) / 2;
+        const center = new THREE.Vector3(centerX, centerY, centerZ);
+
+        const spanX = bounds.maxX - bounds.minX;
+        const spanZ = bounds.maxZ - bounds.minZ;
+        const spanY = bounds.maxY - bounds.minY;
+        const span = Math.max(spanX, spanZ, spanY) || 1.0;
+
+        let radius = span * 2.0;
+        let theta = Math.PI / 4; // 绕 Y 轴
+        let phi = Math.PI / 4;   // 仰角
+
+        function updateCamera() {
+            const x = center.x + radius * Math.cos(phi) * Math.cos(theta);
+            const y = center.y + radius * Math.sin(phi);
+            const z = center.z + radius * Math.cos(phi) * Math.sin(theta);
+            camera.position.set(x, y, z);
+            camera.lookAt(center);
+        }
+        updateCamera();
+
+        // ========== 交互：左键旋转，中键平移，滚轮缩放 ==========
+
+        const dom = renderer.domElement;
+        let isRotating = false;
+        let isPanning = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        dom.addEventListener("mousedown", e => {
+            if (e.button === 0) {           // 左键旋转
+                isRotating = true;
+                isPanning = false;
+            } else if (e.button === 1) {    // 中键平移
+                isPanning = true;
+                isRotating = false;
+            } else {
+                return;
+            }
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+
+        window.addEventListener("mouseup", () => {
+            isRotating = false;
+            isPanning = false;
+        });
+
+        dom.addEventListener("contextmenu", e => e.preventDefault());
+
+        dom.addEventListener("mousemove", e => {
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+
+            if (isRotating) {
+                theta += dx * 0.005;
+                phi += dy * 0.005;
+                const eps = 0.1;
+                phi = Math.max(eps, Math.min(Math.PI - eps, phi));
+                updateCamera();
+            } else if (isPanning) {
+                const panSpeed = span * 0.002;
+                const dir = new THREE.Vector3();
+                camera.getWorldDirection(dir);
+                const up = new THREE.Vector3(0, 1, 0);
+                const right = new THREE.Vector3().crossVectors(dir, up).normalize().negate();
+                const camUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+
+                center.add(right.multiplyScalar(dx * panSpeed));
+                center.add(camUp.multiplyScalar(-dy * panSpeed));
+                updateCamera();
+            }
+
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+
+        dom.addEventListener("wheel", e => {
+            e.preventDefault();
+            const factor = e.deltaY > 0 ? 1.1 : 0.9;
+            radius *= factor;
+            radius = Math.max(span * 0.5, Math.min(span * 5.0, radius));
+            updateCamera();
+        });
+
+        // ========== 响应窗口大小变化 (Resize) ==========
+        function onWindowResize() {
+            if (!container) return;
+
+            const newWidth = container.clientWidth;
+            const newHeight = container.clientHeight;
+
+            camera.aspect = newWidth / newHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(newWidth, newHeight);
+        }
+
+        window.addEventListener('resize', onWindowResize);
+
+        const resizeObserver = new ResizeObserver(() => {
+            onWindowResize();
+        });
+        resizeObserver.observe(container);
+
+        // ========== 动画循环 ==========
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+    }
+
+    // 在两点之间生成一个空心圆柱体（沿两点连线方向）
+    // p1, p2: THREE.Vector3
+    // radius: 圆柱半径
+    function createHollowCylinderBetween(p1, p2, radius) {
+        const dir = new THREE.Vector3().subVectors(p2, p1);
+        const length = dir.length();
+        if (length === 0) return null;
+
+        const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+
+        // CylinderGeometry 默认沿 Y 轴（高度方向）拉伸
+        const geometry = new THREE.CylinderGeometry(
+            radius,      // top radius
+            radius,      // bottom radius
+            length,      // height
+            12,          // radial segments
+            1,           // height segments
+            true         // openEnded = true -> 空心（没有上下两个盖子）
+        );
+
+        const material = new THREE.MeshBasicMaterial({
+            color: 0xff0000
+        });
+
+        const mesh = new THREE.Mesh(geometry, material);
+
+        // 1. 放到中点
+        mesh.position.copy(mid);
+
+        // 2. 旋转到对准 p1 -> p2 的方向
+        const axis = new THREE.Vector3(0, 1, 0); // Cylinder 默认朝向
+        const dirNorm = dir.clone().normalize();
+        const quaternion = new THREE.Quaternion().setFromUnitVectors(axis, dirNorm);
+        mesh.quaternion.copy(quaternion);
+
+        return mesh;
+    }
+
+    // 为单个剖面构建一个三维网格平面，并根据几何参数放到正确位置
+    function buildSegmentMesh(matrix, geometry, vMin, vMax, bounds) {
+        const rows = matrix.length;
+        const cols = matrix[0].length;
+
+        const uAxis = (geometry.uAxis && geometry.uAxis.length === cols)
+            ? geometry.uAxis
+            : Array.from({ length: cols }, (_, i) => i);
+        const zAxis = (geometry.zAxis && geometry.zAxis.length === rows)
+            ? geometry.zAxis
+            : Array.from({ length: rows }, (_, i) => i);
+
+        const phi = geometry.phiRad || 0.0;
+        const startX = geometry.startX || 0.0;
+        const startY = geometry.startY || 0.0;
+
+        const cosPhi = Math.cos(phi);
+        const sinPhi = Math.sin(phi);
+
+        const vertexCount = rows * cols;
+        const positions = new Float32Array(vertexCount * 3);
+        const colors = new Float32Array(vertexCount * 3);
+
+        let idxV = 0;
+        let idxC = 0;
+        for (let r = 0; r < rows; r++) {
+            const depth = zAxis[r];      // >=0
+            const worldY = -depth;       // 深度向下为负
+
+            for (let c = 0; c < cols; c++) {
+                const u = uAxis[c];
+
+                // 沿着 Z 字路径的水平位置
+                const xHoriz = startX + u * cosPhi;
+                const yHoriz = startY + u * sinPhi;
+
+                const worldX = xHoriz;
+                const worldZ = yHoriz;
+
+                positions[idxV++] = worldX;
+                positions[idxV++] = worldY;
+                positions[idxV++] = worldZ;
+
+                // 更新整体包围盒
+                if (worldX < bounds.minX) bounds.minX = worldX;
+                if (worldX > bounds.maxX) bounds.maxX = worldX;
+                if (worldY < bounds.minY) bounds.minY = worldY;
+                if (worldY > bounds.maxY) bounds.maxY = worldY;
+                if (worldZ < bounds.minZ) bounds.minZ = worldZ;
+                if (worldZ > bounds.maxZ) bounds.maxZ = worldZ;
+
+                // 顶点灰度颜色（和 2D 剖面保持一致的风格）
+                const v = matrix[r][c];
+
+                let norm = (v - vMin) / (vMax - vMin); // [0,1]
+                norm = Math.max(0, Math.min(1, norm));
+                norm = Math.pow(norm, 1.2);
+
+                const gray = norm;
+
+                colors[idxC++] = gray;
+                colors[idxC++] = gray;
+                colors[idxC++] = gray;
+            }
+        }
+
+        // 每个网格单元两个三角形
+        const cellCount = (rows - 1) * (cols - 1);
+        const indices = new Uint32Array(cellCount * 6);
+        let idxI = 0;
+        for (let r = 0; r < rows - 1; r++) {
+            for (let c = 0; c < cols - 1; c++) {
+                const a = r * cols + c;
+                const b = r * cols + (c + 1);
+                const c2 = (r + 1) * cols + c;
+                const d = (r + 1) * cols + (c + 1);
+
+                // 三角形1: a, c2, b
+                indices[idxI++] = a;
+                indices[idxI++] = c2;
+                indices[idxI++] = b;
+
+                // 三角形2: b, c2, d
+                indices[idxI++] = b;
+                indices[idxI++] = c2;
+                indices[idxI++] = d;
+            }
+        }
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        geom.setIndex(new THREE.BufferAttribute(indices, 1));
+
+        // MeshBasicMaterial，不受光照影响，正反两面一样亮
+        const material = new THREE.MeshBasicMaterial({
+            vertexColors: true,
+            side: THREE.DoubleSide,
+            fog: false,
+            toneMapped: false
+        });
+
+        const mesh = new THREE.Mesh(geom, material);
+        console.log("GPR mesh material type =", mesh.material.type);
+        return mesh;
+    }
+
+    // 在场景中添加一个三维坐标系：
+    // x (m)   : 沿电缆方向
+    // y (m)   : 横向偏移
+    // z (m,down) : 深度，向下为正（从 0 到 maxDepth）
+    function addAxes(scene, bounds, maxDepth) {
+        if (!isFinite(maxDepth) || maxDepth <= 0) return;
+
+        const axisGroup = new THREE.Group();
+        scene.add(axisGroup);
+
+        const xLen = bounds.maxX - bounds.minX;   // 沿电缆方向长度（m）
+        const yLen = bounds.maxZ - bounds.minZ;   // 横向宽度（m）
+        const zLen = maxDepth;                    // 最大深度（m）
+
+        const span = Math.max(xLen, yLen, zLen) || 1.0;
+        const tickSize = span * 0.03;
+        const labelSize = span * 0.06;
+        const nTicks = 5;
+
+        // 顶部原点（深度 0）
+        const originTop = new THREE.Vector3(bounds.minX, 0, bounds.minZ);
+        // 底部原点（最大深度）
+        const originBottom = new THREE.Vector3(bounds.minX, -zLen, bounds.minZ);
+
+        function axisLine(start, end) {
+            const geom = new THREE.BufferGeometry().setFromPoints([start, end]);
+            const mat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            return new THREE.Line(geom, mat);
+        }
+
+        // ================= Z 轴：深度（0 -> maxDepth，向下为正）=================
+        const zEnd = originBottom.clone();
+        axisGroup.add(axisLine(originTop, zEnd));
+
+        for (let i = 0; i <= nTicks; i++) {
+            const d = (zLen / nTicks) * i; // 深度值
+            const pos = originTop.clone().add(new THREE.Vector3(0, -d, 0));
+
+            const tickStart = pos.clone().add(new THREE.Vector3(-tickSize * 0.5, 0, 0));
+            const tickEnd = pos.clone().add(new THREE.Vector3(tickSize * 0.5, 0, 0));
+            axisGroup.add(axisLine(tickStart, tickEnd));
+
+            const label = makeTextSprite(d.toFixed(1));
+            label.scale.set(labelSize, labelSize, 1);
+            label.position.copy(pos).add(new THREE.Vector3(0, 0, -tickSize * 2.0));
+            axisGroup.add(label);
+        }
+
+        const zLabel = makeTextSprite("z (m, down)");
+        zLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
+        zLabel.position.copy(zEnd).add(new THREE.Vector3(0, 0, -tickSize * 3.0));
+        axisGroup.add(zLabel);
+
+        // ================= Y 轴：横向偏移，从 Z 轴终点（底部）开始 =================
+        const yEnd = originBottom.clone().add(new THREE.Vector3(0, 0, yLen));
+        axisGroup.add(axisLine(originBottom, yEnd));
+
+        for (let i = 0; i <= nTicks; i++) {
+            const t = (yLen / nTicks) * i;
+            const val = bounds.minZ + t;  // 实际偏移（m）
+            const pos = originBottom.clone().add(new THREE.Vector3(0, 0, t));
+
+            const tickStart = pos.clone().add(new THREE.Vector3(-tickSize * 0.5, 0, 0));
+            const tickEnd = pos.clone().add(new THREE.Vector3(tickSize * 0.5, 0, 0));
+            axisGroup.add(axisLine(tickStart, tickEnd));
+
+            const label = makeTextSprite(val.toFixed(1));
+            label.scale.set(labelSize, labelSize, 1);
+            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
+            axisGroup.add(label);
+        }
+
+        const yLabel = makeTextSprite("y (m)");
+        yLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
+        yLabel.position.copy(yEnd).add(new THREE.Vector3(0, -tickSize * 2.0, labelSize * 0.8));
+        axisGroup.add(yLabel);
+
+        // ================= X 轴：以 “Y 轴终点” 作为起点 =================
+        const originX = yEnd.clone();  // ★ 这里：X 轴起点 = Y 轴终点
+        const xEnd = originX.clone().add(new THREE.Vector3(xLen, 0, 0));
+        axisGroup.add(axisLine(originX, xEnd));
+
+        for (let i = 0; i <= nTicks; i++) {
+            const t = (xLen / nTicks) * i;
+            const pos = originX.clone().add(new THREE.Vector3(t, 0, 0));
+
+            const tickStart = pos.clone().add(new THREE.Vector3(0, 0, -tickSize * 0.5));
+            const tickEnd = pos.clone().add(new THREE.Vector3(0, 0, tickSize * 0.5));
+            axisGroup.add(axisLine(tickStart, tickEnd));
+
+            const label = makeTextSprite(t.toFixed(1));
+            label.scale.set(labelSize, labelSize, 1);
+            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
+            axisGroup.add(label);
+        }
+
+        const xLabel = makeTextSprite("x (m)");
+        xLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
+        xLabel.position.copy(xEnd).add(new THREE.Vector3(labelSize * 0.8, -tickSize * 2.0, 0));
+        axisGroup.add(xLabel);
+    }
+
+    // 用 Canvas 生成一个简单的文字 Sprite
+    function makeTextSprite(text) {
+        const canvas = document.createElement("canvas");
+        const size = 256;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+
+        ctx.clearRect(0, 0, size, size);
+        ctx.fillStyle = "rgba(255,255,255,0)"; // 透明背景
+        ctx.fillRect(0, 0, size, size);
+        ctx.font = "72px Arial";
+        ctx.fillStyle = "#000000";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, size / 2, size / 2);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+
+        const material = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true
+        });
+
+        const sprite = new THREE.Sprite(material);
+        return sprite;
+    }
+
+    // ==========================================
+    // 5. ✅ 机械臂控制函数 (已适配 Java Spring Boot)
+    // ==========================================
+
+    // 🔴 全局状态：记录当前6个关节的角度 (初始化为0度)
+    // 因为 Java 接口每次都需要发送所有关节的绝对位置
+    var currentAngles = [0, 0, 0, 0, 0, 0];
+
+    // 辅助函数：限制角度范围 (防止撞机)
+    function clampAngle(angle) {
+        // 这里的范围 -170 到 170 是 myCobot 的物理极限参考
+        return Math.max(-170, Math.min(170, angle));
+    }
+
+    // 5.1 末端坐标控制 (XYZ)
+    // 注意：目前的 Java 后端脚本只接受 6 个关节角度。
+    // 如果要支持 XYZ，需要在 Python 脚本中实现逆运动学 (IK)。
+    window.controlArm = function(x, y, z) {
+        console.warn("⚠️ 后端暂仅支持关节角度控制，XYZ 控制需集成逆运动学。");
+        alert("XYZ 控制暂时不可用，请使用下方的关节控制面板。");
+
+        // 如果未来实现了 IK，调用方式大概如下：
+        // fetch(`${ARM_BACKEND_URL}/arm/move_ik?x=${x}&y=${y}&z=${z}...`)
+    };
+
+    // 5.2 关节控制 (点击按钮步进)
+    // index: 0-5 (对应 J1-J6), direction: 1 (正向) 或 -1 (反向)
+    window.controlJoint = function(index, direction) {
+        // 1. 定义步长 (每次点击转动多少度)
+        const step = 5;
+
+        // 2. 更新本地记录的角度状态
+        let newAngle = currentAngles[index] + (direction > 0 ? step : -step);
+
+        // 限制角度范围
+        newAngle = clampAngle(newAngle);
+
+        // 更新全局状态
+        currentAngles[index] = newAngle;
+
+        const jointName = "J" + (index + 1);
+        console.log(`🚀 准备发送指令: ${jointName} -> ${newAngle}° (当前全状态: ${currentAngles})`);
+
+        // 3. 拼接 URL 参数
+        // 目标格式: /arm/move?j1=0&j2=0&...&speed=50
+        // 使用 map 和 join 快速生成查询字符串
+        const queryParams = currentAngles.map((angle, i) => `j${i+1}=${angle}`).join("&");
+        const url = `${ARM_BACKEND_URL}/arm/move?${queryParams}&speed=50`;
+
+        // 4. 发送 GET 请求
+        fetch(url, {
+            method: "GET" // 对应 Java Controller 的 @GetMapping
+        })
+            .then(res => res.text()) // Java 返回的是纯字符串 (String)
+            .then(data => {
+                // 只要后端返回的内容包含 "success" 或 "成功" 即视为正常
+                // ✅ 加上对 "OK" 的判断
+                if (data.includes("success") || data.includes("成功") || data.includes("指令发送成功") || data.includes("OK")) {
+                    console.log(`✅ ${jointName} 移动成功:`, data);
+                } else {
+                    console.error(`❌ 移动可能失败: ${data}`);
+                }
+            })
+            .catch(err => {
+                console.error("⚠️ Java 后端连接失败 (请检查 SpringBoot 是否运行在 8080 端口)", err);
+            })
+            .finally(() => {
+            // ✅ 关键新增：无论成功失败，请求结束了，解除忙碌状态
+            isArmBusy = false;
+            });
+    };
+    // ==========================================
+// 5.3 ✅ 一键测试序列 (添加到 controlJoint 函数下面)
+// ==========================================
+
+    window.testArmSequence = function() {
+        console.log("🧪 开始机械臂一键测试...");
+
+        // 1. 定义动作 A：所有关节去 20 度
+        const target20 = [20, 20, 20, 20, 20, 20];
+        const speed = 50;
+
+        // 更新全局状态 (很重要！否则下次点击单关节控制时位置会乱)
+        if (typeof currentAngles !== 'undefined') {
+            currentAngles = [...target20];
+        }
+
+        // 拼接 URL 并发送第一波指令
+        // URL: /arm/move?j1=20&j2=20...&speed=50
+        const query20 = target20.map((a, i) => `j${i+1}=${a}`).join("&");
+        const url20 = `${ARM_BACKEND_URL}/arm/move?${query20}&speed=${speed}`;
+
+        console.log("🚀 动作1: 前往全 20 度");
+        fetch(url20).then(res => res.text()).then(msg => console.log("反馈:", msg));
+
+        // 2. 延时 1000 毫秒 (1秒) 后执行动作 B：归零
+        // 给机械臂足够的时间运动到位
+        setTimeout(() => {
+            console.log("🔄 动作2: 1秒已到，执行自动归零");
+
+            const target0 = [0, 0, 0, 0, 0, 0];
+
+            // 再次更新全局状态
+            if (typeof currentAngles !== 'undefined') {
+                currentAngles = [...target0];
+            }
+
+            const query0 = target0.map((a, i) => `j${i+1}=${a}`).join("&");
+            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+
+            fetch(url0).then(res => res.text()).then(msg => console.log("归零反馈:", msg));
+
+            // 简单的弹窗提示（可选）
+            // alert("测试序列完成！");
+        }, 1000);
+    };
+    // 全局变量，记录状态
+    let isStopping = false; // 是否正在停止中
+    // ==========================================
+// 5.4 ✅ 终极版：状态锁控制 (State Machine)
+// ==========================================
+
+// 🔴 核心变量：记录机械臂是否正在运动
+// 只有当它是 true 时，我们才允许发 stop
+    let isJogging = false;
+
+    window.startArmJog = function(index, direction, event) {
+        // 1. 阻止浏览器默认行为 (防止拖拽按钮、选中文字)
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+
+        // 2. 如果已经在运动中，防止重复发送 Start (屏蔽微小抖动)
+        if (isJogging) return;
+
+        // 3. 立即上锁
+        isJogging = true;
+
+        console.log(`🚀 [前端] 开始运动: J${index+1} 方向 ${direction}`);
+
+        // 4. 发送 Start 请求
+        const url = `${ARM_BACKEND_URL}/arm/jog?index=${index}&direction=${direction}`;
+        fetch(url).catch(err => {
+            console.error("Start 失败:", err);
+            // 如果发送失败，必须把锁打开，否则用户没法再触发了
+            isJogging = false;
+        });
+    };
+
+    window.stopArmJog = function() {
+        // 1. 🔴 核心判断：如果当前根本没在运动，直接无视！
+        // 这行代码能过滤掉 99% 的重复 Stop 指令 (比如同时触发了 mouseup 和 mouseleave)
+        if (!isJogging) return;
+
+        // 2. 立即标记为“已停止”
+        // 这样后续的第2、第3个重复事件进来时，会在第一步就被拦住
+        isJogging = false;
+
+        console.log("🛑 [前端] 触发停止");
+
+        // 3. 发送 Stop 请求
+        const url = `${ARM_BACKEND_URL}/arm/stop`;
+        fetch(url).catch(err => console.error("Stop 失败:", err));
+    };
+
+// 封装一个安全的发送函数，防止请求堆积
+    function safeControlJoint(index, direction) {
+        // 如果上一次请求还在路上，这次就先跳过，防止阻塞串口
+        if (isArmBusy) {
+            console.log("⏳ 机械臂忙，跳过此帧...");
+            return;
+        }
+
+        isArmBusy = true; // 标记忙碌
+
+        // 调用你原本的 controlJoint 逻辑
+        // 注意：这里我们需要改造一下原本的 controlJoint，让它返回 Promise
+        // 或者我们直接在这里手动调用 fetch，为了复用，建议我们修改 controlJoint
+
+        // 这里我们直接调用原函数，但在原函数里处理 isArmBusy 的复位
+        window.controlJoint(index, direction);
+    }
+// ==========================================
+    // 6. 信号波形显示 (固定IP 10.21.31.104 + 滚动数值显示)
+    // ==========================================
+    (function initSignalChart() {
+        const canvas = document.getElementById("signalCanvas");
+        const statusDiv = document.getElementById("signalStatus");
+        if (!canvas) return;
+
+        const ctx = canvas.getContext("2d");
+
+        // 存储波形数据
+        let channel1Data = []; // 磁信号
+        let channel2Data = []; // 声信号
+        const Y_MAX = 4096;
+
+        // ✅ 新增：历史数值缓存队列 (初始化为 [0, 0, 0])
+        // 格式：[历史2, 历史1, 实时]
+        let magHistory = [0, 0, 0];
+        let sndHistory = [0, 0, 0];
+
+        // --- 1. 自动调整画布大小 ---
+        function resizeCanvas() {
+            const parent = canvas.parentElement;
+            if (parent && parent.clientWidth > 0 && parent.clientHeight > 0) {
+                canvas.width = parent.clientWidth;
+                canvas.height = parent.clientHeight;
+                requestAnimationFrame(drawSignal);
+            }
+        }
+
+        const resizeObserver = new ResizeObserver(() => {
+            resizeCanvas();
+        });
+        if (canvas.parentElement) {
+            resizeObserver.observe(canvas.parentElement);
+        }
+        setTimeout(resizeCanvas, 500);
+
+        // --- 2. 绘图主逻辑 ---
+        function drawSignal() {
+            const w = canvas.width;
+            const h = canvas.height;
+            if (h === 0 || w === 0) return;
+
+            const halfH = h / 2;
+
+            // 清空背景
+            ctx.fillStyle = "#000000";
+            ctx.fillRect(0, 0, w, h);
+
+            // 绘制中间分界线
+            ctx.strokeStyle = "#444";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, halfH);
+            ctx.lineTo(w, halfH);
+            ctx.stroke();
+
+            // 绘制 Ch1 (磁信号)
+            if (channel1Data && channel1Data.length > 0) {
+                drawChannel(channel1Data, 0, halfH, "#00ccff");
+            }
+
+            // 绘制 Ch2 (声信号)
+            if (channel2Data && channel2Data.length > 0) {
+                drawChannel(channel2Data, halfH, halfH, "#ff3333");
+            }
+
+            // 更新左侧数值显示 (带历史滚动)
+            updateSignalValues();
+        }
+
+        // ✅ 终极版：双向突变 + 自适应动态阈值检测
+        function updateSignalValues() {
+            let effectiveSignal = 0; // 当前这一帧的信号强度特征值
+            let isFault = false;     // 是否判定为故障
+
+            // --- A. 计算当前帧的信号特征 (兼容上下突变) ---
+            if (channel1Data.length > 0) {
+                const currentMax = Math.max(...channel1Data);
+                const currentMin = Math.min(...channel1Data);
+
+                // 计算这一帧内部的平均值 (基准线)
+                const sum = channel1Data.reduce((a, b) => a + b, 0);
+                const frameAvg = sum / channel1Data.length;
+
+                // 计算向上和向下的偏离幅度
+                const devUp = currentMax - frameAvg;
+                const devDown = frameAvg - currentMin;
+
+                // 取最大的偏离幅度作为特征值
+                // 这样无论是向下凹陷还是向上凸起，特征值都会变大
+                const maxDeviation = Math.max(devUp, devDown);
+
+                // 我们记录的特征值 = 基准线 + 最大偏离幅度
+                effectiveSignal = frameAvg + maxDeviation;
+            }
+
+            // --- B. 统计学动态检测算法 (Z-Score) ---
+            if (effectiveSignal > 0) {
+                // 1. 先把当前数据加入历史队列
+                signalBaselineQueue.push(effectiveSignal);
+                if (signalBaselineQueue.length > HISTORY_SIZE) {
+                    signalBaselineQueue.shift(); // 移除最老的数据
+                }
+
+                // 2. 只有当历史数据攒够了(比如攒够20帧)，才开始检测，避免刚启动误报
+                if (signalBaselineQueue.length > 20) {
+                    // 计算历史平均值 (Mean)
+                    const historySum = signalBaselineQueue.reduce((a, b) => a + b, 0);
+                    const historyMean = historySum / signalBaselineQueue.length;
+
+                    // 计算标准差 (Standard Deviation) - 衡量最近的波动有多大
+                    const variance = signalBaselineQueue.reduce((sum, val) => {
+                        return sum + Math.pow(val - historyMean, 2);
+                    }, 0) / signalBaselineQueue.length;
+                    const stdDev = Math.sqrt(variance);
+
+                    // ⚠️ 核心判定公式：
+                    // 当前值 > 历史平均值 + (灵敏度 * 波动范围)
+                    // 这里的 Math.max(stdDev, 10) 是为了防止信号纯平直线时标准差为0导致误判
+                    // 使用变量 sensitivityFactor
+                    const dynamicThreshold = historyMean + (sensitivityFactor * Math.max(stdDev, 10));
+
+                    // 如果当前信号强度 超过了 动态阈值，判定为突变
+                    if (effectiveSignal > dynamicThreshold) {
+                        isFault = true;
+                        console.log(`⚡ 检测到突变! 当前:${effectiveSignal.toFixed(0)} > 阈值:${dynamicThreshold.toFixed(0)}`);
+                    }
+                }
+            }
+
+            // --- C. 将结果暴露给全局，供 3D 绘图 ---
+            // 这里做个特殊处理：如果判定为故障，传回真实强度；否则传0或低值，
+            // 这样 updateVis 那边只需要判断 g_realtimeMag > 0 即可 (或者你保留原来的阈值逻辑也可以)
+
+            // 为了配合 updateVis，我们直接把判定结果存入一个全局标记
+            window.g_isFaultDetected = isFault;
+            window.g_realtimeMag = effectiveSignal; // 仅供UI显示数值用
+
+            // --- D. 更新 UI (左侧信息栏) ---
+            // 磁信号历史滚动
+            // 1. 上方：实时电磁信号 (保持原样)
+            magHistory.push(Math.floor(effectiveSignal));
+            if (magHistory.length > 3) magHistory.shift();
+            const elMag = document.getElementById('magSignalVal');
+            if (elMag) {
+                elMag.textContent = magHistory.join('   ');
+                elMag.style.color = isFault ? "#ff4444" : "#00e5ff";
+            }
+        }
+
+        /**
+         * 绘制单个通道通用函数
+         */
+        function drawChannel(data, topY, height, color) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+
+            const len = data.length;
+            const w = canvas.width;
+
+            for (let i = 0; i < len; i++) {
+                const x = (i / len) * w;
+                let val = data[i];
+
+                // 简单的钳位
+                if (val > Y_MAX) val = Y_MAX;
+                if (val < 0) val = 0;
+
+                const normalized = val / Y_MAX;
+                const y = topY + (height - (normalized * height));
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // 绘制文字标签
+            ctx.fillStyle = color;
+            ctx.font = "12px monospace";
+            const label = topY === 0 ? `电磁信号` : `声信号`;
+            ctx.fillText(label, 5, topY + 15);
+        }
+
+        // --- 3. WebSocket 连接 ---
+        // 按照要求：使用硬编码的 IP 地址
+        const wsUrl = "ws://10.21.31.104:8001/ws/signal";
+
+        console.log(`📡 正在连接信号服务: ${wsUrl}`);
+        const ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log("📡 双通道信号服务已连接");
+            if(statusDiv) {
+                statusDiv.textContent = "● DUAL CH LIVE";
+                statusDiv.style.color = "#0f0";
+            }
+            resizeCanvas();
+        };
+
+        // ⚠️ 关键修正：这里必须处理信号数据，而不是 SLAM 数据
+        ws.onmessage = (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+
+                // 修正判定条件：处理 mixed_signal 或 signal 类型
+                if (msg.type === "mixed_signal" || msg.type === "signal") {
+                    // 1. 提取数据
+                    if (msg.mag_data) channel1Data = msg.mag_data;
+                    else if (msg.ch1) channel1Data = msg.ch1;
+
+                    if (msg.snd_data) channel2Data = msg.snd_data;
+                    else if (msg.ch2) channel2Data = msg.ch2;
+
+                    // 2. 触发重绘 (重绘时会调用 updateSignalValues 更新历史数值)
+                    requestAnimationFrame(drawSignal);
+                }
+            } catch (e) {
+                console.error("❌ 数据解析错误", e);
+            }
+        };
+
+        ws.onerror = (err) => {
+            console.error("❌ WebSocket 错误:", err);
+            if(statusDiv) {
+                statusDiv.textContent = "● ERROR";
+                statusDiv.style.color = "#f00";
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("⚠️ WebSocket 连接断开");
+            if(statusDiv) {
+                statusDiv.textContent = "● OFFLINE";
+                statusDiv.style.color = "#f00";
+            }
+        };
+    })();
+
+// ==========================================
+// I. 自动巡线按钮逻辑
+// ==========================================
+    const btnAutoTrack = document.getElementById("btnAutoTrack");
+
+// 定义状态：是否正在巡线
+    let isAutoTracking = false;
+
+    if (btnAutoTrack) {
+        // 使用 onclick 避免重复绑定
+        btnAutoTrack.onclick = function() {
+            // 1. 切换状态变量
+            isAutoTracking = !isAutoTracking;
+
+            // 2. 发送请求给后端 Spring Boot
+            // 注意：这里需要你先创建 PipelineController (见第3步)
+            const url = `/api/pipeline/toggle?enable=${isAutoTracking}`;
+
+            console.log(`🚀 发送自动巡线指令: ${isAutoTracking}`);
+
+            fetch(url, { method: "POST" })
+                .then(res => res.text())
+                .then(msg => {
+                    console.log("后端反馈:", msg);
+
+                    // 3. 根据状态更新按钮 UI
+                    if (isAutoTracking) {
+                        // === 开启状态 ===
+                        // 变红/变橙，文字改为“停止”
+                        this.innerHTML = '<span class="btn-icon">🛑</span> 停止巡线';
+                        this.classList.add("active"); // 激活样式
+                        this.classList.add("pulsing"); // (可选) 添加呼吸灯动画效果
+
+                        setStatus("自动巡线模式：运行中...", "success");
+                        const lbl = document.getElementById("currentModeLabel");
+                        if(lbl) {
+                            lbl.textContent = "⚡ 自动巡线中";
+                            lbl.style.color = "#ffaa00"; // 橙色高亮
+                        }
+                    } else {
+                        // === 关闭状态 ===
+                        // 恢复默认，文字改为“启动”
+                        this.innerHTML = '<span class="btn-icon">📡</span> 启动自动巡线';
+                        this.classList.remove("active");
+                        this.classList.remove("pulsing");
+
+                        setStatus("自动巡线已停止", "warning");
+                        // ✅ 新增：恢复显示
+                        const lbl = document.getElementById("currentModeLabel");
+                        if(lbl) {
+                            lbl.textContent = "运动 (常规)";
+                            lbl.style.color = "#00ff00";
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error("请求失败:", err);
+                    setStatus("连接后端失败，无法切换模式", "error");
+                    // 回滚状态
+                    isAutoTracking = !isAutoTracking;
+                });
+        };
+    }
+    // ==========================================
+//  新增：管线仪箭头显示控制逻辑
+// ==========================================
+    /**
+     * 更新管线仪界面显示
+     * @param {number} signal - 0=正中, 1=需向右走, 2=需向左走
+     */
+    function updatePipelineDisplay(signal) {
+        var arrowLeft = document.getElementById('arrowLeft');
+        var arrowRight = document.getElementById('arrowRight');
+
+        // 防止页面还没加载完找不到元素报错
+        if (!arrowLeft || !arrowRight) return;
+
+        // 1. 先重置所有状态 (变暗)
+        arrowLeft.className = 'arrow-icon';
+        arrowRight.className = 'arrow-icon';
+
+        // 2. 根据信号点亮对应箭头
+        if (signal === 1) {
+            // [信号 1] 机器狗需要向右走 -> 显示右箭头 (红色)
+            arrowRight.classList.add('active-right');
+
+        } else if (signal === 2) {
+            // [信号 2] 机器狗需要向左走 -> 显示左箭头 (红色)
+            arrowLeft.classList.add('active-left');
+
+        } else if (signal === 0) {
+            // [信号 0] 正上方 -> 左右都显示 (绿色)
+            arrowLeft.classList.add('active-center');
+            arrowRight.classList.add('active-center');
+        }
+    }
+    // ==========================================
+    // ✅ 全局急停逻辑 (Binding STOP Buttons)
+    // ==========================================
+
+    // 1. 定义急停函数
+    function emergencyStop() {
+        console.warn("🚨 触发急停 (Emergency Stop)！");
+
+        // --- A. 停止机器狗运动 (物理急停) ---
+        // 直接复用已有的 WebSocket 发送函数，发送全 0 指令
+        // 参数：v=0, w=0, y=0, mode=0.0 (保持当前模式或强制空闲), showLog=true
+        if (typeof sendMoveCommand === 'function') {
+            sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+
+            // 双重保险：50ms 后再发一次，防止丢包
+            setTimeout(() => {
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, false);
+            }, 50);
+        } else {
+            console.error("❌ 无法调用 sendMoveCommand，请检查代码作用域");
+        }
+
+        // --- B. 重置“自动巡线”状态 (逻辑急停) ---
+        const btnAutoTrack = document.getElementById('btnAutoTrack');
+
+        if (btnAutoTrack) {
+            // 检查当前是否处于“自动巡线运行中”
+            // 判断依据：按钮上有 'active' 类，或者文字显示“停止”
+            const isTracking = btnAutoTrack.classList.contains('active') ||
+                btnAutoTrack.innerText.includes("停止");
+
+            if (isTracking) {
+                console.log("🔄 检测到自动巡线正在运行，强制复位...");
+
+                // 模拟点击按钮
+                // 这会触发你上面写的 btnAutoTrack.onclick 逻辑：
+                // 1. 发送 /api/pipeline/toggle?enable=false 给后端
+                // 2. 将按钮 UI 恢复为绿色“启动”状态
+                btnAutoTrack.click();
+            }
+        }
+    }
+
+    // 2. 绑定按钮事件 (页面加载完成后执行)
+    document.addEventListener('DOMContentLoaded', function() {
+        // 获取两个 STOP 按钮
+        const btnSideStop = document.getElementById('btnSideStop'); // 侧边栏 STOP
+        const btnStopMove = document.getElementById('btnStopMove'); // 控制盘 STOP
+
+        // 绑定点击事件
+        // 注意：这两个按钮在上面的 motionBtnIds 里已经绑定了 mousedown/mouseup 用于停止手动运动
+        // 这里绑定 click 是为了处理“自动巡线”状态的复位
+        if (btnSideStop) {
+            btnSideStop.addEventListener('click', function(e) {
+                e.preventDefault();
+                emergencyStop();
+            });
+        }
+
+        if (btnStopMove) {
+            btnStopMove.addEventListener('click', function(e) {
+                e.preventDefault();
+                emergencyStop();
+            });
+        }
+
+        // 绑定空格键作为急停快捷键
+        document.addEventListener('keydown', function(event) {
+            if (event.code === 'Space') {
+                // 如果当前焦点不在输入框里，才触发急停
+                if (document.activeElement.tagName !== 'INPUT') {
+                    console.log("⌨️ 检测到空格键，触发急停");
+                    event.preventDefault(); // 防止页面滚动
+                    emergencyStop();
+                }
+            }
+        });
+
+        // ==========================================
+        // ✅ 键盘控制绑定 (WASD + QE)
+        // ==========================================
+        const keyMap = {
+            'KeyW': 'btnSideMoveForward',
+            'KeyS': 'btnSideMoveBackward',
+            'KeyA': 'btnSideTurnLeft',
+            'KeyD': 'btnSideTurnRight',
+            'KeyQ': 'btnSideStrafeLeft',
+            'KeyE': 'btnSideStrafeRight'
+        };
+
+        const pressedKeys = new Set();
+        let keyboardTimer = null;
+
+        // ✅ 新增：处理键盘组合运动逻辑
+        function updateKeyboardMotion() {
+            // 1. 获取速度设定
+            const elSpeedX = document.getElementById('manualSpeedX');
+            const elSpeedY = document.getElementById('manualSpeedY');
+            const manualX = elSpeedX ? (parseFloat(elSpeedX.value) || 0.5) : 0.5;
+            const manualY = elSpeedY ? (parseFloat(elSpeedY.value) || 0.3) : 0.3;
+            const manualW = 1.0;
+
+            let v = 0.0, w = 0.0, y = 0.0;
+
+            // 2. 根据按键叠加速度
+            if (pressedKeys.has('KeyW')) v += manualX;
+            if (pressedKeys.has('KeyS')) v -= manualX;
+            if (pressedKeys.has('KeyA')) w += manualW;
+            if (pressedKeys.has('KeyD')) w -= manualW;
+            if (pressedKeys.has('KeyQ')) y += manualY;
+            if (pressedKeys.has('KeyE')) y -= manualY;
+
+            // 3. 发送指令 (仅当有按键按下时在此处发送，松开逻辑在 keyup 处理)
+            if (pressedKeys.size > 0) {
+                sendMoveCommand(v, w, y, 0.0, false);
+            }
+        }
+
+        document.addEventListener('keydown', function(event) {
+            // 忽略输入框内的按键
+            if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+
+            const btnId = keyMap[event.code];
+            if (btnId) {
+                if (!pressedKeys.has(event.code)) {
+                    pressedKeys.add(event.code);
+                    const btn = document.getElementById(btnId);
+                    if (btn) btn.classList.add('active');
+                    
+                    // ✅ 核心修改：不再调用单任务的 handleMotion，而是启动组合定时器
+                    if (!keyboardTimer) {
+                        updateKeyboardMotion(); // 立即响应第一帧
+                        keyboardTimer = setInterval(updateKeyboardMotion, 150);
+                    } else {
+                        updateKeyboardMotion(); // 状态变化，立即刷新
+                    }
+                }
+            }
+        });
+
+        document.addEventListener('keyup', function(event) {
+            const btnId = keyMap[event.code];
+            if (btnId) {
+                if (pressedKeys.has(event.code)) {
+                    pressedKeys.delete(event.code);
+                    const btn = document.getElementById(btnId);
+                    if (btn) btn.classList.remove('active');
+                    
+                    // ✅ 核心修改：检查剩余按键
+                    if (pressedKeys.size === 0) {
+                        // 全部松开，停止定时器并发送停车
+                        if (keyboardTimer) {
+                            clearInterval(keyboardTimer);
+                            keyboardTimer = null;
+                        }
+                        sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+                    } else {
+                        // 还有其他键，更新运动状态
+                        updateKeyboardMotion();
+                    }
+                }
+            }
+        });
+    });
+// ==========================================
+// II. SLAM 3D 可视化 (A*避障规划 + 纯追踪平滑曲线 + 误差计算 + 强度热力图)
+// ==========================================
+    (function initSlamVis() {
+        const container = document.getElementById("pathMapArea");
+        if (!container) { setTimeout(initSlamVis, 500); return; }
+
+        container.style.overflow = "hidden";
+        container.style.background = "#111";
+
+        // --- 1. 初始化场景 ---
+        const width = container.clientWidth || 400;
+        const height = container.clientHeight || 300;
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
+        camera.up.set(0, 0, 1);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(width, height);
+
+        // 保护 HTML 按钮
+        const oldCanvas = container.querySelector('canvas');
+        if (oldCanvas) container.removeChild(oldCanvas);
+        container.appendChild(renderer.domElement);
+
+        // --- 2. 创建对象 ---
+
+        // A. 机器狗
+        const dogGroup = new THREE.Group();
+        const bodyMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(0.4, 0.2, 0.1),
+            new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+        );
+        const arrowHelper = new THREE.ArrowHelper(
+            new THREE.Vector3(1, 0, 0),
+            new THREE.Vector3(0, 0, 0),
+            0.6,
+            0x00ff00
+        );
+        dogGroup.add(bodyMesh);
+        dogGroup.add(arrowHelper);
+        scene.add(dogGroup);
+
+        // B1. ✅ [修改] 实时雷达层 (增加颜色属性)
+        const scanGeom = new THREE.BufferGeometry();
+        const scanPositions = new Float32Array(5000 * 3);
+        const scanColors = new Float32Array(5000 * 3); // ✅ 新增颜色缓冲区
+        scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
+        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3)); // ✅ 绑定颜色属性
+
+        const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
+            vertexColors: true, // ✅ 开启顶点颜色显示
+            size: 0.03,          // 稍微调大点的大小，效果更好
+            sizeAttenuation: true
+        }));
+        scanMesh.frustumCulled = false;
+        scene.add(scanMesh);
+
+        // B2. ✅ [修改] 历史地图层 (增加颜色属性，让历史地图也是彩色的)
+        const mapMaxPoints = 500000;
+        const mapGeom = new THREE.BufferGeometry();
+        const mapPositions = new Float32Array(mapMaxPoints * 3);
+        const mapColors = new Float32Array(mapMaxPoints * 3); // ✅ 新增颜色缓冲区
+
+        mapGeom.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
+        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3)); // ✅ 绑定颜色属性
+
+        // 初始化位置为无限远
+        for(let i=0; i<mapMaxPoints*3; i++) mapPositions[i] = 99999;
+
+        const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
+            vertexColors: true, // ✅ 开启顶点颜色
+            size: 0.03,
+            sizeAttenuation: true
+        }));
+        mapMesh.frustumCulled = false;
+        scene.add(mapMesh);
+
+        let mapCursor = 0;
+        let lastKeyframePose = { x: -999, y: -999 };
+
+        // C. 机器狗轨迹
+        const trailGroup = new THREE.Group();
+        scene.add(trailGroup);
+        // 创建专门存放电缆破损红点的组
+        const faultMarkerGroup = new THREE.Group();
+        scene.add(faultMarkerGroup);
+
+        let lastFaultPos = new THREE.Vector3(-999, -999, -999);
+        const trailMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const trailPoints = [];
+        let lastTrailPos = new THREE.Vector3(-999, -999, 0);
+        let currentTrailMesh = null;
+
+        // D. 地下电缆
+        const cableGroup = new THREE.Group(); scene.add(cableGroup);
+        const redCableGroup = new THREE.Group(); scene.add(redCableGroup);
+        const cableMat = new THREE.MeshBasicMaterial({ color: 0x00ccff });
+        const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const cablePoints = [];
+        let segmentPoints = [];
+        let lastCablePos = new THREE.Vector3(-999, -999, 0);
+        let lastSignal = -1;
+        let currentCableMesh = null;
+
+        // E. 网格与交互
+        const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);
+        gridHelper.rotation.x = Math.PI / 2;
+        scene.add(gridHelper);
+
+        const planeGeo = new THREE.PlaneGeometry(200, 200);
+        const planeMat = new THREE.MeshBasicMaterial({ visible: false });
+        const clickPlane = new THREE.Mesh(planeGeo, planeMat);
+        scene.add(clickPlane);
+
+        // F. 导航标记
+        const navGroup = new THREE.Group();
+        scene.add(navGroup);
+
+        const flagObj = new THREE.Group();
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1, 8), new THREE.MeshBasicMaterial({color:0xffffff}));
+        pole.rotation.x = Math.PI/2; pole.position.z = 0.5;
+        const flag = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape().moveTo(0,0).lineTo(0,0.4).lineTo(0.6,0.2).lineTo(0,0)), new THREE.MeshBasicMaterial({color:0xff0000, side:THREE.DoubleSide}));
+        flag.rotation.x = Math.PI/2; flag.position.set(0,0,0.6);
+        flagObj.add(pole); flagObj.add(flag);
+        flagObj.visible = false;
+        navGroup.add(flagObj);
+
+        // 导航路径线
+        const navLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0x00ff00, dashSize: 0.2, gapSize: 0.1 }));
+        navGroup.add(navLine);
+
+        // --- 3. 交互控制 ---
+        let radius = 8;
+        let theta = Math.PI * 1.25;
+        let phi = Math.PI / 3.5;
+        const orbitTarget = new THREE.Vector3(0, 0, 0);
+
+        // 导航变量
+        let isPicking = false;
+        let navGoal = null;
+        let isNavigating = false;
+        let navInterval = null;
+        let currentRobotPose = { x: 0, y: 0, yaw: 0 };
+
+        // 核心路径变量
+        let navPath = [];
+        let navOriginalPath = [];
+        let activeNavTrail = [];
+
+        // UI DOM
+        const elNavPanel = document.getElementById('navInfoPanel');
+        const elNavDist = document.getElementById('navDistVal');
+        const elNavError = document.getElementById('navErrorVal');
+
+        function updateCamera() {
+            const x = orbitTarget.x + radius * Math.sin(phi) * Math.cos(theta);
+            const y = orbitTarget.y + radius * Math.sin(phi) * Math.sin(theta);
+            const z = orbitTarget.z + radius * Math.cos(phi);
+            camera.position.set(x, y, z);
+            camera.lookAt(orbitTarget);
+            camera.up.set(0, 0, 1);
+        }
+        updateCamera();
+
+        // UI 更新
+        function updateDistanceUI() {
+            if (navPath.length > 0 && currentRobotPose) {
+                const goal = navPath[navPath.length - 1];
+                const dx = goal.x - currentRobotPose.x;
+                const dy = goal.y - currentRobotPose.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+
+                if (elNavDist) elNavDist.textContent = dist.toFixed(2);
+                if (elNavPanel) elNavPanel.style.display = 'block';
+            } else {
+                if (elNavPanel) elNavPanel.style.display = 'none';
+            }
+        }
+
+        // --- ✅ A* 寻路算法 ---
+        const GRID_SIZE = 0.2;
+
+        function worldToGrid(x, y) {
+            return { x: Math.round(x / GRID_SIZE), y: Math.round(y / GRID_SIZE) };
+        }
+        function gridToWorld(gx, gy) {
+            return { x: gx * GRID_SIZE, y: gy * GRID_SIZE };
+        }
+
+        function planPathAStar(start, end) {
+            console.log("🔍 A* 规划中...");
+            const gridStart = worldToGrid(start.x, start.y);
+            let gridEnd = worldToGrid(end.x, end.y);
+
+            // 1. 构建障碍物地图
+            const obstacles = new Set();
+            const addObstacle = (wx, wy, wz) => {
+                if (wz > 0.2 && wz < 1.0) {
+                    const g = worldToGrid(wx, wy);
+                    for(let i=-1; i<=1; i++) {
+                        for(let j=-1; j<=1; j++) {
+                            obstacles.add(`${g.x+i},${g.y+j}`);
+                        }
+                    }
+                }
+            };
+
+            const scanArr = scanMesh.geometry.attributes.position.array;
+            for(let i=0; i<scanArr.length; i+=3) {
+                if(scanArr[i] < 9000) addObstacle(scanArr[i], scanArr[i+1], scanArr[i+2]);
+            }
+            const mapArr = mapMesh.geometry.attributes.position.array;
+            for(let i=0; i<mapCursor*3; i+=3) {
+                if(mapArr[i] < 9000) addObstacle(mapArr[i], mapArr[i+1], mapArr[i+2]);
+            }
+
+            const endKey = `${gridEnd.x},${gridEnd.y}`;
+            if(obstacles.has(endKey)) {
+                console.warn("目标点不可达，搜索附近...");
+                let found = false, minD = Infinity, bestG = null;
+                for(let dx=-3; dx<=3; dx++) {
+                    for(let dy=-3; dy<=3; dy++) {
+                        const nx = gridEnd.x+dx, ny = gridEnd.y+dy;
+                        if(!obstacles.has(`${nx},${ny}`)) {
+                            const d = dx*dx + dy*dy;
+                            if(d < minD) { minD=d; bestG={x:nx, y:ny}; found=true; }
+                        }
+                    }
+                }
+                if(found) gridEnd = bestG;
+                else { alert("❌ 目标区域完全堵塞！"); return null; }
+            }
+
+            const openSet = [];
+            const closedSet = new Set();
+            const cameFrom = {};
+            const gScore = {};
+            const fScore = {};
+
+            const startKey = `${gridStart.x},${gridStart.y}`;
+            openSet.push(gridStart);
+            gScore[startKey] = 0;
+            fScore[startKey] = Math.hypot(gridStart.x - gridEnd.x, gridStart.y - gridEnd.y);
+
+            let iterations = 0;
+            while(openSet.length > 0) {
+                if(iterations++ > 5000) { console.warn("A* 超时"); break; }
+
+                openSet.sort((a,b) => (fScore[`${a.x},${a.y}`]||Infinity) - (fScore[`${b.x},${b.y}`]||Infinity));
+                const current = openSet.shift();
+                const currentKey = `${current.x},${current.y}`;
+
+                if(current.x === gridEnd.x && current.y === gridEnd.y) {
+                    const path = [];
+                    let currKey = currentKey;
+                    while(cameFrom[currKey]) {
+                        const coords = currKey.split(',').map(Number);
+                        path.unshift({x: coords[0]*GRID_SIZE, y: coords[1]*GRID_SIZE});
+                        currKey = cameFrom[currKey];
+                    }
+                    path.push({x: gridEnd.x*GRID_SIZE, y: gridEnd.y*GRID_SIZE});
+                    return simplifyPath(path);
+                }
+
+                closedSet.add(currentKey);
+                const neighbors = [{x:0,y:1}, {x:0,y:-1}, {x:1,y:0}, {x:-1,y:0}, {x:1,y:1}, {x:1,y:-1}, {x:-1,y:1}, {x:-1,y:-1}];
+
+                for(let n of neighbors) {
+                    const neighbor = {x: current.x + n.x, y: current.y + n.y};
+                    const nKey = `${neighbor.x},${neighbor.y}`;
+                    if(closedSet.has(nKey) || obstacles.has(nKey)) continue;
+
+                    const cost = (n.x===0 || n.y===0) ? 1.0 : 1.414;
+                    const tG = gScore[currentKey] + cost;
+
+                    if(tG < (gScore[nKey] || Infinity)) {
+                        cameFrom[nKey] = currentKey;
+                        gScore[nKey] = tG;
+                        fScore[nKey] = tG + Math.hypot(neighbor.x - gridEnd.x, neighbor.y - gridEnd.y);
+                        if(!openSet.some(o => o.x===neighbor.x && o.y===neighbor.y)) openSet.push(neighbor);
+                    }
+                }
+            }
+            alert("❌ 无法找到路径"); return null;
+        }
+
+        function simplifyPath(path) {
+            if(path.length < 3) return path;
+            const newPath = [path[0]];
+            for(let i=1; i<path.length-1; i++) {
+                const last = newPath[newPath.length-1];
+                const curr = path[i];
+                if(Math.hypot(curr.x-last.x, curr.y-last.y) > 0.4) {
+                    newPath.push(curr);
+                }
+            }
+            newPath.push(path[path.length-1]);
+            return newPath;
+        }
+
+        function calculateAvgError() {
+            if (navOriginalPath.length < 2 || activeNavTrail.length === 0) {
+                if (elNavError) elNavError.textContent = "--";
+                return;
+            }
+            function distToSegmentSquared(p, v, w) {
+                const l2 = (w.x - v.x)**2 + (w.y - v.y)**2;
+                if (l2 === 0) return (p.x - v.x)**2 + (p.y - v.y)**2;
+                let t = ((p.x - v.x)*(w.x - v.x) + (p.y - v.y)*(w.y - v.y)) / l2;
+                t = Math.max(0, Math.min(1, t));
+                return (p.x - (v.x + t*(w.x - v.x)))**2 + (p.y - (v.y + t*(w.y - v.y)))**2;
+            }
+            function distToPolyline(p, polyline) {
+                let minDst2 = Infinity;
+                for(let i=0; i<polyline.length-1; i++) {
+                    const d2 = distToSegmentSquared(p, polyline[i], polyline[i+1]);
+                    if(d2 < minDst2) minDst2 = d2;
+                }
+                return Math.sqrt(minDst2);
+            }
+
+            const sampleCount = 50;
+            let totalDistance = 0;
+            let count = 0;
+            const step = Math.max(1, Math.floor(activeNavTrail.length / sampleCount));
+
+            for (let i = 0; i < activeNavTrail.length; i += step) {
+                if (count >= sampleCount) break;
+                totalDistance += distToPolyline(activeNavTrail[i], navOriginalPath);
+                count++;
+            }
+            const avgError = count > 0 ? (totalDistance / count) : 0;
+            if (elNavError) {
+                elNavError.textContent = avgError.toFixed(3);
+                elNavError.style.color = "#ffaa00";
+            }
+        }
+
+        let isRotating = false, isPanning = false;
+        let prevPos = { x: 0, y: 0 };
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // 1. 选点
+        renderer.domElement.addEventListener('click', (e) => {
+            if (!isPicking) return;
+
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(clickPlane);
+
+            if (intersects.length > 0) {
+                const p = intersects[0].point;
+                const target = { x: p.x, y: p.y };
+                const path = planPathAStar(currentRobotPose, target);
+
+                if (path && path.length > 0) {
+                    navPath = path;
+                    navGoal = path[path.length-1];
+                    flagObj.position.set(navGoal.x, navGoal.y, 0);
+                    flagObj.visible = true;
+
+                    isPicking = false;
+                    const btn = document.getElementById('btnSetNavPoint');
+                    if(btn) btn.classList.remove('active');
+                    renderer.domElement.style.cursor = 'default';
+
+                    if(elNavError) elNavError.textContent = "--";
+                    updateNavLine();
+                    updateDistanceUI();
+                }
+            }
+        });
+
+        function updateNavLine() {
+            if (navPath.length > 0 && flagObj.visible) {
+                const pts = [];
+                pts.push(new THREE.Vector3(currentRobotPose.x, currentRobotPose.y, 0.2));
+                navPath.forEach(p => pts.push(new THREE.Vector3(p.x, p.y, 0.2)));
+                navLine.geometry.setFromPoints(pts);
+                navLine.computeLineDistances();
+                navLine.visible = true;
+            } else {
+                navLine.visible = false;
+            }
+        }
+
+        // 2. 视角
+        renderer.domElement.addEventListener('mousedown', e => {
+            if(isPicking) return;
+            e.preventDefault();
+            if (e.button === 0) isRotating = true;
+            else if (e.button === 1) isPanning = true;
+            prevPos = { x: e.offsetX, y: e.offsetY };
+        });
+
+        renderer.domElement.addEventListener('mousemove', e => {
+            if(isPicking) return;
+            const dx = e.offsetX - prevPos.x;
+            const dy = e.offsetY - prevPos.y;
+            prevPos = { x: e.offsetX, y: e.offsetY };
+
+            if (isRotating) {
+                theta -= dx * 0.01;
+                phi -= dy * 0.01;
+                phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
+                updateCamera();
+            } else if (isPanning) {
+                const speed = radius * 0.002;
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+                const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+                const forwardXY = new THREE.Vector3(forward.x, forward.y, 0).normalize();
+                orbitTarget.addScaledVector(right, -dx * speed);
+                orbitTarget.addScaledVector(forwardXY, dy * speed);
+                updateCamera();
+            }
+        });
+
+        window.addEventListener('mouseup', () => { isRotating = false; isPanning = false; });
+        renderer.domElement.addEventListener('wheel', e => {
+            e.preventDefault();
+            radius *= (e.deltaY > 0 ? 1.1 : 0.9);
+            radius = Math.max(1, Math.min(100, radius));
+            updateCamera();
+        });
+
+        // 3. 按钮
+        const btnSet = document.getElementById('btnSetNavPoint');
+        const btnStart = document.getElementById('btnStartNav');
+        const btnClear = document.getElementById('btnClearNav');
+
+        if(btnSet) {
+            btnSet.onclick = function() {
+                isPicking = !isPicking;
+                if(isPicking) {
+                    this.classList.add('active');
+                    renderer.domElement.style.cursor = 'crosshair';
+                } else {
+                    this.classList.remove('active');
+                    renderer.domElement.style.cursor = 'default';
+                }
+            };
+        }
+
+        if(btnClear) {
+            btnClear.onclick = function() {
+                stopNav(false);
+                navPath = [];
+                navGoal = null;
+                flagObj.visible = false;
+                navLine.visible = false;
+                updateDistanceUI();
+                if(elNavError) elNavError.textContent = "--";
+            };
+        }
+
+        if(btnStart) {
+            btnStart.onclick = function() {
+                if(navPath.length === 0) {
+                    alert("请先点击 [📍选点] 生成避障路径！");
+                    return;
+                }
+                if(isNavigating) return;
+                startNav();
+            };
+        }
+
+        const stopBtnIds = ['btnStopMove', 'btnSideStop'];
+        stopBtnIds.forEach(id => {
+            const btn = document.getElementById(id);
+            if(btn) {
+                btn.addEventListener('click', function() {
+                    if(isNavigating) {
+                        console.log("🛑 检测到手动停止");
+                        stopNav(false);
+                    }
+                });
+            }
+        });
+
+        function startNav() {
+            console.log("🚀 开始 A* 曲线导航...");
+            isNavigating = true;
+            navOriginalPath = [...navPath];
+            navOriginalPath.unshift({x: currentRobotPose.x, y: currentRobotPose.y});
+            activeNavTrail = [];
+            if(elNavError) elNavError.textContent = "运行中...";
+
+            if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 3.0, true);
+            if(navInterval) clearInterval(navInterval);
+            navInterval = setInterval(controlLoop, 100);
+        }
+
+        function stopNav(isSuccess) {
+            isNavigating = false;
+            if(navInterval) { clearInterval(navInterval); navInterval = null; }
+            if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, true);
+            console.log("🛑 导航停止");
+            if (isSuccess) calculateAvgError();
+        }
+
+        // ✅ 核心控制：纯追踪 (Pure Pursuit)
+        function controlLoop() {
+            if(navPath.length === 0) { stopNav(true); return; }
+
+            const LOOKAHEAD_DIST = 0.8;
+            let targetIdx = 0;
+            let target = navPath[0];
+
+            for(let i=0; i<navPath.length; i++) {
+                const p = navPath[i];
+                const d = Math.hypot(p.x - currentRobotPose.x, p.y - currentRobotPose.y);
+                if(d > LOOKAHEAD_DIST) {
+                    target = p;
+                    targetIdx = i;
+                    break;
+                }
+                if(i === navPath.length-1) {
+                    target = p;
+                    targetIdx = i;
+                }
+            }
+
+            if(targetIdx > 0) {
+                navPath.splice(0, targetIdx);
+            }
+
+            const dx = target.x - currentRobotPose.x;
+            const dy = target.y - currentRobotPose.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+
+            if(navPath.length === 1 && dist < 0.2) {
+                stopNav(true);
+                return;
+            }
+
+            const targetYaw = Math.atan2(dy, dx);
+            let diff = targetYaw - currentRobotPose.yaw;
+            while(diff > Math.PI) diff -= 2*Math.PI;
+            while(diff < -Math.PI) diff += 2*Math.PI;
+
+            let v = 0, w = 0;
+            if(Math.abs(diff) > 0.8) {
+                v = 0.1;
+                w = diff > 0 ? 0.6 : -0.6;
+            } else {
+                v = 0.4 * (1.0 - Math.abs(diff)/1.5);
+                v = Math.max(0.15, v);
+                w = diff * 1.5;
+            }
+
+            if(typeof sendMoveCommand === 'function') {
+                sendMoveCommand(v, w, 0, 0, false);
+            }
+        }
+
+        // 5. 旧清除按钮
+        const btnClearDog = document.getElementById("btnClearDogPath");
+        if (btnClearDog) {
+            btnClearDog.onclick = function() {
+                trailPoints.length = 0;
+                lastTrailPos.set(-999, -999, 0);
+                if (currentTrailMesh) {
+                    trailGroup.remove(currentTrailMesh);
+                    currentTrailMesh.geometry.dispose();
+                    currentTrailMesh = null;
+                }
+                while(faultMarkerGroup.children.length > 0){
+                    const mesh = faultMarkerGroup.children[0];
+                    faultMarkerGroup.remove(mesh);
+                    if(mesh.geometry) mesh.geometry.dispose();
+                }
+                lastFaultPos.set(-999, -999, -999);
+            };
+        }
+
+        // ✅ 新增: 清除点云数据按钮逻辑
+        const btnClearCloud = document.getElementById("btnClearCloud");
+        if (btnClearCloud) {
+            btnClearCloud.onclick = function() {
+                console.log("🧹 清除所有点云数据...");
+                const scanAttr = scanMesh.geometry.attributes.position;
+                const scanArr = scanAttr.array;
+                for(let i=0; i<scanArr.length; i++) scanArr[i] = 99999;
+                scanAttr.needsUpdate = true;
+
+                const mapAttr = mapMesh.geometry.attributes.position;
+                const mapArr = mapAttr.array;
+                for(let i=0; i<mapArr.length; i++) mapArr[i] = 99999;
+                mapAttr.needsUpdate = true;
+
+                mapCursor = 0;
+                lastKeyframePose = { x: -999, y: -999 };
+            };
+        }
+
+        const btnClearCable = document.getElementById("btnClearCablePath");
+        if (btnClearCable) {
+            btnClearCable.onclick = function() {
+                cablePoints.length = 0;
+                segmentPoints.length = 0;
+                lastCablePos.set(-999, -999, 0);
+                if (currentCableMesh) {
+                    cableGroup.remove(currentCableMesh);
+                    currentCableMesh.geometry.dispose();
+                    currentCableMesh = null;
+                }
+                while(redCableGroup.children.length > 0){
+                    const mesh = redCableGroup.children[0];
+                    redCableGroup.remove(mesh);
+                    if(mesh.geometry) mesh.geometry.dispose();
+                }
+            };
+        }
+
+        // --- 6. WebSocket ---
+        const ROBOT_IP = "10.21.31.104";
+        const wsUrl = "ws://" + ROBOT_IP + ":9090";
+        console.log("正在尝试连接 WebSocket:", wsUrl);
+
+        const ws = new WebSocket(wsUrl);
+        let hasLoggedSlamSuccess = false;
+        let isFirstFrame = true;
+
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'slam_data') {
+                    if (!hasLoggedSlamSuccess) {
+                        console.log("%c🚀 SLAM 数据传输成功！...", "color: #00e5ff; font-weight: bold;");
+                        hasLoggedSlamSuccess = true;
+                    }
+                    updateVis(data);
+                }
+            } catch (e) { }
+        };
+
+        function updateVis(data) {
+            const pose = data.robot;
+            if (pose) {
+                const scaleFactor = 1.0;
+                const px = pose.x * scaleFactor;
+                const py = pose.y * scaleFactor;
+                const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
+
+                const isRTK = data.is_rtk === true;
+                if (typeof lastRTKStatus === 'undefined') {
+                    window.lastRTKStatus = null;
+                }
+
+                if (isRTK !== window.lastRTKStatus) {
+                    if (isRTK) {
+                        console.log('RTK Status: ACTIVE 🟢');
+                    } else {
+                        console.log('RTK Status: OFF (ODOM MODE) ⚠️');
+                    }
+                    window.lastRTKStatus = isRTK;
+                }
+
+                currentRobotPose = { x: px, y: py, yaw: pose.yaw };
+                updateNavLine();
+                updateDistanceUI();
+
+                if (isNavigating) {
+                    const len = activeNavTrail.length;
+                    if (len === 0) activeNavTrail.push({x: px, y: py});
+                    else {
+                        const lastP = activeNavTrail[len - 1];
+                        if (Math.hypot(px - lastP.x, py - lastP.y) > 0.02) activeNavTrail.push({x: px, y: py});
+                    }
+                }
+
+                dogGroup.position.set(px, py, pz);
+                dogGroup.rotation.z = pose.yaw;
+
+                if (typeof gridHelper !== 'undefined') {
+                    gridHelper.position.set(px, py, 0);
+                    if(clickPlane) clickPlane.position.set(px, py, 0);
+                }
+
+                if (isFirstFrame) {
+                    orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
+                    updateCamera();
+                    isFirstFrame = false;
+                }
+
+                const currentPos = new THREE.Vector3(px, py, pz);
+                const isFault = window.g_isFaultDetected === true;
+
+                if (isFault) {
+                    if (currentPos.distanceTo(lastFaultPos) > 0.1) {
+                        const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
+                        const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                        const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                        faultMesh.position.copy(currentPos);
+                        faultMarkerGroup.add(faultMesh);
+                        lastFaultPos.copy(currentPos);
+                        console.log(`🔴 探测到电缆破损! 信号值: ${magVal.toFixed(0)}, 位置:`, currentPos);
+                    }
+                }
+                if (currentPos.distanceTo(lastTrailPos) > 0.05) {
+                    trailPoints.push(currentPos);
+                    lastTrailPos = currentPos;
+                    if (trailPoints.length > 3000) trailPoints.shift();
+
+                    if (trailPoints.length > 1) {
+                        if (currentTrailMesh) {
+                            trailGroup.remove(currentTrailMesh);
+                            currentTrailMesh.geometry.dispose();
+                        }
+                        const curve = new THREE.CatmullRomCurve3(trailPoints);
+                        const tube = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
+                        currentTrailMesh = new THREE.Mesh(tube, trailMat);
+                        trailGroup.add(currentTrailMesh);
+                    }
+                }
+
+                const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
+                let shouldDraw = (sig === 0) || (lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1);
+
+                if (shouldDraw) {
+                    const dist = currentPos.distanceTo(lastCablePos);
+                    if (dist > 0.1) {
+                        const cablePt = new THREE.Vector3(px, py, 0.08);
+                        cablePoints.push(cablePt);
+                        lastCablePos = cablePt;
+
+                        if (cablePoints.length > 2000) cablePoints.shift();
+                        if (cablePoints.length > 1) {
+                            if (currentCableMesh) {
+                                cableGroup.remove(currentCableMesh);
+                                currentCableMesh.geometry.dispose();
+                            }
+                            const curve = new THREE.CatmullRomCurve3(cablePoints);
+                            const tube = new THREE.TubeGeometry(curve, cablePoints.length * 5, 0.03, 6, false);
+                            currentCableMesh = new THREE.Mesh(tube, cableMat);
+                            cableGroup.add(currentCableMesh);
+                        }
+                    }
+                }
+                lastSignal = sig;
+            }
+
+            const scan = data.scan;
+            if (scan && scan.length > 0) {
+                const scanAttr = scanMesh.geometry.attributes.position;
+                const colAttr = scanMesh.geometry.attributes.color; // ✅ 获取颜色属性
+
+                const scanPos = scanAttr.array;
+                const scanCol = colAttr.array;
+
+                let c = 0; // 位置索引
+                let d = 0; // 颜色索引
+                let scaleFactor = 1.0;
+                if (data.robot && (Math.abs(data.robot.x) > 100)) scaleFactor = 0.001;
+
+                const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
+
+                if (isFlat) {
+                    // ✅ [核心修改] 适配 [x, y, z, intensity] 格式，步长改为 4
+                    for (let i = 0; i < scan.length; i += 4) {
+                        if (c >= 5000 * 3) break;
+
+                        // 1. 设置位置
+                        scanPos[c++] = scan[i] * scaleFactor;
+                        scanPos[c++] = scan[i+1] * scaleFactor;
+                        let valZ = (i + 2 < scan.length) ? scan[i+2] : 0.1;
+                        scanPos[c++] = valZ * scaleFactor;
+
+                        // 2. 设置颜色 (热力图)
+                        const intensity = (i + 3 < scan.length) ? scan[i+3] : 0;
+                        const maxVal = 255.0;
+                        // 归一化 (0.0 ~ 1.0)
+                        let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
+                        // HSL 映射: 蓝色(0.66) -> 红色(0.0)
+                        const color = new THREE.Color();
+                        color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
+
+                        scanCol[d++] = color.r;
+                        scanCol[d++] = color.g;
+                        scanCol[d++] = color.b;
+                    }
+                }
+
+                for (let i = c; i < 5000 * 3; i++) scanPos[i] = 99999;
+                scanMesh.geometry.attributes.position.needsUpdate = true;
+                scanMesh.geometry.attributes.color.needsUpdate = true; // ✅ 标记颜色更新
+
+                if (pose) {
+                    const poseX = pose.x * scaleFactor;
+                    const poseY = pose.y * scaleFactor;
+                    const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
+                    if (dist > 0.2) {
+                        const mapPos = mapMesh.geometry.attributes.position.array;
+                        const mapCol = mapMesh.geometry.attributes.color.array; // ✅ 获取地图颜色数组
+
+                        // 拷贝位置和颜色到历史地图
+                        for (let k = 0; k < c; k++) {
+                            if (mapCursor >= 500000 * 3) mapCursor = 0;
+                            mapPos[mapCursor] = scanPos[k];
+                            mapCol[mapCursor] = scanCol[k]; // ✅ 同步拷贝颜色
+                            mapCursor++;
+                        }
+                        mapMesh.geometry.attributes.position.needsUpdate = true;
+                        mapMesh.geometry.attributes.color.needsUpdate = true; // ✅ 标记颜色更新
+                        lastKeyframePose = { x: poseX, y: poseY };
+                    }
+                }
+            }
+        }
+
+        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+        animate();
+
+        new ResizeObserver(() => {
+            const w = container.clientWidth, h = container.clientHeight;
+            if(w&&h) { renderer.setSize(w,h); camera.aspect=w/h; camera.updateProjectionMatrix(); }
+        }).observe(container);
+    })();
+
+})(); // ✅✅✅ [关键修复] 这里加上了最外层的闭包结束括号！
