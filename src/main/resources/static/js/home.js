@@ -2254,14 +2254,72 @@
         });
     });
 // ==========================================
-// II. SLAM 3D 可视化 (A*避障规划 + 纯追踪平滑曲线 + 误差计算 + 强度热力图)
-// ==========================================
+    // II. SLAM 3D 可视化 (已集成 B 样条平滑 + 曲率限制)
+    // ==========================================
     (function initSlamVis() {
         const container = document.getElementById("pathMapArea");
         if (!container) { setTimeout(initSlamVis, 500); return; }
 
         container.style.overflow = "hidden";
         container.style.background = "#111";
+
+        // ==========================================
+        // 0. [新增] 自定义三次 B 样条曲线 (逼近型平滑)
+        // ==========================================
+        class UniformCubicBSpline extends THREE.Curve {
+            constructor(points) {
+                super();
+                this.points = points || [];
+            }
+
+            getPoint(t, optionalTarget = new THREE.Vector3()) {
+                const points = this.points;
+                const numPoints = points.length;
+
+                // 如果点数不足4个，退化为线性插值
+                if (numPoints < 4) {
+                    const i = (numPoints - 1) * t;
+                    const idx = Math.floor(i);
+                    const weight = i - idx;
+                    const p0 = points[Math.min(idx, numPoints - 1)];
+                    const p1 = points[Math.min(idx + 1, numPoints - 1)];
+                    return optionalTarget.copy(p0).lerp(p1, weight);
+                }
+
+                // B样条段数 = 点数 - 3
+                const numSegments = numPoints - 3;
+                let u = t * numSegments;
+                let i = Math.floor(u);
+
+                if (i >= numSegments) {
+                    i = numSegments - 1;
+                    u = numSegments;
+                }
+
+                const t_local = u - i;
+                const p0 = points[i];
+                const p1 = points[i + 1];
+                const p2 = points[i + 2];
+                const p3 = points[i + 3];
+
+                // 三次 B 样条基函数
+                const t2 = t_local * t_local;
+                const t3 = t2 * t_local;
+
+                const b0 = (-t3 + 3 * t2 - 3 * t_local + 1) / 6;
+                const b1 = (3 * t3 - 6 * t2 + 4) / 6;
+                const b2 = (-3 * t3 + 3 * t2 + 3 * t_local + 1) / 6;
+                const b3 = t3 / 6;
+
+                optionalTarget.set(0, 0, 0)
+                    .addScaledVector(p0, b0)
+                    .addScaledVector(p1, b1)
+                    .addScaledVector(p2, b2)
+                    .addScaledVector(p3, b3);
+
+                return optionalTarget;
+            }
+        }
 
         // --- 1. 初始化场景 ---
         const width = container.clientWidth || 400;
@@ -2298,35 +2356,35 @@
         dogGroup.add(arrowHelper);
         scene.add(dogGroup);
 
-        // B1. ✅ [修改] 实时雷达层 (增加颜色属性)
+        // B1. 实时雷达层 (带颜色)
         const scanGeom = new THREE.BufferGeometry();
         const scanPositions = new Float32Array(5000 * 3);
-        const scanColors = new Float32Array(5000 * 3); // ✅ 新增颜色缓冲区
+        const scanColors = new Float32Array(5000 * 3);
         scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
-        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3)); // ✅ 绑定颜色属性
+        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3));
 
         const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
-            vertexColors: true, // ✅ 开启顶点颜色显示
-            size: 0.03,          // 稍微调大点的大小，效果更好
+            vertexColors: true,
+            size: 0.03,
             sizeAttenuation: true
         }));
         scanMesh.frustumCulled = false;
         scene.add(scanMesh);
 
-        // B2. ✅ [修改] 历史地图层 (增加颜色属性，让历史地图也是彩色的)
+        // B2. 历史地图层 (带颜色)
         const mapMaxPoints = 500000;
         const mapGeom = new THREE.BufferGeometry();
         const mapPositions = new Float32Array(mapMaxPoints * 3);
-        const mapColors = new Float32Array(mapMaxPoints * 3); // ✅ 新增颜色缓冲区
+        const mapColors = new Float32Array(mapMaxPoints * 3);
 
         mapGeom.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
-        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3)); // ✅ 绑定颜色属性
+        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3));
 
         // 初始化位置为无限远
         for(let i=0; i<mapMaxPoints*3; i++) mapPositions[i] = 99999;
 
         const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
-            vertexColors: true, // ✅ 开启顶点颜色
+            vertexColors: true,
             size: 0.03,
             sizeAttenuation: true
         }));
@@ -2349,13 +2407,13 @@
         let lastTrailPos = new THREE.Vector3(-999, -999, 0);
         let currentTrailMesh = null;
 
-        // D. 地下电缆
+        // D. 地下电缆 (使用 B 样条相关变量)
         const cableGroup = new THREE.Group(); scene.add(cableGroup);
         const redCableGroup = new THREE.Group(); scene.add(redCableGroup);
         const cableMat = new THREE.MeshBasicMaterial({ color: 0x00ccff });
         const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-        const cablePoints = [];
-        let segmentPoints = [];
+        
+        const cablePoints = []; // 存储过滤后的控制点
         let lastCablePos = new THREE.Vector3(-999, -999, 0);
         let lastSignal = -1;
         let currentCableMesh = null;
@@ -2860,7 +2918,8 @@
         if (btnClearCable) {
             btnClearCable.onclick = function() {
                 cablePoints.length = 0;
-                segmentPoints.length = 0;
+                // segmentPoints 在这个上下文没用到，可以注释掉
+                // segmentPoints.length = 0; 
                 lastCablePos.set(-999, -999, 0);
                 if (currentCableMesh) {
                     cableGroup.remove(currentCableMesh);
@@ -2950,6 +3009,8 @@
                 const isFault = window.g_isFaultDetected === true;
 
                 if (isFault) {
+                    // 获取当前信号值显示在日志里 (可选)
+                    const magVal = window.g_realtimeMag || 0;
                     if (currentPos.distanceTo(lastFaultPos) > 0.1) {
                         const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
                         const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
@@ -2960,6 +3021,8 @@
                         console.log(`🔴 探测到电缆破损! 信号值: ${magVal.toFixed(0)}, 位置:`, currentPos);
                     }
                 }
+                
+                // 1. 机器狗轨迹绘制 (保持 CatmullRom)
                 if (currentPos.distanceTo(lastTrailPos) > 0.05) {
                     trailPoints.push(currentPos);
                     lastTrailPos = currentPos;
@@ -2977,26 +3040,61 @@
                     }
                 }
 
+                // 2. ⚡️ 电缆绘制 (B样条 + 曲率限制 修正版)
                 const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
-                let shouldDraw = (sig === 0) || (lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1);
+                //let shouldDraw = (sig === 0) || (lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1);
+                // 只要信号有效（不是-1），且机器狗在移动（dist>0.1），就一直画线
+                let shouldDraw = (sig === 0 || sig === 1 || sig === 2);
+
 
                 if (shouldDraw) {
                     const dist = currentPos.distanceTo(lastCablePos);
                     if (dist > 0.1) {
-                        const cablePt = new THREE.Vector3(px, py, 0.08);
-                        cablePoints.push(cablePt);
-                        lastCablePos = cablePt;
+                        const newPoint = new THREE.Vector3(px, py, 0.08);
+                        let isPointValid = true;
 
-                        if (cablePoints.length > 2000) cablePoints.shift();
-                        if (cablePoints.length > 1) {
-                            if (currentCableMesh) {
-                                cableGroup.remove(currentCableMesh);
-                                currentCableMesh.geometry.dispose();
+                        // === [曲率限制] ===
+                        if (cablePoints.length >= 2) {
+                            const lastP = cablePoints[cablePoints.length - 1];
+                            const prevP = cablePoints[cablePoints.length - 2];
+
+                            // 向量 V1: 上一步的走向
+                            const v1 = new THREE.Vector3().subVectors(lastP, prevP).normalize();
+                            // 向量 V2: 新点相对于上一点的走向
+                            const v2 = new THREE.Vector3().subVectors(newPoint, lastP).normalize();
+
+                            // 计算夹角
+                            const angle = v1.angleTo(v2);
+                            
+                            // 阈值设为 25度 (约 0.43 弧度)
+                            // 如果突然转弯超过 25度，认为是传感器噪声或机器狗横移，直接忽略该点
+                            if (angle > 25 * (Math.PI / 180)) {
+                                isPointValid = false;
                             }
-                            const curve = new THREE.CatmullRomCurve3(cablePoints);
-                            const tube = new THREE.TubeGeometry(curve, cablePoints.length * 5, 0.03, 6, false);
-                            currentCableMesh = new THREE.Mesh(tube, cableMat);
-                            cableGroup.add(currentCableMesh);
+                        }
+
+                        if (isPointValid) {
+                            cablePoints.push(newPoint);
+                            lastCablePos = newPoint;
+
+                            if (cablePoints.length > 2000) cablePoints.shift();
+
+                            // === [B样条绘制] ===
+                            // 只有当点数 >= 4 时，B样条才能工作
+                            if (cablePoints.length >= 4) {
+                                if (currentCableMesh) {
+                                    cableGroup.remove(currentCableMesh);
+                                    currentCableMesh.geometry.dispose();
+                                }
+                                
+                                // 使用自定义的 B 样条类 (不穿过噪点，从中间逼近)
+                                const curve = new UniformCubicBSpline(cablePoints);
+                                
+                                // 增加段数以保证顺滑 (points * 6)
+                                const tube = new THREE.TubeGeometry(curve, cablePoints.length * 6, 0.03, 8, false);
+                                currentCableMesh = new THREE.Mesh(tube, cableMat);
+                                cableGroup.add(currentCableMesh);
+                            }
                         }
                     }
                 }
