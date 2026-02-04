@@ -2254,7 +2254,7 @@
         });
     });
 // ==========================================
-    // II. SLAM 3D 可视化 (已集成 B 样条平滑 + 曲率限制)
+    // II. SLAM 3D 可视化 (集成全路径平滑 + 锚点校正)
     // ==========================================
     (function initSlamVis() {
         const container = document.getElementById("pathMapArea");
@@ -2264,8 +2264,14 @@
         container.style.background = "#111";
 
         // ==========================================
-        // 0. [新增] 自定义三次 B 样条曲线 (逼近型平滑)
+        // 0. [新增] 路径平滑算法组件
         // ==========================================
+        
+        // A. 滑动平均缓冲区 (用于消除 S 型走位)
+        let smoothBuffer = []; 
+        const SMOOTH_WINDOW_SIZE = 20; // 窗口大小：越大越平滑，但延迟越高；越小越灵敏，但S型残留越多
+
+        // B. 自定义三次 B 样条曲线 (逼近型平滑)
         class UniformCubicBSpline extends THREE.Curve {
             constructor(points) {
                 super();
@@ -2918,8 +2924,7 @@
         if (btnClearCable) {
             btnClearCable.onclick = function() {
                 cablePoints.length = 0;
-                // segmentPoints 在这个上下文没用到，可以注释掉
-                // segmentPoints.length = 0; 
+                smoothBuffer.length = 0; // 同时清空平滑缓冲区
                 lastCablePos.set(-999, -999, 0);
                 if (currentCableMesh) {
                     cableGroup.remove(currentCableMesh);
@@ -3040,64 +3045,71 @@
                     }
                 }
 
-                // 2. ⚡️ 电缆绘制 (B样条 + 曲率限制 修正版)
+                // ------------------------------------------------------------
+                // 2. ⚡️ 电缆绘制 (新逻辑：全路径 B 样条 + 滑动平均去 S 型 + 信号0锚点)
+                // ------------------------------------------------------------
                 const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
-                //let shouldDraw = (sig === 0) || (lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1);
-                // 只要信号有效（不是-1），且机器狗在移动（dist>0.1），就一直画线
-                let shouldDraw = (sig === 0 || sig === 1 || sig === 2);
 
+                // 核心开关：只有在“自动巡线”模式下才记录数据
+                // 这里的 isAutoTracking 是全局变量
+                if (isAutoTracking) {
 
-                if (shouldDraw) {
-                    const dist = currentPos.distanceTo(lastCablePos);
-                    if (dist > 0.1) {
-                        const newPoint = new THREE.Vector3(px, py, 0.08);
-                        let isPointValid = true;
+                    // 1️⃣ 将当前机器狗位置加入平滑缓冲区
+                    smoothBuffer.push(currentPos.clone());
+                    if (smoothBuffer.length > SMOOTH_WINDOW_SIZE) {
+                        smoothBuffer.shift(); // 移除最老的数据，保持窗口大小
+                    }
 
-                        // === [曲率限制] ===
-                        if (cablePoints.length >= 2) {
-                            const lastP = cablePoints[cablePoints.length - 1];
-                            const prevP = cablePoints[cablePoints.length - 2];
+                    // 2️⃣ 计算“拟合坐标”
+                    let targetPoint = null;
 
-                            // 向量 V1: 上一步的走向
-                            const v1 = new THREE.Vector3().subVectors(lastP, prevP).normalize();
-                            // 向量 V2: 新点相对于上一点的走向
-                            const v2 = new THREE.Vector3().subVectors(newPoint, lastP).normalize();
-
-                            // 计算夹角
-                            const angle = v1.angleTo(v2);
-                            
-                            // 阈值设为 25度 (约 0.43 弧度)
-                            // 如果突然转弯超过 25度，认为是传感器噪声或机器狗横移，直接忽略该点
-                            if (angle > 25 * (Math.PI / 180)) {
-                                isPointValid = false;
-                            }
+                    if (sig === 0) {
+                        // 🌟 情况 A：信号为 0 (Ground Truth)
+                        // 说明机器狗正骑在电缆上，这是最准的数据！
+                        // 策略：无视平滑，直接使用当前真实位置
+                        targetPoint = new THREE.Vector3(px, py, 0.08);
+                    } else {
+                        // 🌀 情况 B：信号为 1 或 2 (正在 S 型走位)
+                        // 策略：计算缓冲区内所有点的“平均位置”
+                        // 数学原理：左偏和右偏的坐标一平均，就得到了中间的电缆位置
+                        let sumX = 0, sumY = 0;
+                        for (let pt of smoothBuffer) {
+                            sumX += pt.x;
+                            sumY += pt.y;
                         }
+                        // 得到“去抖动”后的中心点
+                        targetPoint = new THREE.Vector3(sumX / smoothBuffer.length, sumY / smoothBuffer.length, 0.08);
+                    }
 
-                        if (isPointValid) {
-                            cablePoints.push(newPoint);
-                            lastCablePos = newPoint;
+                    // 3️⃣ 距离过滤与 B 样条生成
+                    const dist = targetPoint.distanceTo(lastCablePos);
+                    
+                    // 阈值：0.2米 (稍微大一点，进一步过滤微小抖动)
+                    if (dist > 0.2) {
+                        cablePoints.push(targetPoint);
+                        lastCablePos = targetPoint.clone();
 
-                            if (cablePoints.length > 2000) cablePoints.shift();
+                        // 限制总长度
+                        if (cablePoints.length > 3000) cablePoints.shift();
 
-                            // === [B样条绘制] ===
-                            // 只有当点数 >= 4 时，B样条才能工作
-                            if (cablePoints.length >= 4) {
-                                if (currentCableMesh) {
-                                    cableGroup.remove(currentCableMesh);
-                                    currentCableMesh.geometry.dispose();
-                                }
-                                
-                                // 使用自定义的 B 样条类 (不穿过噪点，从中间逼近)
-                                const curve = new UniformCubicBSpline(cablePoints);
-                                
-                                // 增加段数以保证顺滑 (points * 6)
-                                const tube = new THREE.TubeGeometry(curve, cablePoints.length * 6, 0.03, 8, false);
-                                currentCableMesh = new THREE.Mesh(tube, cableMat);
-                                cableGroup.add(currentCableMesh);
+                        // 4️⃣ 实时重绘 B 样条
+                        if (cablePoints.length >= 4) {
+                            if (currentCableMesh) {
+                                cableGroup.remove(currentCableMesh);
+                                currentCableMesh.geometry.dispose();
                             }
+
+                            // 使用自定义的 B 样条类 (它会再次对点集进行数学平滑)
+                            const curve = new UniformCubicBSpline(cablePoints);
+                            
+                            // 增加分段数 (points * 10) 让曲线极其顺滑
+                            const tube = new THREE.TubeGeometry(curve, cablePoints.length * 10, 0.03, 8, false);
+                            currentCableMesh = new THREE.Mesh(tube, cableMat);
+                            cableGroup.add(currentCableMesh);
                         }
                     }
                 }
+                
                 lastSignal = sig;
             }
 
