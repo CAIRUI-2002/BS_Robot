@@ -2254,8 +2254,8 @@
         });
     });
 // ==========================================
-    // II. SLAM 3D 可视化 (集成全路径平滑 + 锚点校正)
-    // ==========================================
+// II. SLAM 3D 可视化 (A*避障规划 + 纯追踪平滑曲线 + 误差计算 + 强度热力图 + 卡尔曼滤波)
+// ==========================================
     (function initSlamVis() {
         const container = document.getElementById("pathMapArea");
         if (!container) { setTimeout(initSlamVis, 500); return; }
@@ -2264,68 +2264,189 @@
         container.style.background = "#111";
 
         // ==========================================
-        // 0. [新增] 路径平滑算法组件
+        // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
         // ==========================================
-        
-        // A. 滑动平均缓冲区 (用于消除 S 型走位)
-        let smoothBuffer = []; 
-        const SMOOTH_WINDOW_SIZE = 20; // 窗口大小：越大越平滑，但延迟越高；越小越灵敏，但S型残留越多
+        const KalmanSmoother = {
+            // --- 基础矩阵运算 ---
+            zeros: (r, c) => new Float64Array(r * c),
+            eye: (n) => {
+                const m = new Float64Array(n * n);
+                for (let i = 0; i < n; i++) m[i * n + i] = 1.0;
+                return m;
+            },
+            matmul: (A, rowsA, colsA, B, rowsB, colsB) => {
+                if (colsA !== rowsB) throw new Error("Matrix dimension mismatch");
+                const C = new Float64Array(rowsA * colsB);
+                for (let i = 0; i < rowsA; i++) {
+                    for (let j = 0; j < colsB; j++) {
+                        let sum = 0.0;
+                        for (let k = 0; k < colsA; k++) {
+                            sum += A[i * colsA + k] * B[k * colsB + j];
+                        }
+                        C[i * colsB + j] = sum;
+                    }
+                }
+                return C;
+            },
+            add: (A, B) => {
+                const C = new Float64Array(A.length);
+                for (let i = 0; i < A.length; i++) C[i] = A[i] + B[i];
+                return C;
+            },
+            sub: (A, B) => {
+                const C = new Float64Array(A.length);
+                for (let i = 0; i < A.length; i++) C[i] = A[i] - B[i];
+                return C;
+            },
+            transpose: (A, rows, cols) => {
+                const T = new Float64Array(rows * cols);
+                for (let i = 0; i < rows; i++) {
+                    for (let j = 0; j < cols; j++) {
+                        T[j * rows + i] = A[i * cols + j];
+                    }
+                }
+                return T;
+            },
+            inv2x2: (M) => {
+                const det = M[0] * M[3] - M[1] * M[2];
+                if (Math.abs(det) < 1e-10) return M;
+                const invDet = 1.0 / det;
+                return new Float64Array([
+                    M[3] * invDet, -M[1] * invDet,
+                    -M[2] * invDet, M[0] * invDet
+                ]);
+            },
+            inv4x4: (m) => {
+                const inv = new Float64Array(16);
+                const a = m;
+                const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+                const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+                const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+                const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+                const b00 = a00 * a11 - a01 * a10;
+                const b01 = a00 * a12 - a02 * a10;
+                const b02 = a00 * a13 - a03 * a10;
+                const b03 = a01 * a12 - a02 * a11;
+                const b04 = a01 * a13 - a03 * a11;
+                const b05 = a02 * a13 - a03 * a12;
+                const b06 = a20 * a31 - a21 * a30;
+                const b07 = a20 * a32 - a22 * a30;
+                const b08 = a20 * a33 - a23 * a30;
+                const b09 = a21 * a32 - a22 * a31;
+                const b10 = a21 * a33 - a23 * a31;
+                const b11 = a22 * a33 - a23 * a32;
+                let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+                if (Math.abs(det) < 1e-10) return m;
+                det = 1.0 / det;
+                inv[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+                inv[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+                inv[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+                inv[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+                inv[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+                inv[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+                inv[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+                inv[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+                inv[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+                inv[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+                inv[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+                inv[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+                inv[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+                inv[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+                inv[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+                inv[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+                return inv;
+            },
 
-        // B. 自定义三次 B 样条曲线 (逼近型平滑)
-        class UniformCubicBSpline extends THREE.Curve {
-            constructor(points) {
-                super();
-                this.points = points || [];
-            }
+            // --- 卡尔曼平滑主逻辑 ---
+            smooth: function(points) {
+                const n = points.length;
+                if (n < 3) return points; 
 
-            getPoint(t, optionalTarget = new THREE.Vector3()) {
-                const points = this.points;
-                const numPoints = points.length;
+                const x_data = points.map(p => p.x);
+                const y_data = points.map(p => p.y);
 
-                // 如果点数不足4个，退化为线性插值
-                if (numPoints < 4) {
-                    const i = (numPoints - 1) * t;
-                    const idx = Math.floor(i);
-                    const weight = i - idx;
-                    const p0 = points[Math.min(idx, numPoints - 1)];
-                    const p1 = points[Math.min(idx + 1, numPoints - 1)];
-                    return optionalTarget.copy(p0).lerp(p1, weight);
+                const dt = 1.0;
+                const process_noise = 0.05;
+                const measurement_noise = 0.3;
+
+                // 初始化矩阵
+                const F = new Float64Array([1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1]);
+                const FT = this.transpose(F, 4, 4);
+                const H = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0]);
+                const HT = this.transpose(H, 2, 4);
+
+                const Q = this.eye(4);
+                for(let i=0; i<16; i++) Q[i] *= process_noise;
+                const R = this.eye(2);
+                for(let i=0; i<4; i++) R[i] *= measurement_noise;
+
+                let x_est = new Float64Array([x_data[0], y_data[0], 0, 0]); 
+                let P = this.eye(4);
+
+                const x_filtered = new Array(n);
+                const P_filtered = new Array(n);
+                const P_predicted = new Array(n);
+
+                // 前向滤波
+                for (let i = 0; i < n; i++) {
+                    const x_pred = this.matmul(F, 4, 4, x_est, 4, 1);
+                    const P_pred_temp = this.matmul(F, 4, 4, P, 4, 4);
+                    const P_pred = this.add(this.matmul(P_pred_temp, 4, 4, FT, 4, 4), Q);
+                    
+                    if (i === 0) {
+                         x_est = new Float64Array([x_data[0], y_data[0], 0, 0]);
+                         P = this.eye(4);
+                         x_filtered[i] = x_est;
+                         P_filtered[i] = P;
+                         P_predicted[i] = P;
+                         continue;
+                    }
+                    P_predicted[i] = P_pred;
+
+                    const z = new Float64Array([x_data[i], y_data[i]]);
+                    const H_x_pred = this.matmul(H, 2, 4, x_pred, 4, 1);
+                    const y_res = this.sub(z, H_x_pred);
+                    const H_P_pred = this.matmul(H, 2, 4, P_pred, 4, 4);
+                    const S_temp = this.matmul(H_P_pred, 2, 4, HT, 4, 2);
+                    const S = this.add(S_temp, R);
+                    const S_inv = this.inv2x2(S);
+                    const P_pred_HT = this.matmul(P_pred, 4, 4, HT, 4, 2);
+                    const K = this.matmul(P_pred_HT, 4, 2, S_inv, 2, 2);
+                    const K_y = this.matmul(K, 4, 2, y_res, 2, 1);
+                    x_est = this.add(x_pred, K_y);
+                    const K_H = this.matmul(K, 4, 2, H, 2, 4);
+                    const I = this.eye(4);
+                    const I_minus_KH = this.sub(I, K_H);
+                    P = this.matmul(I_minus_KH, 4, 4, P_pred, 4, 4);
+
+                    x_filtered[i] = x_est;
+                    P_filtered[i] = P;
                 }
 
-                // B样条段数 = 点数 - 3
-                const numSegments = numPoints - 3;
-                let u = t * numSegments;
-                let i = Math.floor(u);
+                // 后向平滑 (RTS)
+                const x_smoothed = new Array(n);
+                x_smoothed[n - 1] = x_filtered[n - 1];
 
-                if (i >= numSegments) {
-                    i = numSegments - 1;
-                    u = numSegments;
+                for (let i = n - 2; i >= 0; i--) {
+                    const x_filt = x_filtered[i];
+                    const P_filt = P_filtered[i];
+                    const P_pred_next = P_predicted[i + 1];
+                    const x_pred_next = this.matmul(F, 4, 4, x_filt, 4, 1);
+                    const inv_P_pred = this.inv4x4(P_pred_next);
+                    const P_filt_FT = this.matmul(P_filt, 4, 4, FT, 4, 4);
+                    const C = this.matmul(P_filt_FT, 4, 4, inv_P_pred, 4, 4);
+                    const diff = this.sub(x_smoothed[i + 1], x_pred_next);
+                    const correction = this.matmul(C, 4, 4, diff, 4, 1);
+                    x_smoothed[i] = this.add(x_filt, correction);
                 }
 
-                const t_local = u - i;
-                const p0 = points[i];
-                const p1 = points[i + 1];
-                const p2 = points[i + 2];
-                const p3 = points[i + 3];
-
-                // 三次 B 样条基函数
-                const t2 = t_local * t_local;
-                const t3 = t2 * t_local;
-
-                const b0 = (-t3 + 3 * t2 - 3 * t_local + 1) / 6;
-                const b1 = (3 * t3 - 6 * t2 + 4) / 6;
-                const b2 = (-3 * t3 + 3 * t2 + 3 * t_local + 1) / 6;
-                const b3 = t3 / 6;
-
-                optionalTarget.set(0, 0, 0)
-                    .addScaledVector(p0, b0)
-                    .addScaledVector(p1, b1)
-                    .addScaledVector(p2, b2)
-                    .addScaledVector(p3, b3);
-
-                return optionalTarget;
+                const result = [];
+                for (let i = 0; i < n; i++) {
+                    result.push(new THREE.Vector3(x_smoothed[i][0], x_smoothed[i][1], 0.08));
+                }
+                return result;
             }
-        }
+        };
 
         // --- 1. 初始化场景 ---
         const width = container.clientWidth || 400;
@@ -2339,7 +2460,6 @@
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(width, height);
 
-        // 保护 HTML 按钮
         const oldCanvas = container.querySelector('canvas');
         if (oldCanvas) container.removeChild(oldCanvas);
         container.appendChild(renderer.domElement);
@@ -2362,31 +2482,30 @@
         dogGroup.add(arrowHelper);
         scene.add(dogGroup);
 
-        // B1. 实时雷达层 (带颜色)
+        // B1. 实时雷达层
         const scanGeom = new THREE.BufferGeometry();
         const scanPositions = new Float32Array(5000 * 3);
-        const scanColors = new Float32Array(5000 * 3);
+        const scanColors = new Float32Array(5000 * 3); 
         scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
-        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3));
+        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3)); 
 
         const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
-            vertexColors: true,
-            size: 0.03,
+            vertexColors: true, 
+            size: 0.03,         
             sizeAttenuation: true
         }));
         scanMesh.frustumCulled = false;
         scene.add(scanMesh);
 
-        // B2. 历史地图层 (带颜色)
+        // B2. 历史地图层
         const mapMaxPoints = 500000;
         const mapGeom = new THREE.BufferGeometry();
         const mapPositions = new Float32Array(mapMaxPoints * 3);
-        const mapColors = new Float32Array(mapMaxPoints * 3);
+        const mapColors = new Float32Array(mapMaxPoints * 3); 
 
         mapGeom.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
-        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3));
+        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3)); 
 
-        // 初始化位置为无限远
         for(let i=0; i<mapMaxPoints*3; i++) mapPositions[i] = 99999;
 
         const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
@@ -2403,7 +2522,6 @@
         // C. 机器狗轨迹
         const trailGroup = new THREE.Group();
         scene.add(trailGroup);
-        // 创建专门存放电缆破损红点的组
         const faultMarkerGroup = new THREE.Group();
         scene.add(faultMarkerGroup);
 
@@ -2413,13 +2531,13 @@
         let lastTrailPos = new THREE.Vector3(-999, -999, 0);
         let currentTrailMesh = null;
 
-        // D. 地下电缆 (使用 B 样条相关变量)
+        // D. 地下电缆
         const cableGroup = new THREE.Group(); scene.add(cableGroup);
         const redCableGroup = new THREE.Group(); scene.add(redCableGroup);
         const cableMat = new THREE.MeshBasicMaterial({ color: 0x00ccff });
         const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-        
-        const cablePoints = []; // 存储过滤后的控制点
+        const cablePoints = [];
+        let segmentPoints = [];
         let lastCablePos = new THREE.Vector3(-999, -999, 0);
         let lastSignal = -1;
         let currentCableMesh = null;
@@ -2447,7 +2565,6 @@
         flagObj.visible = false;
         navGroup.add(flagObj);
 
-        // 导航路径线
         const navLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0x00ff00, dashSize: 0.2, gapSize: 0.1 }));
         navGroup.add(navLine);
 
@@ -2457,19 +2574,16 @@
         let phi = Math.PI / 3.5;
         const orbitTarget = new THREE.Vector3(0, 0, 0);
 
-        // 导航变量
         let isPicking = false;
         let navGoal = null;
         let isNavigating = false;
         let navInterval = null;
         let currentRobotPose = { x: 0, y: 0, yaw: 0 };
 
-        // 核心路径变量
         let navPath = [];
         let navOriginalPath = [];
         let activeNavTrail = [];
 
-        // UI DOM
         const elNavPanel = document.getElementById('navInfoPanel');
         const elNavDist = document.getElementById('navDistVal');
         const elNavError = document.getElementById('navErrorVal');
@@ -2484,7 +2598,6 @@
         }
         updateCamera();
 
-        // UI 更新
         function updateDistanceUI() {
             if (navPath.length > 0 && currentRobotPose) {
                 const goal = navPath[navPath.length - 1];
@@ -2514,7 +2627,6 @@
             const gridStart = worldToGrid(start.x, start.y);
             let gridEnd = worldToGrid(end.x, end.y);
 
-            // 1. 构建障碍物地图
             const obstacles = new Set();
             const addObstacle = (wx, wy, wz) => {
                 if (wz > 0.2 && wz < 1.0) {
@@ -2924,7 +3036,7 @@
         if (btnClearCable) {
             btnClearCable.onclick = function() {
                 cablePoints.length = 0;
-                smoothBuffer.length = 0; // 同时清空平滑缓冲区
+                segmentPoints.length = 0;
                 lastCablePos.set(-999, -999, 0);
                 if (currentCableMesh) {
                     cableGroup.remove(currentCableMesh);
@@ -3014,8 +3126,6 @@
                 const isFault = window.g_isFaultDetected === true;
 
                 if (isFault) {
-                    // 获取当前信号值显示在日志里 (可选)
-                    const magVal = window.g_realtimeMag || 0;
                     if (currentPos.distanceTo(lastFaultPos) > 0.1) {
                         const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
                         const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
@@ -3023,11 +3133,9 @@
                         faultMesh.position.copy(currentPos);
                         faultMarkerGroup.add(faultMesh);
                         lastFaultPos.copy(currentPos);
-                        console.log(`🔴 探测到电缆破损! 信号值: ${magVal.toFixed(0)}, 位置:`, currentPos);
+                        console.log(`🔴 探测到电缆破损! 位置:`, currentPos);
                     }
                 }
-                
-                // 1. 机器狗轨迹绘制 (保持 CatmullRom)
                 if (currentPos.distanceTo(lastTrailPos) > 0.05) {
                     trailPoints.push(currentPos);
                     lastTrailPos = currentPos;
@@ -3045,106 +3153,82 @@
                     }
                 }
 
-                // ------------------------------------------------------------
-                // 2. ⚡️ 电缆绘制 (新逻辑：全路径 B 样条 + 滑动平均去 S 型 + 信号0锚点)
-                // ------------------------------------------------------------
+                // =========================================================
+                // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
+                // =========================================================
                 const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
+                
+                let isFeaturePoint = false;
 
-                // 核心开关：只有在“自动巡线”模式下才记录数据
-                // 这里的 isAutoTracking 是全局变量
-                if (isAutoTracking) {
+                // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
+                if (sig === 0) {
+                    isFeaturePoint = true;
+                }
+                // 规则 2: 捕捉“跨越”时刻 (1 <-> 2)
+                else if ((lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1)) {
+                    isFeaturePoint = true;
+                    console.log("⚡ 捕捉到跨越点 (1 <-> 2)");
+                }
+                // 规则 3: 回归到“正上方” (Any -> 0)
+                else if (lastSignal !== 0 && sig === 0) {
+                    isFeaturePoint = true;
+                }
 
-                    // 1️⃣ 将当前机器狗位置加入平滑缓冲区
-                    smoothBuffer.push(currentPos.clone());
-                    if (smoothBuffer.length > SMOOTH_WINDOW_SIZE) {
-                        smoothBuffer.shift(); // 移除最老的数据，保持窗口大小
-                    }
+                if (isFeaturePoint) {
+                    const dist = currentPos.distanceTo(lastCablePos);
+                    if (dist > 0.1) {
+                        const cablePt = new THREE.Vector3(px, py, 0.08);
+                        cablePoints.push(cablePt);
+                        lastCablePos = cablePt;
 
-                    // 2️⃣ 计算“拟合坐标”
-                    let targetPoint = null;
-
-                    if (sig === 0) {
-                        // 🌟 情况 A：信号为 0 (Ground Truth)
-                        // 说明机器狗正骑在电缆上，这是最准的数据！
-                        // 策略：无视平滑，直接使用当前真实位置
-                        targetPoint = new THREE.Vector3(px, py, 0.08);
-                    } else {
-                        // 🌀 情况 B：信号为 1 或 2 (正在 S 型走位)
-                        // 策略：计算缓冲区内所有点的“平均位置”
-                        // 数学原理：左偏和右偏的坐标一平均，就得到了中间的电缆位置
-                        let sumX = 0, sumY = 0;
-                        for (let pt of smoothBuffer) {
-                            sumX += pt.x;
-                            sumY += pt.y;
-                        }
-                        // 得到“去抖动”后的中心点
-                        targetPoint = new THREE.Vector3(sumX / smoothBuffer.length, sumY / smoothBuffer.length, 0.08);
-                    }
-
-                    // 3️⃣ 距离过滤与 B 样条生成
-                    const dist = targetPoint.distanceTo(lastCablePos);
-                    
-                    // 阈值：0.2米 (稍微大一点，进一步过滤微小抖动)
-                    if (dist > 0.2) {
-                        cablePoints.push(targetPoint);
-                        lastCablePos = targetPoint.clone();
-
-                        // 限制总长度
-                        if (cablePoints.length > 3000) cablePoints.shift();
-
-                        // 4️⃣ 实时重绘 B 样条
-                        if (cablePoints.length >= 4) {
+                        if (cablePoints.length > 2000) cablePoints.shift();
+                        if (cablePoints.length > 3) {
                             if (currentCableMesh) {
                                 cableGroup.remove(currentCableMesh);
                                 currentCableMesh.geometry.dispose();
+                                currentCableMesh = null;
                             }
-
-                            // 使用自定义的 B 样条类 (它会再次对点集进行数学平滑)
-                            const curve = new UniformCubicBSpline(cablePoints);
+                            // 调用卡尔曼平滑
+                            let displayPoints = KalmanSmoother.smooth(cablePoints);
                             
-                            // 增加分段数 (points * 10) 让曲线极其顺滑
-                            const tube = new THREE.TubeGeometry(curve, cablePoints.length * 10, 0.03, 8, false);
+                            // 绘制平滑曲线
+                            const curve = new THREE.CatmullRomCurve3(displayPoints);
+                            const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
                             currentCableMesh = new THREE.Mesh(tube, cableMat);
                             cableGroup.add(currentCableMesh);
                         }
                     }
                 }
-                
                 lastSignal = sig;
             }
 
             const scan = data.scan;
             if (scan && scan.length > 0) {
                 const scanAttr = scanMesh.geometry.attributes.position;
-                const colAttr = scanMesh.geometry.attributes.color; // ✅ 获取颜色属性
+                const colAttr = scanMesh.geometry.attributes.color; 
 
                 const scanPos = scanAttr.array;
                 const scanCol = colAttr.array;
 
-                let c = 0; // 位置索引
-                let d = 0; // 颜色索引
+                let c = 0; 
+                let d = 0; 
                 let scaleFactor = 1.0;
                 if (data.robot && (Math.abs(data.robot.x) > 100)) scaleFactor = 0.001;
 
                 const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
 
                 if (isFlat) {
-                    // ✅ [核心修改] 适配 [x, y, z, intensity] 格式，步长改为 4
                     for (let i = 0; i < scan.length; i += 4) {
                         if (c >= 5000 * 3) break;
 
-                        // 1. 设置位置
                         scanPos[c++] = scan[i] * scaleFactor;
                         scanPos[c++] = scan[i+1] * scaleFactor;
                         let valZ = (i + 2 < scan.length) ? scan[i+2] : 0.1;
                         scanPos[c++] = valZ * scaleFactor;
 
-                        // 2. 设置颜色 (热力图)
                         const intensity = (i + 3 < scan.length) ? scan[i+3] : 0;
                         const maxVal = 255.0;
-                        // 归一化 (0.0 ~ 1.0)
                         let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
-                        // HSL 映射: 蓝色(0.66) -> 红色(0.0)
                         const color = new THREE.Color();
                         color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
 
@@ -3156,7 +3240,7 @@
 
                 for (let i = c; i < 5000 * 3; i++) scanPos[i] = 99999;
                 scanMesh.geometry.attributes.position.needsUpdate = true;
-                scanMesh.geometry.attributes.color.needsUpdate = true; // ✅ 标记颜色更新
+                scanMesh.geometry.attributes.color.needsUpdate = true;
 
                 if (pose) {
                     const poseX = pose.x * scaleFactor;
@@ -3164,17 +3248,16 @@
                     const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
                     if (dist > 0.2) {
                         const mapPos = mapMesh.geometry.attributes.position.array;
-                        const mapCol = mapMesh.geometry.attributes.color.array; // ✅ 获取地图颜色数组
+                        const mapCol = mapMesh.geometry.attributes.color.array; 
 
-                        // 拷贝位置和颜色到历史地图
                         for (let k = 0; k < c; k++) {
                             if (mapCursor >= 500000 * 3) mapCursor = 0;
                             mapPos[mapCursor] = scanPos[k];
-                            mapCol[mapCursor] = scanCol[k]; // ✅ 同步拷贝颜色
+                            mapCol[mapCursor] = scanCol[k]; 
                             mapCursor++;
                         }
                         mapMesh.geometry.attributes.position.needsUpdate = true;
-                        mapMesh.geometry.attributes.color.needsUpdate = true; // ✅ 标记颜色更新
+                        mapMesh.geometry.attributes.color.needsUpdate = true; 
                         lastKeyframePose = { x: poseX, y: poseY };
                     }
                 }
