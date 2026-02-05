@@ -2254,888 +2254,1062 @@
         });
     });
 // ==========================================
-// II. SLAM 3D 可视化 (A*避障规划 + 纯追踪平滑曲线 + 误差计算 + 强度热力图 + 卡尔曼滤波)
+// II. SLAM 3D 可视化 (A*避障规划 + 纯追踪平滑曲线 + 误差计算 + 强度热力图 + 卡尔曼滤波 + 电缆跟踪)
 // ==========================================
-    (function initSlamVis() {
-        const container = document.getElementById("pathMapArea");
-        if (!container) { setTimeout(initSlamVis, 500); return; }
+(function initSlamVis() {
+    const container = document.getElementById("pathMapArea");
+    if (!container) { setTimeout(initSlamVis, 500); return; }
 
-        container.style.overflow = "hidden";
-        container.style.background = "#111";
+    container.style.overflow = "hidden";
+    container.style.background = "#111";
+    container.style.position = "relative"; // 确保子元素绝对定位相对于此容器
 
-        // ==========================================
-        // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
-        // ==========================================
-        const KalmanSmoother = {
-            // --- 基础矩阵运算 ---
-            zeros: (r, c) => new Float64Array(r * c),
-            eye: (n) => {
-                const m = new Float64Array(n * n);
-                for (let i = 0; i < n; i++) m[i * n + i] = 1.0;
-                return m;
-            },
-            matmul: (A, rowsA, colsA, B, rowsB, colsB) => {
-                if (colsA !== rowsB) throw new Error("Matrix dimension mismatch");
-                const C = new Float64Array(rowsA * colsB);
-                for (let i = 0; i < rowsA; i++) {
-                    for (let j = 0; j < colsB; j++) {
-                        let sum = 0.0;
-                        for (let k = 0; k < colsA; k++) {
-                            sum += A[i * colsA + k] * B[k * colsB + j];
-                        }
-                        C[i * colsB + j] = sum;
+    // ==========================================
+    // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
+    // ==========================================
+    const KalmanSmoother = {
+        // --- 基础矩阵运算 ---
+        zeros: (r, c) => new Float64Array(r * c),
+        eye: (n) => {
+            const m = new Float64Array(n * n);
+            for (let i = 0; i < n; i++) m[i * n + i] = 1.0;
+            return m;
+        },
+        matmul: (A, rowsA, colsA, B, rowsB, colsB) => {
+            if (colsA !== rowsB) throw new Error("Matrix dimension mismatch");
+            const C = new Float64Array(rowsA * colsB);
+            for (let i = 0; i < rowsA; i++) {
+                for (let j = 0; j < colsB; j++) {
+                    let sum = 0.0;
+                    for (let k = 0; k < colsA; k++) {
+                        sum += A[i * colsA + k] * B[k * colsB + j];
+                    }
+                    C[i * colsB + j] = sum;
+                }
+            }
+            return C;
+        },
+        add: (A, B) => {
+            const C = new Float64Array(A.length);
+            for (let i = 0; i < A.length; i++) C[i] = A[i] + B[i];
+            return C;
+        },
+        sub: (A, B) => {
+            const C = new Float64Array(A.length);
+            for (let i = 0; i < A.length; i++) C[i] = A[i] - B[i];
+            return C;
+        },
+        transpose: (A, rows, cols) => {
+            const T = new Float64Array(rows * cols);
+            for (let i = 0; i < rows; i++) {
+                for (let j = 0; j < cols; j++) {
+                    T[j * rows + i] = A[i * cols + j];
+                }
+            }
+            return T;
+        },
+        inv2x2: (M) => {
+            const det = M[0] * M[3] - M[1] * M[2];
+            if (Math.abs(det) < 1e-10) return M;
+            const invDet = 1.0 / det;
+            return new Float64Array([
+                M[3] * invDet, -M[1] * invDet,
+                -M[2] * invDet, M[0] * invDet
+            ]);
+        },
+        inv4x4: (m) => {
+            const inv = new Float64Array(16);
+            const a = m;
+            const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+            const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+            const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+            const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+            const b00 = a00 * a11 - a01 * a10;
+            const b01 = a00 * a12 - a02 * a10;
+            const b02 = a00 * a13 - a03 * a10;
+            const b03 = a01 * a12 - a02 * a11;
+            const b04 = a01 * a13 - a03 * a11;
+            const b05 = a02 * a13 - a03 * a12;
+            const b06 = a20 * a31 - a21 * a30;
+            const b07 = a20 * a32 - a22 * a30;
+            const b08 = a20 * a33 - a23 * a30;
+            const b09 = a21 * a32 - a22 * a31;
+            const b10 = a21 * a33 - a23 * a31;
+            const b11 = a22 * a33 - a23 * a32;
+            let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+            if (Math.abs(det) < 1e-10) return m;
+            det = 1.0 / det;
+            inv[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+            inv[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+            inv[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+            inv[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+            inv[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+            inv[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+            inv[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+            inv[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+            inv[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+            inv[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+            inv[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+            inv[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+            inv[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+            inv[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+            inv[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+            inv[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+            return inv;
+        },
+
+        // --- 卡尔曼平滑主逻辑 ---
+        smooth: function(points) {
+            const n = points.length;
+            if (n < 3) return points; 
+
+            const x_data = points.map(p => p.x);
+            const y_data = points.map(p => p.y);
+
+            const dt = 1.0;
+            const process_noise = 0.05;
+            const measurement_noise = 0.3;
+
+            // 初始化矩阵
+            const F = new Float64Array([1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1]);
+            const FT = this.transpose(F, 4, 4);
+            const H = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0]);
+            const HT = this.transpose(H, 2, 4);
+
+            const Q = this.eye(4);
+            for(let i=0; i<16; i++) Q[i] *= process_noise;
+            const R = this.eye(2);
+            for(let i=0; i<4; i++) R[i] *= measurement_noise;
+
+            let x_est = new Float64Array([x_data[0], y_data[0], 0, 0]); 
+            let P = this.eye(4);
+
+            const x_filtered = new Array(n);
+            const P_filtered = new Array(n);
+            const P_predicted = new Array(n);
+
+            // 前向滤波
+            for (let i = 0; i < n; i++) {
+                const x_pred = this.matmul(F, 4, 4, x_est, 4, 1);
+                const P_pred_temp = this.matmul(F, 4, 4, P, 4, 4);
+                const P_pred = this.add(this.matmul(P_pred_temp, 4, 4, FT, 4, 4), Q);
+                
+                if (i === 0) {
+                        x_est = new Float64Array([x_data[0], y_data[0], 0, 0]);
+                        P = this.eye(4);
+                        x_filtered[i] = x_est;
+                        P_filtered[i] = P;
+                        P_predicted[i] = P;
+                        continue;
+                }
+                P_predicted[i] = P_pred;
+
+                const z = new Float64Array([x_data[i], y_data[i]]);
+                const H_x_pred = this.matmul(H, 2, 4, x_pred, 4, 1);
+                const y_res = this.sub(z, H_x_pred);
+                const H_P_pred = this.matmul(H, 2, 4, P_pred, 4, 4);
+                const S_temp = this.matmul(H_P_pred, 2, 4, HT, 4, 2);
+                const S = this.add(S_temp, R);
+                const S_inv = this.inv2x2(S);
+                const P_pred_HT = this.matmul(P_pred, 4, 4, HT, 4, 2);
+                const K = this.matmul(P_pred_HT, 4, 2, S_inv, 2, 2);
+                const K_y = this.matmul(K, 4, 2, y_res, 2, 1);
+                x_est = this.add(x_pred, K_y);
+                const K_H = this.matmul(K, 4, 2, H, 2, 4);
+                const I = this.eye(4);
+                const I_minus_KH = this.sub(I, K_H);
+                P = this.matmul(I_minus_KH, 4, 4, P_pred, 4, 4);
+
+                x_filtered[i] = x_est;
+                P_filtered[i] = P;
+            }
+
+            // 后向平滑 (RTS)
+            const x_smoothed = new Array(n);
+            x_smoothed[n - 1] = x_filtered[n - 1];
+
+            for (let i = n - 2; i >= 0; i--) {
+                const x_filt = x_filtered[i];
+                const P_filt = P_filtered[i];
+                const P_pred_next = P_predicted[i + 1];
+                const x_pred_next = this.matmul(F, 4, 4, x_filt, 4, 1);
+                const inv_P_pred = this.inv4x4(P_pred_next);
+                const P_filt_FT = this.matmul(P_filt, 4, 4, FT, 4, 4);
+                const C = this.matmul(P_filt_FT, 4, 4, inv_P_pred, 4, 4);
+                const diff = this.sub(x_smoothed[i + 1], x_pred_next);
+                const correction = this.matmul(C, 4, 4, diff, 4, 1);
+                x_smoothed[i] = this.add(x_filt, correction);
+            }
+
+            const result = [];
+            for (let i = 0; i < n; i++) {
+                result.push(new THREE.Vector3(x_smoothed[i][0], x_smoothed[i][1], 0.08));
+            }
+            return result;
+        }
+    };
+
+    // --- 1. 初始化场景 ---
+    const width = container.clientWidth || 400;
+    const height = container.clientHeight || 300;
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+    const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
+    camera.up.set(0, 0, 1);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(width, height);
+
+    const oldCanvas = container.querySelector('canvas');
+    if (oldCanvas) container.removeChild(oldCanvas);
+    container.appendChild(renderer.domElement);
+
+    // --- 2. 创建对象 ---
+
+    // A. 机器狗
+    const dogGroup = new THREE.Group();
+    const bodyMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.4, 0.2, 0.1),
+        new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+    );
+    const arrowHelper = new THREE.ArrowHelper(
+        new THREE.Vector3(1, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        0.6,
+        0x00ff00
+    );
+    dogGroup.add(bodyMesh);
+    dogGroup.add(arrowHelper);
+    scene.add(dogGroup);
+
+    // B1. 实时雷达层
+    const scanGeom = new THREE.BufferGeometry();
+    const scanPositions = new Float32Array(5000 * 3);
+    const scanColors = new Float32Array(5000 * 3); 
+    scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
+    scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3)); 
+
+    const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
+        vertexColors: true, 
+        size: 0.03,         
+        sizeAttenuation: true
+    }));
+    scanMesh.frustumCulled = false;
+    scene.add(scanMesh);
+
+    // B2. 历史地图层
+    const mapMaxPoints = 500000;
+    const mapGeom = new THREE.BufferGeometry();
+    const mapPositions = new Float32Array(mapMaxPoints * 3);
+    const mapColors = new Float32Array(mapMaxPoints * 3); 
+
+    mapGeom.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
+    mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3)); 
+
+    for(let i=0; i<mapMaxPoints*3; i++) mapPositions[i] = 99999;
+
+    const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
+        vertexColors: true,
+        size: 0.03,
+        sizeAttenuation: true
+    }));
+    mapMesh.frustumCulled = false;
+    scene.add(mapMesh);
+
+    let mapCursor = 0;
+    let lastKeyframePose = { x: -999, y: -999 };
+
+    // C. 机器狗轨迹
+    const trailGroup = new THREE.Group();
+    scene.add(trailGroup);
+    const faultMarkerGroup = new THREE.Group();
+    scene.add(faultMarkerGroup);
+
+    let lastFaultPos = new THREE.Vector3(-999, -999, -999);
+    
+    // ✅ 修改 1: 机器狗路径改回原来的青色 (0x00ccff)
+    const trailMat = new THREE.MeshBasicMaterial({ color: 0x00ccff });
+    
+    const trailPoints = [];
+    let lastTrailPos = new THREE.Vector3(-999, -999, 0);
+    let currentTrailMesh = null;
+
+    // D. 地下电缆
+    const cableGroup = new THREE.Group(); scene.add(cableGroup);
+    const redCableGroup = new THREE.Group(); scene.add(redCableGroup);
+    // ✅ 修改 2: 电缆路径改为黄色
+    const cableMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+    const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const cablePoints = [];
+    let segmentPoints = [];
+    let lastCablePos = new THREE.Vector3(-999, -999, 0);
+    let lastSignal = -1;
+    let currentCableMesh = null;
+
+    // E. 网格与交互
+    const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);
+    gridHelper.rotation.x = Math.PI / 2;
+    scene.add(gridHelper);
+
+    const planeGeo = new THREE.PlaneGeometry(200, 200);
+    const planeMat = new THREE.MeshBasicMaterial({ visible: false });
+    const clickPlane = new THREE.Mesh(planeGeo, planeMat);
+    scene.add(clickPlane);
+
+    // F. 导航标记
+    const navGroup = new THREE.Group();
+    scene.add(navGroup);
+
+    const flagObj = new THREE.Group();
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1, 8), new THREE.MeshBasicMaterial({color:0xffffff}));
+    pole.rotation.x = Math.PI/2; pole.position.z = 0.5;
+    const flag = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape().moveTo(0,0).lineTo(0,0.4).lineTo(0.6,0.2).lineTo(0,0)), new THREE.MeshBasicMaterial({color:0xff0000, side:THREE.DoubleSide}));
+    flag.rotation.x = Math.PI/2; flag.position.set(0,0,0.6);
+    flagObj.add(pole); flagObj.add(flag);
+    flagObj.visible = false;
+    navGroup.add(flagObj);
+
+    const navLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0x00ff00, dashSize: 0.2, gapSize: 0.1 }));
+    navGroup.add(navLine);
+
+    // --- 3. 交互控制 ---
+    let radius = 8;
+    let theta = Math.PI * 1.25;
+    let phi = Math.PI / 3.5;
+    const orbitTarget = new THREE.Vector3(0, 0, 0);
+
+    let isPicking = false;
+    let navGoal = null;
+    let isNavigating = false;
+    let navInterval = null;
+    let currentRobotPose = { x: 0, y: 0, yaw: 0 };
+
+    // 核心路径变量
+    let navPath = [];
+    let navOriginalPath = [];
+    let activeNavTrail = [];
+
+    // ✅ 新增：电缆跟踪专用状态变量
+    let isCableTrackingMode = false; // 是否处于“跟踪电缆”模式（会禁止画轨迹）
+    let cableTrackingState = 'IDLE'; // IDLE, TO_START, FOLLOWING
+
+    const elNavPanel = document.getElementById('navInfoPanel');
+    const elNavDist = document.getElementById('navDistVal');
+    const elNavError = document.getElementById('navErrorVal');
+
+    function updateCamera() {
+        const x = orbitTarget.x + radius * Math.sin(phi) * Math.cos(theta);
+        const y = orbitTarget.y + radius * Math.sin(phi) * Math.sin(theta);
+        const z = orbitTarget.z + radius * Math.cos(phi);
+        camera.position.set(x, y, z);
+        camera.lookAt(orbitTarget);
+        camera.up.set(0, 0, 1);
+    }
+    updateCamera();
+
+    function updateDistanceUI() {
+        if (navPath.length > 0 && currentRobotPose) {
+            const goal = navPath[navPath.length - 1];
+            const dx = goal.x - currentRobotPose.x;
+            const dy = goal.y - currentRobotPose.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+
+            if (elNavDist) elNavDist.textContent = dist.toFixed(2);
+            if (elNavPanel) elNavPanel.style.display = 'block';
+        } else {
+            if (elNavPanel) elNavPanel.style.display = 'none';
+        }
+    }
+
+    // --- ✅ A* 寻路算法 ---
+    const GRID_SIZE = 0.2;
+
+    function worldToGrid(x, y) {
+        return { x: Math.round(x / GRID_SIZE), y: Math.round(y / GRID_SIZE) };
+    }
+    function gridToWorld(gx, gy) {
+        return { x: gx * GRID_SIZE, y: gy * GRID_SIZE };
+    }
+
+    function planPathAStar(start, end) {
+        console.log("🔍 A* 规划中...");
+        const gridStart = worldToGrid(start.x, start.y);
+        let gridEnd = worldToGrid(end.x, end.y);
+
+        const obstacles = new Set();
+        const addObstacle = (wx, wy, wz) => {
+            if (wz > 0.2 && wz < 1.0) {
+                const g = worldToGrid(wx, wy);
+                for(let i=-1; i<=1; i++) {
+                    for(let j=-1; j<=1; j++) {
+                        obstacles.add(`${g.x+i},${g.y+j}`);
                     }
                 }
-                return C;
-            },
-            add: (A, B) => {
-                const C = new Float64Array(A.length);
-                for (let i = 0; i < A.length; i++) C[i] = A[i] + B[i];
-                return C;
-            },
-            sub: (A, B) => {
-                const C = new Float64Array(A.length);
-                for (let i = 0; i < A.length; i++) C[i] = A[i] - B[i];
-                return C;
-            },
-            transpose: (A, rows, cols) => {
-                const T = new Float64Array(rows * cols);
-                for (let i = 0; i < rows; i++) {
-                    for (let j = 0; j < cols; j++) {
-                        T[j * rows + i] = A[i * cols + j];
-                    }
-                }
-                return T;
-            },
-            inv2x2: (M) => {
-                const det = M[0] * M[3] - M[1] * M[2];
-                if (Math.abs(det) < 1e-10) return M;
-                const invDet = 1.0 / det;
-                return new Float64Array([
-                    M[3] * invDet, -M[1] * invDet,
-                    -M[2] * invDet, M[0] * invDet
-                ]);
-            },
-            inv4x4: (m) => {
-                const inv = new Float64Array(16);
-                const a = m;
-                const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-                const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-                const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-                const a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-                const b00 = a00 * a11 - a01 * a10;
-                const b01 = a00 * a12 - a02 * a10;
-                const b02 = a00 * a13 - a03 * a10;
-                const b03 = a01 * a12 - a02 * a11;
-                const b04 = a01 * a13 - a03 * a11;
-                const b05 = a02 * a13 - a03 * a12;
-                const b06 = a20 * a31 - a21 * a30;
-                const b07 = a20 * a32 - a22 * a30;
-                const b08 = a20 * a33 - a23 * a30;
-                const b09 = a21 * a32 - a22 * a31;
-                const b10 = a21 * a33 - a23 * a31;
-                const b11 = a22 * a33 - a23 * a32;
-                let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-                if (Math.abs(det) < 1e-10) return m;
-                det = 1.0 / det;
-                inv[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
-                inv[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
-                inv[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
-                inv[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
-                inv[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
-                inv[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
-                inv[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
-                inv[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
-                inv[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
-                inv[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
-                inv[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
-                inv[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
-                inv[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
-                inv[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
-                inv[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
-                inv[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
-                return inv;
-            },
-
-            // --- 卡尔曼平滑主逻辑 ---
-            smooth: function(points) {
-                const n = points.length;
-                if (n < 3) return points; 
-
-                const x_data = points.map(p => p.x);
-                const y_data = points.map(p => p.y);
-
-                const dt = 1.0;
-                const process_noise = 0.05;
-                const measurement_noise = 0.3;
-
-                // 初始化矩阵
-                const F = new Float64Array([1, 0, dt, 0, 0, 1, 0, dt, 0, 0, 1, 0, 0, 0, 0, 1]);
-                const FT = this.transpose(F, 4, 4);
-                const H = new Float64Array([1, 0, 0, 0, 0, 1, 0, 0]);
-                const HT = this.transpose(H, 2, 4);
-
-                const Q = this.eye(4);
-                for(let i=0; i<16; i++) Q[i] *= process_noise;
-                const R = this.eye(2);
-                for(let i=0; i<4; i++) R[i] *= measurement_noise;
-
-                let x_est = new Float64Array([x_data[0], y_data[0], 0, 0]); 
-                let P = this.eye(4);
-
-                const x_filtered = new Array(n);
-                const P_filtered = new Array(n);
-                const P_predicted = new Array(n);
-
-                // 前向滤波
-                for (let i = 0; i < n; i++) {
-                    const x_pred = this.matmul(F, 4, 4, x_est, 4, 1);
-                    const P_pred_temp = this.matmul(F, 4, 4, P, 4, 4);
-                    const P_pred = this.add(this.matmul(P_pred_temp, 4, 4, FT, 4, 4), Q);
-                    
-                    if (i === 0) {
-                         x_est = new Float64Array([x_data[0], y_data[0], 0, 0]);
-                         P = this.eye(4);
-                         x_filtered[i] = x_est;
-                         P_filtered[i] = P;
-                         P_predicted[i] = P;
-                         continue;
-                    }
-                    P_predicted[i] = P_pred;
-
-                    const z = new Float64Array([x_data[i], y_data[i]]);
-                    const H_x_pred = this.matmul(H, 2, 4, x_pred, 4, 1);
-                    const y_res = this.sub(z, H_x_pred);
-                    const H_P_pred = this.matmul(H, 2, 4, P_pred, 4, 4);
-                    const S_temp = this.matmul(H_P_pred, 2, 4, HT, 4, 2);
-                    const S = this.add(S_temp, R);
-                    const S_inv = this.inv2x2(S);
-                    const P_pred_HT = this.matmul(P_pred, 4, 4, HT, 4, 2);
-                    const K = this.matmul(P_pred_HT, 4, 2, S_inv, 2, 2);
-                    const K_y = this.matmul(K, 4, 2, y_res, 2, 1);
-                    x_est = this.add(x_pred, K_y);
-                    const K_H = this.matmul(K, 4, 2, H, 2, 4);
-                    const I = this.eye(4);
-                    const I_minus_KH = this.sub(I, K_H);
-                    P = this.matmul(I_minus_KH, 4, 4, P_pred, 4, 4);
-
-                    x_filtered[i] = x_est;
-                    P_filtered[i] = P;
-                }
-
-                // 后向平滑 (RTS)
-                const x_smoothed = new Array(n);
-                x_smoothed[n - 1] = x_filtered[n - 1];
-
-                for (let i = n - 2; i >= 0; i--) {
-                    const x_filt = x_filtered[i];
-                    const P_filt = P_filtered[i];
-                    const P_pred_next = P_predicted[i + 1];
-                    const x_pred_next = this.matmul(F, 4, 4, x_filt, 4, 1);
-                    const inv_P_pred = this.inv4x4(P_pred_next);
-                    const P_filt_FT = this.matmul(P_filt, 4, 4, FT, 4, 4);
-                    const C = this.matmul(P_filt_FT, 4, 4, inv_P_pred, 4, 4);
-                    const diff = this.sub(x_smoothed[i + 1], x_pred_next);
-                    const correction = this.matmul(C, 4, 4, diff, 4, 1);
-                    x_smoothed[i] = this.add(x_filt, correction);
-                }
-
-                const result = [];
-                for (let i = 0; i < n; i++) {
-                    result.push(new THREE.Vector3(x_smoothed[i][0], x_smoothed[i][1], 0.08));
-                }
-                return result;
             }
         };
 
-        // --- 1. 初始化场景 ---
-        const width = container.clientWidth || 400;
-        const height = container.clientHeight || 300;
-        const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x111111, 0.02);
-
-        const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
-        camera.up.set(0, 0, 1);
-
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        renderer.setSize(width, height);
-
-        const oldCanvas = container.querySelector('canvas');
-        if (oldCanvas) container.removeChild(oldCanvas);
-        container.appendChild(renderer.domElement);
-
-        // --- 2. 创建对象 ---
-
-        // A. 机器狗
-        const dogGroup = new THREE.Group();
-        const bodyMesh = new THREE.Mesh(
-            new THREE.BoxGeometry(0.4, 0.2, 0.1),
-            new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
-        );
-        const arrowHelper = new THREE.ArrowHelper(
-            new THREE.Vector3(1, 0, 0),
-            new THREE.Vector3(0, 0, 0),
-            0.6,
-            0x00ff00
-        );
-        dogGroup.add(bodyMesh);
-        dogGroup.add(arrowHelper);
-        scene.add(dogGroup);
-
-        // B1. 实时雷达层
-        const scanGeom = new THREE.BufferGeometry();
-        const scanPositions = new Float32Array(5000 * 3);
-        const scanColors = new Float32Array(5000 * 3); 
-        scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
-        scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3)); 
-
-        const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
-            vertexColors: true, 
-            size: 0.03,         
-            sizeAttenuation: true
-        }));
-        scanMesh.frustumCulled = false;
-        scene.add(scanMesh);
-
-        // B2. 历史地图层
-        const mapMaxPoints = 500000;
-        const mapGeom = new THREE.BufferGeometry();
-        const mapPositions = new Float32Array(mapMaxPoints * 3);
-        const mapColors = new Float32Array(mapMaxPoints * 3); 
-
-        mapGeom.setAttribute('position', new THREE.BufferAttribute(mapPositions, 3));
-        mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3)); 
-
-        for(let i=0; i<mapMaxPoints*3; i++) mapPositions[i] = 99999;
-
-        const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
-            vertexColors: true,
-            size: 0.03,
-            sizeAttenuation: true
-        }));
-        mapMesh.frustumCulled = false;
-        scene.add(mapMesh);
-
-        let mapCursor = 0;
-        let lastKeyframePose = { x: -999, y: -999 };
-
-        // C. 机器狗轨迹
-        const trailGroup = new THREE.Group();
-        scene.add(trailGroup);
-        const faultMarkerGroup = new THREE.Group();
-        scene.add(faultMarkerGroup);
-
-        let lastFaultPos = new THREE.Vector3(-999, -999, -999);
-        const trailMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
-        const trailPoints = [];
-        let lastTrailPos = new THREE.Vector3(-999, -999, 0);
-        let currentTrailMesh = null;
-
-        // D. 地下电缆
-        const cableGroup = new THREE.Group(); scene.add(cableGroup);
-        const redCableGroup = new THREE.Group(); scene.add(redCableGroup);
-        const cableMat = new THREE.MeshBasicMaterial({ color: 0x00ccff });
-        const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-        const cablePoints = [];
-        let segmentPoints = [];
-        let lastCablePos = new THREE.Vector3(-999, -999, 0);
-        let lastSignal = -1;
-        let currentCableMesh = null;
-
-        // E. 网格与交互
-        const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);
-        gridHelper.rotation.x = Math.PI / 2;
-        scene.add(gridHelper);
-
-        const planeGeo = new THREE.PlaneGeometry(200, 200);
-        const planeMat = new THREE.MeshBasicMaterial({ visible: false });
-        const clickPlane = new THREE.Mesh(planeGeo, planeMat);
-        scene.add(clickPlane);
-
-        // F. 导航标记
-        const navGroup = new THREE.Group();
-        scene.add(navGroup);
-
-        const flagObj = new THREE.Group();
-        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 1, 8), new THREE.MeshBasicMaterial({color:0xffffff}));
-        pole.rotation.x = Math.PI/2; pole.position.z = 0.5;
-        const flag = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape().moveTo(0,0).lineTo(0,0.4).lineTo(0.6,0.2).lineTo(0,0)), new THREE.MeshBasicMaterial({color:0xff0000, side:THREE.DoubleSide}));
-        flag.rotation.x = Math.PI/2; flag.position.set(0,0,0.6);
-        flagObj.add(pole); flagObj.add(flag);
-        flagObj.visible = false;
-        navGroup.add(flagObj);
-
-        const navLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: 0x00ff00, dashSize: 0.2, gapSize: 0.1 }));
-        navGroup.add(navLine);
-
-        // --- 3. 交互控制 ---
-        let radius = 8;
-        let theta = Math.PI * 1.25;
-        let phi = Math.PI / 3.5;
-        const orbitTarget = new THREE.Vector3(0, 0, 0);
-
-        let isPicking = false;
-        let navGoal = null;
-        let isNavigating = false;
-        let navInterval = null;
-        let currentRobotPose = { x: 0, y: 0, yaw: 0 };
-
-        let navPath = [];
-        let navOriginalPath = [];
-        let activeNavTrail = [];
-
-        const elNavPanel = document.getElementById('navInfoPanel');
-        const elNavDist = document.getElementById('navDistVal');
-        const elNavError = document.getElementById('navErrorVal');
-
-        function updateCamera() {
-            const x = orbitTarget.x + radius * Math.sin(phi) * Math.cos(theta);
-            const y = orbitTarget.y + radius * Math.sin(phi) * Math.sin(theta);
-            const z = orbitTarget.z + radius * Math.cos(phi);
-            camera.position.set(x, y, z);
-            camera.lookAt(orbitTarget);
-            camera.up.set(0, 0, 1);
+        const scanArr = scanMesh.geometry.attributes.position.array;
+        for(let i=0; i<scanArr.length; i+=3) {
+            if(scanArr[i] < 9000) addObstacle(scanArr[i], scanArr[i+1], scanArr[i+2]);
         }
+        const mapArr = mapMesh.geometry.attributes.position.array;
+        for(let i=0; i<mapCursor*3; i+=3) {
+            if(mapArr[i] < 9000) addObstacle(mapArr[i], mapArr[i+1], mapArr[i+2]);
+        }
+
+        const endKey = `${gridEnd.x},${gridEnd.y}`;
+        if(obstacles.has(endKey)) {
+            console.warn("目标点不可达，搜索附近...");
+            let found = false, minD = Infinity, bestG = null;
+            for(let dx=-3; dx<=3; dx++) {
+                for(let dy=-3; dy<=3; dy++) {
+                    const nx = gridEnd.x+dx, ny = gridEnd.y+dy;
+                    if(!obstacles.has(`${nx},${ny}`)) {
+                        const d = dx*dx + dy*dy;
+                        if(d < minD) { minD=d; bestG={x:nx, y:ny}; found=true; }
+                    }
+                }
+            }
+            if(found) gridEnd = bestG;
+            else { alert("❌ 目标区域完全堵塞！"); return null; }
+        }
+
+        const openSet = [];
+        const closedSet = new Set();
+        const cameFrom = {};
+        const gScore = {};
+        const fScore = {};
+
+        const startKey = `${gridStart.x},${gridStart.y}`;
+        openSet.push(gridStart);
+        gScore[startKey] = 0;
+        fScore[startKey] = Math.hypot(gridStart.x - gridEnd.x, gridStart.y - gridEnd.y);
+
+        let iterations = 0;
+        while(openSet.length > 0) {
+            if(iterations++ > 5000) { console.warn("A* 超时"); break; }
+
+            openSet.sort((a,b) => (fScore[`${a.x},${a.y}`]||Infinity) - (fScore[`${b.x},${b.y}`]||Infinity));
+            const current = openSet.shift();
+            const currentKey = `${current.x},${current.y}`;
+
+            if(current.x === gridEnd.x && current.y === gridEnd.y) {
+                const path = [];
+                let currKey = currentKey;
+                while(cameFrom[currKey]) {
+                    const coords = currKey.split(',').map(Number);
+                    path.unshift({x: coords[0]*GRID_SIZE, y: coords[1]*GRID_SIZE});
+                    currKey = cameFrom[currKey];
+                }
+                path.push({x: gridEnd.x*GRID_SIZE, y: gridEnd.y*GRID_SIZE});
+                return simplifyPath(path);
+            }
+
+            closedSet.add(currentKey);
+            const neighbors = [{x:0,y:1}, {x:0,y:-1}, {x:1,y:0}, {x:-1,y:0}, {x:1,y:1}, {x:1,y:-1}, {x:-1,y:1}, {x:-1,y:-1}];
+
+            for(let n of neighbors) {
+                const neighbor = {x: current.x + n.x, y: current.y + n.y};
+                const nKey = `${neighbor.x},${neighbor.y}`;
+                if(closedSet.has(nKey) || obstacles.has(nKey)) continue;
+
+                const cost = (n.x===0 || n.y===0) ? 1.0 : 1.414;
+                const tG = gScore[currentKey] + cost;
+
+                if(tG < (gScore[nKey] || Infinity)) {
+                    cameFrom[nKey] = currentKey;
+                    gScore[nKey] = tG;
+                    fScore[nKey] = tG + Math.hypot(neighbor.x - gridEnd.x, neighbor.y - gridEnd.y);
+                    if(!openSet.some(o => o.x===neighbor.x && o.y===neighbor.y)) openSet.push(neighbor);
+                }
+            }
+        }
+        alert("❌ 无法找到路径"); return null;
+    }
+
+    function simplifyPath(path) {
+        if(path.length < 3) return path;
+        const newPath = [path[0]];
+        for(let i=1; i<path.length-1; i++) {
+            const last = newPath[newPath.length-1];
+            const curr = path[i];
+            if(Math.hypot(curr.x-last.x, curr.y-last.y) > 0.4) {
+                newPath.push(curr);
+            }
+        }
+        newPath.push(path[path.length-1]);
+        return newPath;
+    }
+
+    function calculateAvgError() {
+        if (navOriginalPath.length < 2 || activeNavTrail.length === 0) {
+            if (elNavError) elNavError.textContent = "--";
+            return;
+        }
+        function distToSegmentSquared(p, v, w) {
+            const l2 = (w.x - v.x)**2 + (w.y - v.y)**2;
+            if (l2 === 0) return (p.x - v.x)**2 + (p.y - v.y)**2;
+            let t = ((p.x - v.x)*(w.x - v.x) + (p.y - v.y)*(w.y - v.y)) / l2;
+            t = Math.max(0, Math.min(1, t));
+            return (p.x - (v.x + t*(w.x - v.x)))**2 + (p.y - (v.y + t*(w.y - v.y)))**2;
+        }
+        function distToPolyline(p, polyline) {
+            let minDst2 = Infinity;
+            for(let i=0; i<polyline.length-1; i++) {
+                const d2 = distToSegmentSquared(p, polyline[i], polyline[i+1]);
+                if(d2 < minDst2) minDst2 = d2;
+            }
+            return Math.sqrt(minDst2);
+        }
+
+        const sampleCount = 50;
+        let totalDistance = 0;
+        let count = 0;
+        const step = Math.max(1, Math.floor(activeNavTrail.length / sampleCount));
+
+        for (let i = 0; i < activeNavTrail.length; i += step) {
+            if (count >= sampleCount) break;
+            totalDistance += distToPolyline(activeNavTrail[i], navOriginalPath);
+            count++;
+        }
+        const avgError = count > 0 ? (totalDistance / count) : 0;
+        if (elNavError) {
+            elNavError.textContent = avgError.toFixed(3);
+            elNavError.style.color = "#ffaa00";
+        }
+    }
+
+    let isRotating = false, isPanning = false;
+    let prevPos = { x: 0, y: 0 };
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    // 1. 选点
+    renderer.domElement.addEventListener('click', (e) => {
+        if (!isPicking) return;
+
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObject(clickPlane);
+
+        if (intersects.length > 0) {
+            const p = intersects[0].point;
+            const target = { x: p.x, y: p.y };
+            const path = planPathAStar(currentRobotPose, target);
+
+            if (path && path.length > 0) {
+                navPath = path;
+                navGoal = path[path.length-1];
+                flagObj.position.set(navGoal.x, navGoal.y, 0);
+                flagObj.visible = true;
+
+                isPicking = false;
+                const btn = document.getElementById('btnSetNavPoint');
+                if(btn) btn.classList.remove('active');
+                renderer.domElement.style.cursor = 'default';
+
+                if(elNavError) elNavError.textContent = "--";
+                updateNavLine();
+                updateDistanceUI();
+            }
+        }
+    });
+
+    function updateNavLine() {
+        if (navPath.length > 0 && flagObj.visible) {
+            const pts = [];
+            pts.push(new THREE.Vector3(currentRobotPose.x, currentRobotPose.y, 0.2));
+            navPath.forEach(p => pts.push(new THREE.Vector3(p.x, p.y, 0.2)));
+            navLine.geometry.setFromPoints(pts);
+            navLine.computeLineDistances();
+            navLine.visible = true;
+        } else {
+            navLine.visible = false;
+        }
+    }
+
+    // 2. 视角
+    renderer.domElement.addEventListener('mousedown', e => {
+        if(isPicking) return;
+        e.preventDefault();
+        if (e.button === 0) isRotating = true;
+        else if (e.button === 1) isPanning = true;
+        prevPos = { x: e.offsetX, y: e.offsetY };
+    });
+
+    renderer.domElement.addEventListener('mousemove', e => {
+        if(isPicking) return;
+        const dx = e.offsetX - prevPos.x;
+        const dy = e.offsetY - prevPos.y;
+        prevPos = { x: e.offsetX, y: e.offsetY };
+
+        if (isRotating) {
+            theta -= dx * 0.01;
+            phi -= dy * 0.01;
+            phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
+            updateCamera();
+        } else if (isPanning) {
+            const speed = radius * 0.002;
+            const forward = new THREE.Vector3();
+            camera.getWorldDirection(forward);
+            const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
+            const forwardXY = new THREE.Vector3(forward.x, forward.y, 0).normalize();
+            orbitTarget.addScaledVector(right, -dx * speed);
+            orbitTarget.addScaledVector(forwardXY, dy * speed);
+            updateCamera();
+        }
+    });
+
+    window.addEventListener('mouseup', () => { isRotating = false; isPanning = false; });
+    renderer.domElement.addEventListener('wheel', e => {
+        e.preventDefault();
+        radius *= (e.deltaY > 0 ? 1.1 : 0.9);
+        radius = Math.max(1, Math.min(100, radius));
         updateCamera();
+    });
 
-        function updateDistanceUI() {
-            if (navPath.length > 0 && currentRobotPose) {
-                const goal = navPath[navPath.length - 1];
-                const dx = goal.x - currentRobotPose.x;
-                const dy = goal.y - currentRobotPose.y;
-                const dist = Math.sqrt(dx*dx + dy*dy);
+    // 3. 按钮
+    const btnSet = document.getElementById('btnSetNavPoint');
+    const btnStart = document.getElementById('btnStartNav');
+    const btnClear = document.getElementById('btnClearNav');
 
-                if (elNavDist) elNavDist.textContent = dist.toFixed(2);
-                if (elNavPanel) elNavPanel.style.display = 'block';
+    if(btnSet) {
+        btnSet.onclick = function() {
+            isPicking = !isPicking;
+            if(isPicking) {
+                this.classList.add('active');
+                renderer.domElement.style.cursor = 'crosshair';
             } else {
-                if (elNavPanel) elNavPanel.style.display = 'none';
+                this.classList.remove('active');
+                renderer.domElement.style.cursor = 'default';
             }
-        }
+        };
+    }
 
-        // --- ✅ A* 寻路算法 ---
-        const GRID_SIZE = 0.2;
+    if(btnClear) {
+        btnClear.onclick = function() {
+            stopNav(false);
+            navPath = [];
+            navGoal = null;
+            flagObj.visible = false;
+            navLine.visible = false;
+            updateDistanceUI();
+            if(elNavError) elNavError.textContent = "--";
+        };
+    }
 
-        function worldToGrid(x, y) {
-            return { x: Math.round(x / GRID_SIZE), y: Math.round(y / GRID_SIZE) };
-        }
-        function gridToWorld(gx, gy) {
-            return { x: gx * GRID_SIZE, y: gy * GRID_SIZE };
-        }
-
-        function planPathAStar(start, end) {
-            console.log("🔍 A* 规划中...");
-            const gridStart = worldToGrid(start.x, start.y);
-            let gridEnd = worldToGrid(end.x, end.y);
-
-            const obstacles = new Set();
-            const addObstacle = (wx, wy, wz) => {
-                if (wz > 0.2 && wz < 1.0) {
-                    const g = worldToGrid(wx, wy);
-                    for(let i=-1; i<=1; i++) {
-                        for(let j=-1; j<=1; j++) {
-                            obstacles.add(`${g.x+i},${g.y+j}`);
-                        }
-                    }
-                }
-            };
-
-            const scanArr = scanMesh.geometry.attributes.position.array;
-            for(let i=0; i<scanArr.length; i+=3) {
-                if(scanArr[i] < 9000) addObstacle(scanArr[i], scanArr[i+1], scanArr[i+2]);
-            }
-            const mapArr = mapMesh.geometry.attributes.position.array;
-            for(let i=0; i<mapCursor*3; i+=3) {
-                if(mapArr[i] < 9000) addObstacle(mapArr[i], mapArr[i+1], mapArr[i+2]);
-            }
-
-            const endKey = `${gridEnd.x},${gridEnd.y}`;
-            if(obstacles.has(endKey)) {
-                console.warn("目标点不可达，搜索附近...");
-                let found = false, minD = Infinity, bestG = null;
-                for(let dx=-3; dx<=3; dx++) {
-                    for(let dy=-3; dy<=3; dy++) {
-                        const nx = gridEnd.x+dx, ny = gridEnd.y+dy;
-                        if(!obstacles.has(`${nx},${ny}`)) {
-                            const d = dx*dx + dy*dy;
-                            if(d < minD) { minD=d; bestG={x:nx, y:ny}; found=true; }
-                        }
-                    }
-                }
-                if(found) gridEnd = bestG;
-                else { alert("❌ 目标区域完全堵塞！"); return null; }
-            }
-
-            const openSet = [];
-            const closedSet = new Set();
-            const cameFrom = {};
-            const gScore = {};
-            const fScore = {};
-
-            const startKey = `${gridStart.x},${gridStart.y}`;
-            openSet.push(gridStart);
-            gScore[startKey] = 0;
-            fScore[startKey] = Math.hypot(gridStart.x - gridEnd.x, gridStart.y - gridEnd.y);
-
-            let iterations = 0;
-            while(openSet.length > 0) {
-                if(iterations++ > 5000) { console.warn("A* 超时"); break; }
-
-                openSet.sort((a,b) => (fScore[`${a.x},${a.y}`]||Infinity) - (fScore[`${b.x},${b.y}`]||Infinity));
-                const current = openSet.shift();
-                const currentKey = `${current.x},${current.y}`;
-
-                if(current.x === gridEnd.x && current.y === gridEnd.y) {
-                    const path = [];
-                    let currKey = currentKey;
-                    while(cameFrom[currKey]) {
-                        const coords = currKey.split(',').map(Number);
-                        path.unshift({x: coords[0]*GRID_SIZE, y: coords[1]*GRID_SIZE});
-                        currKey = cameFrom[currKey];
-                    }
-                    path.push({x: gridEnd.x*GRID_SIZE, y: gridEnd.y*GRID_SIZE});
-                    return simplifyPath(path);
-                }
-
-                closedSet.add(currentKey);
-                const neighbors = [{x:0,y:1}, {x:0,y:-1}, {x:1,y:0}, {x:-1,y:0}, {x:1,y:1}, {x:1,y:-1}, {x:-1,y:1}, {x:-1,y:-1}];
-
-                for(let n of neighbors) {
-                    const neighbor = {x: current.x + n.x, y: current.y + n.y};
-                    const nKey = `${neighbor.x},${neighbor.y}`;
-                    if(closedSet.has(nKey) || obstacles.has(nKey)) continue;
-
-                    const cost = (n.x===0 || n.y===0) ? 1.0 : 1.414;
-                    const tG = gScore[currentKey] + cost;
-
-                    if(tG < (gScore[nKey] || Infinity)) {
-                        cameFrom[nKey] = currentKey;
-                        gScore[nKey] = tG;
-                        fScore[nKey] = tG + Math.hypot(neighbor.x - gridEnd.x, neighbor.y - gridEnd.y);
-                        if(!openSet.some(o => o.x===neighbor.x && o.y===neighbor.y)) openSet.push(neighbor);
-                    }
-                }
-            }
-            alert("❌ 无法找到路径"); return null;
-        }
-
-        function simplifyPath(path) {
-            if(path.length < 3) return path;
-            const newPath = [path[0]];
-            for(let i=1; i<path.length-1; i++) {
-                const last = newPath[newPath.length-1];
-                const curr = path[i];
-                if(Math.hypot(curr.x-last.x, curr.y-last.y) > 0.4) {
-                    newPath.push(curr);
-                }
-            }
-            newPath.push(path[path.length-1]);
-            return newPath;
-        }
-
-        function calculateAvgError() {
-            if (navOriginalPath.length < 2 || activeNavTrail.length === 0) {
-                if (elNavError) elNavError.textContent = "--";
+    if(btnStart) {
+        btnStart.onclick = function() {
+            if(navPath.length === 0) {
+                alert("请先点击 [📍选点] 生成避障路径！");
                 return;
             }
-            function distToSegmentSquared(p, v, w) {
-                const l2 = (w.x - v.x)**2 + (w.y - v.y)**2;
-                if (l2 === 0) return (p.x - v.x)**2 + (p.y - v.y)**2;
-                let t = ((p.x - v.x)*(w.x - v.x) + (p.y - v.y)*(w.y - v.y)) / l2;
-                t = Math.max(0, Math.min(1, t));
-                return (p.x - (v.x + t*(w.x - v.x)))**2 + (p.y - (v.y + t*(w.y - v.y)))**2;
-            }
-            function distToPolyline(p, polyline) {
-                let minDst2 = Infinity;
-                for(let i=0; i<polyline.length-1; i++) {
-                    const d2 = distToSegmentSquared(p, polyline[i], polyline[i+1]);
-                    if(d2 < minDst2) minDst2 = d2;
+            if(isNavigating) return;
+            startNav();
+        };
+    }
+
+    const stopBtnIds = ['btnStopMove', 'btnSideStop'];
+    stopBtnIds.forEach(id => {
+        const btn = document.getElementById(id);
+        if(btn) {
+            btn.addEventListener('click', function() {
+                if(isNavigating) {
+                    console.log("🛑 检测到手动停止");
+                    stopNav(false);
                 }
-                return Math.sqrt(minDst2);
-            }
-
-            const sampleCount = 50;
-            let totalDistance = 0;
-            let count = 0;
-            const step = Math.max(1, Math.floor(activeNavTrail.length / sampleCount));
-
-            for (let i = 0; i < activeNavTrail.length; i += step) {
-                if (count >= sampleCount) break;
-                totalDistance += distToPolyline(activeNavTrail[i], navOriginalPath);
-                count++;
-            }
-            const avgError = count > 0 ? (totalDistance / count) : 0;
-            if (elNavError) {
-                elNavError.textContent = avgError.toFixed(3);
-                elNavError.style.color = "#ffaa00";
-            }
+            });
         }
+    });
 
-        let isRotating = false, isPanning = false;
-        let prevPos = { x: 0, y: 0 };
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
-
-        // 1. 选点
-        renderer.domElement.addEventListener('click', (e) => {
-            if (!isPicking) return;
-
-            const rect = renderer.domElement.getBoundingClientRect();
-            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-
-            raycaster.setFromCamera(mouse, camera);
-            const intersects = raycaster.intersectObject(clickPlane);
-
-            if (intersects.length > 0) {
-                const p = intersects[0].point;
-                const target = { x: p.x, y: p.y };
-                const path = planPathAStar(currentRobotPose, target);
-
-                if (path && path.length > 0) {
-                    navPath = path;
-                    navGoal = path[path.length-1];
-                    flagObj.position.set(navGoal.x, navGoal.y, 0);
-                    flagObj.visible = true;
-
-                    isPicking = false;
-                    const btn = document.getElementById('btnSetNavPoint');
-                    if(btn) btn.classList.remove('active');
-                    renderer.domElement.style.cursor = 'default';
-
-                    if(elNavError) elNavError.textContent = "--";
-                    updateNavLine();
-                    updateDistanceUI();
-                }
-            }
-        });
-
-        function updateNavLine() {
-            if (navPath.length > 0 && flagObj.visible) {
-                const pts = [];
-                pts.push(new THREE.Vector3(currentRobotPose.x, currentRobotPose.y, 0.2));
-                navPath.forEach(p => pts.push(new THREE.Vector3(p.x, p.y, 0.2)));
-                navLine.geometry.setFromPoints(pts);
-                navLine.computeLineDistances();
-                navLine.visible = true;
-            } else {
-                navLine.visible = false;
-            }
-        }
-
-        // 2. 视角
-        renderer.domElement.addEventListener('mousedown', e => {
-            if(isPicking) return;
-            e.preventDefault();
-            if (e.button === 0) isRotating = true;
-            else if (e.button === 1) isPanning = true;
-            prevPos = { x: e.offsetX, y: e.offsetY };
-        });
-
-        renderer.domElement.addEventListener('mousemove', e => {
-            if(isPicking) return;
-            const dx = e.offsetX - prevPos.x;
-            const dy = e.offsetY - prevPos.y;
-            prevPos = { x: e.offsetX, y: e.offsetY };
-
-            if (isRotating) {
-                theta -= dx * 0.01;
-                phi -= dy * 0.01;
-                phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
-                updateCamera();
-            } else if (isPanning) {
-                const speed = radius * 0.002;
-                const forward = new THREE.Vector3();
-                camera.getWorldDirection(forward);
-                const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize();
-                const forwardXY = new THREE.Vector3(forward.x, forward.y, 0).normalize();
-                orbitTarget.addScaledVector(right, -dx * speed);
-                orbitTarget.addScaledVector(forwardXY, dy * speed);
-                updateCamera();
-            }
-        });
-
-        window.addEventListener('mouseup', () => { isRotating = false; isPanning = false; });
-        renderer.domElement.addEventListener('wheel', e => {
-            e.preventDefault();
-            radius *= (e.deltaY > 0 ? 1.1 : 0.9);
-            radius = Math.max(1, Math.min(100, radius));
-            updateCamera();
-        });
-
-        // 3. 按钮
-        const btnSet = document.getElementById('btnSetNavPoint');
-        const btnStart = document.getElementById('btnStartNav');
-        const btnClear = document.getElementById('btnClearNav');
-
-        if(btnSet) {
-            btnSet.onclick = function() {
-                isPicking = !isPicking;
-                if(isPicking) {
-                    this.classList.add('active');
-                    renderer.domElement.style.cursor = 'crosshair';
-                } else {
-                    this.classList.remove('active');
-                    renderer.domElement.style.cursor = 'default';
-                }
-            };
-        }
-
-        if(btnClear) {
-            btnClear.onclick = function() {
-                stopNav(false);
-                navPath = [];
-                navGoal = null;
-                flagObj.visible = false;
-                navLine.visible = false;
-                updateDistanceUI();
-                if(elNavError) elNavError.textContent = "--";
-            };
-        }
-
-        if(btnStart) {
-            btnStart.onclick = function() {
-                if(navPath.length === 0) {
-                    alert("请先点击 [📍选点] 生成避障路径！");
-                    return;
-                }
-                if(isNavigating) return;
-                startNav();
-            };
-        }
-
-        const stopBtnIds = ['btnStopMove', 'btnSideStop'];
-        stopBtnIds.forEach(id => {
-            const btn = document.getElementById(id);
-            if(btn) {
-                btn.addEventListener('click', function() {
-                    if(isNavigating) {
-                        console.log("🛑 检测到手动停止");
-                        stopNav(false);
-                    }
-                });
-            }
-        });
-
-        function startNav() {
-            console.log("🚀 开始 A* 曲线导航...");
-            isNavigating = true;
+    function startNav() {
+        console.log("🚀 开始导航...");
+        isNavigating = true;
+        
+        // 只有当不是电缆跟踪模式时，才记录 A* 原始路径供误差分析
+        if (!isCableTrackingMode) {
             navOriginalPath = [...navPath];
             navOriginalPath.unshift({x: currentRobotPose.x, y: currentRobotPose.y});
             activeNavTrail = [];
             if(elNavError) elNavError.textContent = "运行中...";
-
-            if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 3.0, true);
-            if(navInterval) clearInterval(navInterval);
-            navInterval = setInterval(controlLoop, 100);
         }
 
-        function stopNav(isSuccess) {
-            isNavigating = false;
-            if(navInterval) { clearInterval(navInterval); navInterval = null; }
-            if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, true);
-            console.log("🛑 导航停止");
+        if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 3.0, true);
+        if(navInterval) clearInterval(navInterval);
+        navInterval = setInterval(controlLoop, 100);
+    }
+
+    function stopNav(isSuccess) {
+        isNavigating = false;
+        if(navInterval) { clearInterval(navInterval); navInterval = null; }
+        if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, true);
+        console.log("🛑 导航停止");
+        
+        // ✅✅✅ 修正：电缆跟踪模式停止逻辑
+        if (isCableTrackingMode) {
+            // 如果是正在去起点的路上就到了（说明到了起点） -> 切换为正式跟踪
+            if (cableTrackingState === 'TO_START' && isSuccess) {
+                console.log("✅ 已到达电缆起点，开始沿线跟踪...");
+                cableTrackingState = 'FOLLOWING';
+                
+                // 将完整电缆路径设为导航路径
+                if (window.savedCablePath && window.savedCablePath.length > 0) {
+                    // 转换 THREE.Vector3 到 {x,y}
+                    navPath = window.savedCablePath.map(p => ({x: p.x, y: p.y}));
+                    startNav();
+                }
+            } else {
+                // 其他情况（FOLLOWING 结束，或者中途手动停止） -> 彻底停止，恢复按钮和绘制权限
+                console.log("⏹️ 电缆跟踪结束/停止");
+                
+                // 1. 重置标志位，允许后续手动控制时画轨迹
+                isCableTrackingMode = false;
+                cableTrackingState = 'IDLE';
+
+                // 2. 恢复按钮 UI
+                const btn = document.getElementById("btnTrackCableOverlay");
+                if(btn) {
+                    btn.innerText = "⚡ 跟踪电缆";
+                    btn.style.color = "#00ccff";
+                    btn.style.border = "1px solid #00ccff";
+                }
+            }
+        } else {
+            // 普通 A* 导航停止
             if (isSuccess) calculateAvgError();
         }
+    }
 
-        // ✅ 核心控制：纯追踪 (Pure Pursuit)
-        function controlLoop() {
-            if(navPath.length === 0) { stopNav(true); return; }
+    // ✅ 核心控制：纯追踪 (Pure Pursuit)
+    function controlLoop() {
+        if(navPath.length === 0) { stopNav(true); return; }
 
-            const LOOKAHEAD_DIST = 0.8;
-            let targetIdx = 0;
-            let target = navPath[0];
+        const LOOKAHEAD_DIST = 0.8;
+        let targetIdx = 0;
+        let target = navPath[0];
 
-            for(let i=0; i<navPath.length; i++) {
-                const p = navPath[i];
-                const d = Math.hypot(p.x - currentRobotPose.x, p.y - currentRobotPose.y);
-                if(d > LOOKAHEAD_DIST) {
-                    target = p;
-                    targetIdx = i;
-                    break;
-                }
-                if(i === navPath.length-1) {
-                    target = p;
-                    targetIdx = i;
-                }
+        for(let i=0; i<navPath.length; i++) {
+            const p = navPath[i];
+            const d = Math.hypot(p.x - currentRobotPose.x, p.y - currentRobotPose.y);
+            if(d > LOOKAHEAD_DIST) {
+                target = p;
+                targetIdx = i;
+                break;
             }
-
-            if(targetIdx > 0) {
-                navPath.splice(0, targetIdx);
+            if(i === navPath.length-1) {
+                target = p;
+                targetIdx = i;
             }
+        }
 
-            const dx = target.x - currentRobotPose.x;
-            const dy = target.y - currentRobotPose.y;
-            const dist = Math.sqrt(dx*dx + dy*dy);
+        if(targetIdx > 0) {
+            navPath.splice(0, targetIdx);
+        }
 
-            if(navPath.length === 1 && dist < 0.2) {
-                stopNav(true);
+        const dx = target.x - currentRobotPose.x;
+        const dy = target.y - currentRobotPose.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+
+        if(navPath.length === 1 && dist < 0.2) {
+            stopNav(true);
+            return;
+        }
+
+        const targetYaw = Math.atan2(dy, dx);
+        let diff = targetYaw - currentRobotPose.yaw;
+        while(diff > Math.PI) diff -= 2*Math.PI;
+        while(diff < -Math.PI) diff += 2*Math.PI;
+
+        let v = 0, w = 0;
+        if(Math.abs(diff) > 0.8) {
+            v = 0.1;
+            w = diff > 0 ? 0.6 : -0.6;
+        } else {
+            v = 0.4 * (1.0 - Math.abs(diff)/1.5);
+            v = Math.max(0.15, v);
+            w = diff * 1.5;
+        }
+
+        if(typeof sendMoveCommand === 'function') {
+            sendMoveCommand(v, w, 0, 0, false);
+        }
+    }
+
+    // 5. 旧清除按钮
+    const btnClearDog = document.getElementById("btnClearDogPath");
+    if (btnClearDog) {
+        btnClearDog.onclick = function() {
+            trailPoints.length = 0;
+            lastTrailPos.set(-999, -999, 0);
+            if (currentTrailMesh) {
+                trailGroup.remove(currentTrailMesh);
+                currentTrailMesh.geometry.dispose();
+                currentTrailMesh = null;
+            }
+            while(faultMarkerGroup.children.length > 0){
+                const mesh = faultMarkerGroup.children[0];
+                faultMarkerGroup.remove(mesh);
+                if(mesh.geometry) mesh.geometry.dispose();
+            }
+            lastFaultPos.set(-999, -999, -999);
+        };
+    }
+
+    // ✅ 新增: 清除点云数据按钮逻辑
+    const btnClearCloud = document.getElementById("btnClearCloud");
+    if (btnClearCloud) {
+        btnClearCloud.onclick = function() {
+            console.log("🧹 清除所有点云数据...");
+            const scanAttr = scanMesh.geometry.attributes.position;
+            const scanArr = scanAttr.array;
+            for(let i=0; i<scanArr.length; i++) scanArr[i] = 99999;
+            scanAttr.needsUpdate = true;
+
+            const mapAttr = mapMesh.geometry.attributes.position;
+            const mapArr = mapAttr.array;
+            for(let i=0; i<mapArr.length; i++) mapArr[i] = 99999;
+            mapAttr.needsUpdate = true;
+
+            mapCursor = 0;
+            lastKeyframePose = { x: -999, y: -999 };
+        };
+    }
+
+    const btnClearCable = document.getElementById("btnClearCablePath");
+    if (btnClearCable) {
+        btnClearCable.onclick = function() {
+            cablePoints.length = 0;
+            segmentPoints.length = 0;
+            lastCablePos.set(-999, -999, 0);
+            if (currentCableMesh) {
+                cableGroup.remove(currentCableMesh);
+                currentCableMesh.geometry.dispose();
+                currentCableMesh = null;
+            }
+            while(redCableGroup.children.length > 0){
+                const mesh = redCableGroup.children[0];
+                redCableGroup.remove(mesh);
+                if(mesh.geometry) mesh.geometry.dispose();
+            }
+        };
+    }
+
+    // ✅✅✅ 新增：注入“跟踪电缆”悬浮按钮逻辑
+    (function injectCableTrackButton() {
+        // 创建按钮
+        const btnTrack = document.createElement('button');
+        btnTrack.innerText = "⚡ 跟踪电缆";
+        btnTrack.id = "btnTrackCableOverlay";
+        // 设置样式：悬浮在 pathMapArea 右上角
+        btnTrack.style.position = "absolute";
+        // ✅✅✅ 修改 2: 将按钮位置下移到 170px，位于“清除”按钮下方
+        btnTrack.style.top = "170px";
+        btnTrack.style.right = "10px";
+        btnTrack.style.zIndex = "999";
+        btnTrack.style.padding = "8px 12px";
+        btnTrack.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+        btnTrack.style.border = "1px solid #00ccff";
+        btnTrack.style.color = "#00ccff";
+        btnTrack.style.borderRadius = "4px";
+        btnTrack.style.cursor = "pointer";
+        btnTrack.style.fontSize = "14px";
+        btnTrack.style.fontWeight = "bold";
+        btnTrack.style.transition = "all 0.3s";
+
+        // 鼠标悬停效果
+        btnTrack.onmouseover = () => { btnTrack.style.backgroundColor = "rgba(0, 204, 255, 0.2)"; };
+        btnTrack.onmouseout = () => { btnTrack.style.backgroundColor = "rgba(0, 0, 0, 0.6)"; };
+
+        container.appendChild(btnTrack);
+
+        // 点击事件逻辑
+        btnTrack.onclick = function() {
+            // 如果已经在跟踪（或去起点的路上），点击则停止
+            if (isNavigating && isCableTrackingMode) {
+                console.log("🛑 用户点击停止跟踪");
+                stopNav(false);
+                // 按钮重置逻辑已在 stopNav 中统一处理
                 return;
             }
 
-            const targetYaw = Math.atan2(dy, dx);
-            let diff = targetYaw - currentRobotPose.yaw;
-            while(diff > Math.PI) diff -= 2*Math.PI;
-            while(diff < -Math.PI) diff += 2*Math.PI;
+            // --- 开始跟踪逻辑 ---
+            if (!window.savedCablePath || window.savedCablePath.length < 2) {
+                alert("⚠️ 未检测到有效的电缆路径！请先进行自动巡线生成路径。");
+                return;
+            }
 
-            let v = 0, w = 0;
-            if(Math.abs(diff) > 0.8) {
-                v = 0.1;
-                w = diff > 0 ? 0.6 : -0.6;
+            isCableTrackingMode = true;
+            btnTrack.innerText = "⏹ 停止跟踪";
+            btnTrack.style.color = "#ff4444";
+            btnTrack.style.border = "1px solid #ff4444";
+
+            // 转换数据格式方便计算
+            const pathPoints = window.savedCablePath.map(p => ({x: p.x, y: p.y}));
+            
+            // ========================================================
+            // 🚀 核心逻辑修改：基于向量方向的柔性并入
+            // ========================================================
+            
+            // 1. 获取电缆起点和大致走向 (取前5个点的方向)
+            const p0 = pathPoints[0];
+            const pNext = pathPoints[Math.min(5, pathPoints.length - 1)]; 
+            
+            // 2. 计算向量
+            // 电缆方向向量 (Start -> Next)
+            const cableDirX = pNext.x - p0.x;
+            const cableDirY = pNext.y - p0.y;
+            
+            // 机器狗相对于起点的向量 (Start -> Robot)
+            const robotVecX = currentRobotPose.x - p0.x;
+            const robotVecY = currentRobotPose.y - p0.y;
+            
+            // 3. 计算点积 (Dot Product)
+            // 如果点积为负，说明机器狗在起点的“后方”（逆着电缆方向）
+            const dotProduct = robotVecX * cableDirX + robotVecY * cableDirY;
+            const distToStart = Math.hypot(robotVecX, robotVecY);
+
+            // 4. 判定条件：只有在“后方”且“距离起点有一定距离”时，才判定为需要由 A* 引导回起点
+            // -0.5 是一个容差，避免在起点正侧面垂直时误判
+            const isBehindStart = (dotProduct < -0.1) && (distToStart > 1.0);
+
+            if (isBehindStart) {
+                console.log(`🚀 位于电缆起点后方 (Dot=${dotProduct.toFixed(2)}), 启用 A* 导航至起点...`);
+                cableTrackingState = 'TO_START';
+                // 使用 A* 规划到起点
+                const path = planPathAStar(currentRobotPose, p0);
+                if (path) {
+                    navPath = path;
+                    startNav();
+                } else {
+                     // 如果 A* 失败，回退到直接跟踪
+                     alert("⚠️ 无法规划路径到起点，尝试直接跟踪...");
+                     cableTrackingState = 'FOLLOWING';
+                     navPath = pathPoints;
+                     startNav();
+                }
             } else {
-                v = 0.4 * (1.0 - Math.abs(diff)/1.5);
-                v = Math.max(0.15, v);
-                w = diff * 1.5;
-            }
-
-            if(typeof sendMoveCommand === 'function') {
-                sendMoveCommand(v, w, 0, 0, false);
-            }
-        }
-
-        // 5. 旧清除按钮
-        const btnClearDog = document.getElementById("btnClearDogPath");
-        if (btnClearDog) {
-            btnClearDog.onclick = function() {
-                trailPoints.length = 0;
-                lastTrailPos.set(-999, -999, 0);
-                if (currentTrailMesh) {
-                    trailGroup.remove(currentTrailMesh);
-                    currentTrailMesh.geometry.dispose();
-                    currentTrailMesh = null;
-                }
-                while(faultMarkerGroup.children.length > 0){
-                    const mesh = faultMarkerGroup.children[0];
-                    faultMarkerGroup.remove(mesh);
-                    if(mesh.geometry) mesh.geometry.dispose();
-                }
-                lastFaultPos.set(-999, -999, -999);
-            };
-        }
-
-        // ✅ 新增: 清除点云数据按钮逻辑
-        const btnClearCloud = document.getElementById("btnClearCloud");
-        if (btnClearCloud) {
-            btnClearCloud.onclick = function() {
-                console.log("🧹 清除所有点云数据...");
-                const scanAttr = scanMesh.geometry.attributes.position;
-                const scanArr = scanAttr.array;
-                for(let i=0; i<scanArr.length; i++) scanArr[i] = 99999;
-                scanAttr.needsUpdate = true;
-
-                const mapAttr = mapMesh.geometry.attributes.position;
-                const mapArr = mapAttr.array;
-                for(let i=0; i<mapArr.length; i++) mapArr[i] = 99999;
-                mapAttr.needsUpdate = true;
-
-                mapCursor = 0;
-                lastKeyframePose = { x: -999, y: -999 };
-            };
-        }
-
-        const btnClearCable = document.getElementById("btnClearCablePath");
-        if (btnClearCable) {
-            btnClearCable.onclick = function() {
-                cablePoints.length = 0;
-                segmentPoints.length = 0;
-                lastCablePos.set(-999, -999, 0);
-                if (currentCableMesh) {
-                    cableGroup.remove(currentCableMesh);
-                    currentCableMesh.geometry.dispose();
-                    currentCableMesh = null;
-                }
-                while(redCableGroup.children.length > 0){
-                    const mesh = redCableGroup.children[0];
-                    redCableGroup.remove(mesh);
-                    if(mesh.geometry) mesh.geometry.dispose();
-                }
-            };
-        }
-
-        // --- 6. WebSocket ---
-        const ROBOT_IP = "10.21.31.104";
-        const wsUrl = "ws://" + ROBOT_IP + ":9090";
-        console.log("正在尝试连接 WebSocket:", wsUrl);
-
-        const ws = new WebSocket(wsUrl);
-        let hasLoggedSlamSuccess = false;
-        let isFirstFrame = true;
-
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'slam_data') {
-                    if (!hasLoggedSlamSuccess) {
-                        console.log("%c🚀 SLAM 数据传输成功！...", "color: #00e5ff; font-weight: bold;");
-                        hasLoggedSlamSuccess = true;
+                // === 柔性并入逻辑 ===
+                console.log("✅ 位于电缆前方或侧方，启用柔性并入 (Flexible Merge)...");
+                cableTrackingState = 'FOLLOWING';
+                
+                // 1. 找到离机器狗当前位置最近的路径点索引
+                let minD = Infinity;
+                let closestIdx = 0;
+                for(let i=0; i<pathPoints.length; i++) {
+                    const d = Math.hypot(pathPoints[i].x - currentRobotPose.x, pathPoints[i].y - currentRobotPose.y);
+                    if(d < minD) {
+                        minD = d;
+                        closestIdx = i;
                     }
-                    updateVis(data);
                 }
-            } catch (e) { }
+                
+                // 2. 截取路径：只保留最近点之后的路径
+                // 这样纯追踪算法 (Pure Pursuit) 会自动计算出一条从当前位置切入到最近点前方的平滑曲线
+                if (closestIdx >= pathPoints.length - 1) {
+                    alert("⚠️ 已经到达电缆终点附近！");
+                    stopNav(false);
+                    return;
+                }
+                
+                console.log(`📍 锁定最近点索引: ${closestIdx}, 距离: ${minD.toFixed(2)}m`);
+                navPath = pathPoints.slice(closestIdx);
+                startNav();
+            }
         };
+    })();
 
-        function updateVis(data) {
-            const pose = data.robot;
-            if (pose) {
-                const scaleFactor = 1.0;
-                const px = pose.x * scaleFactor;
-                const py = pose.y * scaleFactor;
-                const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
+    // --- 6. WebSocket ---
+    const ROBOT_IP = "10.21.31.104";
+    const wsUrl = "ws://" + ROBOT_IP + ":9090";
+    console.log("正在尝试连接 WebSocket:", wsUrl);
 
-                const isRTK = data.is_rtk === true;
-                if (typeof lastRTKStatus === 'undefined') {
-                    window.lastRTKStatus = null;
+    const ws = new WebSocket(wsUrl);
+    let hasLoggedSlamSuccess = false;
+    let isFirstFrame = true;
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'slam_data') {
+                if (!hasLoggedSlamSuccess) {
+                    console.log("%c🚀 SLAM 数据传输成功！...", "color: #00e5ff; font-weight: bold;");
+                    hasLoggedSlamSuccess = true;
                 }
+                updateVis(data);
+            }
+        } catch (e) { }
+    };
 
-                if (isRTK !== window.lastRTKStatus) {
-                    if (isRTK) {
-                        console.log('RTK Status: ACTIVE 🟢');
-                    } else {
-                        console.log('RTK Status: OFF (ODOM MODE) ⚠️');
-                    }
-                    window.lastRTKStatus = isRTK;
+    function updateVis(data) {
+        const pose = data.robot;
+        if (pose) {
+            const scaleFactor = 1.0;
+            const px = pose.x * scaleFactor;
+            const py = pose.y * scaleFactor;
+            const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
+
+            const isRTK = data.is_rtk === true;
+            if (typeof lastRTKStatus === 'undefined') {
+                window.lastRTKStatus = null;
+            }
+
+            if (isRTK !== window.lastRTKStatus) {
+                if (isRTK) {
+                    console.log('RTK Status: ACTIVE 🟢');
+                } else {
+                    console.log('RTK Status: OFF (ODOM MODE) ⚠️');
                 }
+                window.lastRTKStatus = isRTK;
+            }
 
-                currentRobotPose = { x: px, y: py, yaw: pose.yaw };
-                updateNavLine();
-                updateDistanceUI();
+            currentRobotPose = { x: px, y: py, yaw: pose.yaw };
+            updateNavLine();
+            updateDistanceUI();
 
-                if (isNavigating) {
-                    const len = activeNavTrail.length;
-                    if (len === 0) activeNavTrail.push({x: px, y: py});
-                    else {
-                        const lastP = activeNavTrail[len - 1];
-                        if (Math.hypot(px - lastP.x, py - lastP.y) > 0.02) activeNavTrail.push({x: px, y: py});
-                    }
+            if (isNavigating) {
+                const len = activeNavTrail.length;
+                if (len === 0) activeNavTrail.push({x: px, y: py});
+                else {
+                    const lastP = activeNavTrail[len - 1];
+                    if (Math.hypot(px - lastP.x, py - lastP.y) > 0.02) activeNavTrail.push({x: px, y: py});
                 }
+            }
 
-                dogGroup.position.set(px, py, pz);
-                dogGroup.rotation.z = pose.yaw;
+            dogGroup.position.set(px, py, pz);
+            dogGroup.rotation.z = pose.yaw;
 
-                if (typeof gridHelper !== 'undefined') {
-                    gridHelper.position.set(px, py, 0);
-                    if(clickPlane) clickPlane.position.set(px, py, 0);
+            if (typeof gridHelper !== 'undefined') {
+                gridHelper.position.set(px, py, 0);
+                if(clickPlane) clickPlane.position.set(px, py, 0);
+            }
+
+            if (isFirstFrame) {
+                orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
+                updateCamera();
+                isFirstFrame = false;
+            }
+
+            const currentPos = new THREE.Vector3(px, py, pz);
+            const isFault = window.g_isFaultDetected === true;
+
+            if (isFault) {
+                if (currentPos.distanceTo(lastFaultPos) > 0.1) {
+                    const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
+                    const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                    const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                    faultMesh.position.copy(currentPos);
+                    faultMarkerGroup.add(faultMesh);
+                    lastFaultPos.copy(currentPos);
+                    console.log(`🔴 探测到电缆破损! 位置:`, currentPos);
                 }
-
-                if (isFirstFrame) {
-                    orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
-                    updateCamera();
-                    isFirstFrame = false;
-                }
-
-                const currentPos = new THREE.Vector3(px, py, pz);
-                const isFault = window.g_isFaultDetected === true;
-
-                if (isFault) {
-                    if (currentPos.distanceTo(lastFaultPos) > 0.1) {
-                        const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
-                        const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                        const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
-                        faultMesh.position.copy(currentPos);
-                        faultMarkerGroup.add(faultMesh);
-                        lastFaultPos.copy(currentPos);
-                        console.log(`🔴 探测到电缆破损! 位置:`, currentPos);
-                    }
-                }
+            }
+            
+            // ✅✅✅ 修改：如果处于电缆跟踪模式，禁止绘制机器狗的蓝色轨迹
+            if (!isCableTrackingMode) {
                 if (currentPos.distanceTo(lastTrailPos) > 0.05) {
                     trailPoints.push(currentPos);
                     lastTrailPos = currentPos;
@@ -3145,6 +3319,7 @@
                         if (currentTrailMesh) {
                             trailGroup.remove(currentTrailMesh);
                             currentTrailMesh.geometry.dispose();
+                            currentTrailMesh = null;
                         }
                         const curve = new THREE.CatmullRomCurve3(trailPoints);
                         const tube = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
@@ -3152,125 +3327,131 @@
                         trailGroup.add(currentTrailMesh);
                     }
                 }
-
-                // =========================================================
-                // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
-                // =========================================================
-                const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
-                
-                let isFeaturePoint = false;
-
-                // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
-                if (sig === 0) {
-                    isFeaturePoint = true;
-                }
-                // 规则 2: 捕捉“跨越”时刻 (1 <-> 2)
-                else if ((lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1)) {
-                    isFeaturePoint = true;
-                    console.log("⚡ 捕捉到跨越点 (1 <-> 2)");
-                }
-                // 规则 3: 回归到“正上方” (Any -> 0)
-                else if (lastSignal !== 0 && sig === 0) {
-                    isFeaturePoint = true;
-                }
-
-                if (isFeaturePoint) {
-                    const dist = currentPos.distanceTo(lastCablePos);
-                    if (dist > 0.1) {
-                        const cablePt = new THREE.Vector3(px, py, 0.08);
-                        cablePoints.push(cablePt);
-                        lastCablePos = cablePt;
-
-                        if (cablePoints.length > 2000) cablePoints.shift();
-                        if (cablePoints.length > 3) {
-                            if (currentCableMesh) {
-                                cableGroup.remove(currentCableMesh);
-                                currentCableMesh.geometry.dispose();
-                                currentCableMesh = null;
-                            }
-                            // 调用卡尔曼平滑
-                            let displayPoints = KalmanSmoother.smooth(cablePoints);
-                            
-                            // 绘制平滑曲线
-                            const curve = new THREE.CatmullRomCurve3(displayPoints);
-                            const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
-                            currentCableMesh = new THREE.Mesh(tube, cableMat);
-                            cableGroup.add(currentCableMesh);
-                        }
-                    }
-                }
-                lastSignal = sig;
             }
 
-            const scan = data.scan;
-            if (scan && scan.length > 0) {
-                const scanAttr = scanMesh.geometry.attributes.position;
-                const colAttr = scanMesh.geometry.attributes.color; 
+            // =========================================================
+            // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
+            // =========================================================
+            const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
+            
+            let isFeaturePoint = false;
 
-                const scanPos = scanAttr.array;
-                const scanCol = colAttr.array;
+            // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
+            if (sig === 0) {
+                isFeaturePoint = true;
+            }
+            // 规则 2: 捕捉“跨越”时刻 (1 <-> 2)
+            else if ((lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1)) {
+                isFeaturePoint = true;
+                console.log("⚡ 捕捉到跨越点 (1 <-> 2)");
+            }
+            // 规则 3: 回归到“正上方” (Any -> 0)
+            else if (lastSignal !== 0 && sig === 0) {
+                isFeaturePoint = true;
+            }
 
-                let c = 0; 
-                let d = 0; 
-                let scaleFactor = 1.0;
-                if (data.robot && (Math.abs(data.robot.x) > 100)) scaleFactor = 0.001;
+            // ✅✅✅ 修改：增加 isAutoTracking 判断
+            // 只有在 (是特征点) AND (不是在跟踪回放模式) AND (正在自动巡线录制模式) 时，才绘制电缆
+            if (isFeaturePoint && !isCableTrackingMode && isAutoTracking) {
+                const dist = currentPos.distanceTo(lastCablePos);
+                if (dist > 0.1) {
+                    const cablePt = new THREE.Vector3(px, py, 0.08);
+                    cablePoints.push(cablePt);
+                    lastCablePos = cablePt;
 
-                const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
+                    if (cablePoints.length > 2000) cablePoints.shift();
+                    if (cablePoints.length > 3) {
+                        if (currentCableMesh) {
+                            cableGroup.remove(currentCableMesh);
+                            currentCableMesh.geometry.dispose();
+                            currentCableMesh = null;
+                        }
+                        // 调用卡尔曼平滑
+                        let displayPoints = KalmanSmoother.smooth(cablePoints);
+                        
+                        // ✅✅✅ 保存平滑后的路径供跟踪使用
+                        window.savedCablePath = displayPoints;
 
-                if (isFlat) {
-                    for (let i = 0; i < scan.length; i += 4) {
-                        if (c >= 5000 * 3) break;
-
-                        scanPos[c++] = scan[i] * scaleFactor;
-                        scanPos[c++] = scan[i+1] * scaleFactor;
-                        let valZ = (i + 2 < scan.length) ? scan[i+2] : 0.1;
-                        scanPos[c++] = valZ * scaleFactor;
-
-                        const intensity = (i + 3 < scan.length) ? scan[i+3] : 0;
-                        const maxVal = 255.0;
-                        let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
-                        const color = new THREE.Color();
-                        color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
-
-                        scanCol[d++] = color.r;
-                        scanCol[d++] = color.g;
-                        scanCol[d++] = color.b;
+                        // 绘制平滑曲线
+                        const curve = new THREE.CatmullRomCurve3(displayPoints);
+                        const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
+                        currentCableMesh = new THREE.Mesh(tube, cableMat);
+                        cableGroup.add(currentCableMesh);
                     }
                 }
+            }
+            lastSignal = sig;
+        }
 
-                for (let i = c; i < 5000 * 3; i++) scanPos[i] = 99999;
-                scanMesh.geometry.attributes.position.needsUpdate = true;
-                scanMesh.geometry.attributes.color.needsUpdate = true;
+        const scan = data.scan;
+        if (scan && scan.length > 0) {
+            const scanAttr = scanMesh.geometry.attributes.position;
+            const colAttr = scanMesh.geometry.attributes.color; 
 
-                if (pose) {
-                    const poseX = pose.x * scaleFactor;
-                    const poseY = pose.y * scaleFactor;
-                    const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
-                    if (dist > 0.2) {
-                        const mapPos = mapMesh.geometry.attributes.position.array;
-                        const mapCol = mapMesh.geometry.attributes.color.array; 
+            const scanPos = scanAttr.array;
+            const scanCol = colAttr.array;
 
-                        for (let k = 0; k < c; k++) {
-                            if (mapCursor >= 500000 * 3) mapCursor = 0;
-                            mapPos[mapCursor] = scanPos[k];
-                            mapCol[mapCursor] = scanCol[k]; 
-                            mapCursor++;
-                        }
-                        mapMesh.geometry.attributes.position.needsUpdate = true;
-                        mapMesh.geometry.attributes.color.needsUpdate = true; 
-                        lastKeyframePose = { x: poseX, y: poseY };
+            let c = 0; 
+            let d = 0; 
+            let scaleFactor = 1.0;
+            if (data.robot && (Math.abs(data.robot.x) > 100)) scaleFactor = 0.001;
+
+            const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
+
+            if (isFlat) {
+                for (let i = 0; i < scan.length; i += 4) {
+                    if (c >= 5000 * 3) break;
+
+                    scanPos[c++] = scan[i] * scaleFactor;
+                    scanPos[c++] = scan[i+1] * scaleFactor;
+                    let valZ = (i + 2 < scan.length) ? scan[i+2] : 0.1;
+                    scanPos[c++] = valZ * scaleFactor;
+
+                    const intensity = (i + 3 < scan.length) ? scan[i+3] : 0;
+                    const maxVal = 255.0;
+                    let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
+                    const color = new THREE.Color();
+                    color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
+
+                    scanCol[d++] = color.r;
+                    scanCol[d++] = color.g;
+                    scanCol[d++] = color.b;
+                }
+            }
+
+            for (let i = c; i < 5000 * 3; i++) scanPos[i] = 99999;
+            scanMesh.geometry.attributes.position.needsUpdate = true;
+            scanMesh.geometry.attributes.color.needsUpdate = true;
+
+            if (pose) {
+                const poseX = pose.x * scaleFactor;
+                const poseY = pose.y * scaleFactor;
+                const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
+                if (dist > 0.2) {
+                    const mapPos = mapMesh.geometry.attributes.position.array;
+                    const mapCol = mapMesh.geometry.attributes.color.array; 
+
+                    for (let k = 0; k < c; k++) {
+                        if (mapCursor >= 500000 * 3) mapCursor = 0;
+                        mapPos[mapCursor] = scanPos[k];
+                        mapCol[mapCursor] = scanCol[k]; 
+                        mapCursor++;
                     }
+                    mapMesh.geometry.attributes.position.needsUpdate = true;
+                    mapMesh.geometry.attributes.color.needsUpdate = true; 
+                    lastKeyframePose = { x: poseX, y: poseY };
                 }
             }
         }
+    }
 
-        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
-        animate();
+    function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+    animate();
 
-        new ResizeObserver(() => {
-            const w = container.clientWidth, h = container.clientHeight;
-            if(w&&h) { renderer.setSize(w,h); camera.aspect=w/h; camera.updateProjectionMatrix(); }
-        }).observe(container);
-    })();
+    new ResizeObserver(() => {
+        const w = container.clientWidth, h = container.clientHeight;
+        if(w&&h) { renderer.setSize(w,h); camera.aspect=w/h; camera.updateProjectionMatrix(); }
+    }).observe(container);
+})();
 
 })(); // ✅✅✅ [关键修复] 这里加上了最外层的闭包结束括号！
