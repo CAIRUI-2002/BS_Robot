@@ -18,10 +18,22 @@
     // ====== 🌊 自适应检测全局变量 ======
     const HISTORY_SIZE = 50;  // 记录最近 50 帧的数据作为背景参考
     let signalBaselineQueue = []; // 存储历史信号强度
-// 灵敏度系数：值越小越灵敏，值越大越抗干扰
-// 3.0 代表偏离正常波动范围 3 倍才算故障 (统计学上的 99.7% 置信度)
-    // 改为 let，允许动态修改，默认值 3.0
-    let sensitivityFactor = 3.0;
+// ====== 🌊 [新] AUC 算法全局配置 ======
+    // 对应 Python 代码中的核心参数
+    const AUC_CONFIG = {
+        SAMPLING_RATE: 10000,   // 采样率
+        PULSE_THRESHOLD: 500,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
+        DISTANCE_MIN: 1000,     // 粗筛：最小脉冲间隔 (防止重复触发)
+        
+        // --- 核心判定参数 ---
+        NOISE_THRESHOLD: 3.5,   // Z-score 阈值 (由滑条控制)
+        BURST_THRESHOLD: 6,     // 异常点数量阈值
+        AUC_THRESHOLD: 2500.0,  // 能量积分阈值 (幅度 * 数量)
+        
+        // --- 窗口设置 ---
+        WINDOW_BEFORE: 2000,    // 峰值前取点
+        WINDOW_AFTER: 5000      // 峰值后取点 (等待数据攒够)
+    };
 
     // ====== 🌊 峰值监测全局变量 ======
 // 存储最近 50 帧的 { deviation: 偏离度, val: 信号强度 }
@@ -186,26 +198,25 @@
     // ==========================================
 
     document.addEventListener("DOMContentLoaded", function () {
+       // ==========================================
+        // ✅ [修改] 灵敏度滑条 -> 控制 Z-score 阈值
         // ==========================================
-// ✅ 新增：灵敏度滑条控制
-// ==========================================
         const sensSlider = document.getElementById('sensitivitySlider');
         const sensDisplay = document.getElementById('sensitivityDisplay');
 
         if (sensSlider && sensDisplay) {
-            // 初始化显示
-            sensDisplay.textContent = parseFloat(sensSlider.value).toFixed(1);
-            // 更新全局变量
-            sensitivityFactor = parseFloat(sensSlider.value);
+            // 1. 初始化显示
+            // 建议 HTML 中 input range 的 min="2.0" max="6.0" step="0.1" value="3.5"
+            sensDisplay.textContent = AUC_CONFIG.NOISE_THRESHOLD.toFixed(1);
+            sensSlider.value = AUC_CONFIG.NOISE_THRESHOLD;
 
-            // 监听滑动事件
+            // 2. 监听滑动
             sensSlider.addEventListener('input', function() {
                 const val = parseFloat(this.value);
-                sensitivityFactor = val; // 更新算法使用的变量
-                sensDisplay.textContent = val.toFixed(1); // 更新界面显示
-
-                // 可选：打印日志确认
-                // console.log("灵敏度已调整为:", sensitivityFactor);
+                AUC_CONFIG.NOISE_THRESHOLD = val; // ✅ 更新 AUC 配置
+                sensDisplay.textContent = val.toFixed(1);
+                
+                // console.log("Z-score 阈值调整为:", val);
             });
         }
         // --- A. 获取 DOM ---
@@ -1753,7 +1764,7 @@
         window.controlJoint(index, direction);
     }
 // ==========================================
-    // 6. 信号波形显示 (固定IP 10.21.31.104 + 滚动数值显示)
+    // 6. 信号波形显示 & [新] AUC 算法移植 (保留声信号)
     // ==========================================
     (function initSignalChart() {
         const canvas = document.getElementById("signalCanvas");
@@ -1761,36 +1772,148 @@
         if (!canvas) return;
 
         const ctx = canvas.getContext("2d");
+        const Y_MAX = 4096; // ADC 12-bit
 
-        // 存储波形数据
-        let channel1Data = []; // 磁信号
-        let channel2Data = []; // 声信号
-        const Y_MAX = 4096;
+        // --- 1. 数据存储 (保留双通道) ---
+        let channel1Data = []; // 磁信号 (用于绘图)
+        let channel2Data = []; // 声信号 (用于绘图 - ✅ 保持不变)
 
-        // ✅ 新增：历史数值缓存队列 (初始化为 [0, 0, 0])
-        // 格式：[历史2, 历史1, 实时]
+        // 历史数值缓存 (UI显示用 - ✅ 保持不变)
         let magHistory = [0, 0, 0];
         let sndHistory = [0, 0, 0];
 
-        // --- 1. 自动调整画布大小 ---
+        // --- 2. [新增] AUC 算法专用变量 (仅针对磁信号) ---
+        const BUFFER_SIZE = 20000;
+        const ringBuffer = new Float32Array(BUFFER_SIZE);
+        let writePtr = 0;       // 写入指针
+        let totalSamples = 0;   // 绝对计数器
+        let algoState = 'IDLE'; // IDLE -> WAITING_DATA
+        let triggerIndex = 0;
+        let lastTriggerTime = -9999;
+
+        // 3. 自动调整画布大小 (✅ 保持不变)
         function resizeCanvas() {
             const parent = canvas.parentElement;
-            if (parent && parent.clientWidth > 0 && parent.clientHeight > 0) {
+            if (parent && parent.clientWidth > 0) {
                 canvas.width = parent.clientWidth;
                 canvas.height = parent.clientHeight;
                 requestAnimationFrame(drawSignal);
             }
         }
+        new ResizeObserver(resizeCanvas).observe(canvas.parentElement);
 
-        const resizeObserver = new ResizeObserver(() => {
-            resizeCanvas();
-        });
-        if (canvas.parentElement) {
-            resizeObserver.observe(canvas.parentElement);
+
+        // ============================================================
+        // 🚀 [核心逻辑替换] AUC 算法处理流
+        // ============================================================
+        
+        // 处理新进来的磁信号数据 (Feed Data)
+        function processMagAlgorithm(newDataChunk) {
+            for (let i = 0; i < newDataChunk.length; i++) {
+                const rawVal = newDataChunk[i];
+                const adjustedVal = rawVal - 2048; // 去直流
+                
+                // 1. 写入环形缓冲区
+                ringBuffer[writePtr] = adjustedVal;
+                writePtr = (writePtr + 1) % BUFFER_SIZE;
+                totalSamples++;
+
+                // 2. 实时触发检测 (Trigger)
+                if (algoState === 'IDLE') {
+                    if (Math.abs(adjustedVal) > AUC_CONFIG.PULSE_THRESHOLD) {
+                        // 冷却时间检查
+                        if (totalSamples - lastTriggerTime > AUC_CONFIG.DISTANCE_MIN) {
+                            // console.log(`⚡ [AUC触发] T=${totalSamples}`);
+                            algoState = 'WAITING_DATA';
+                            triggerIndex = totalSamples;
+                            lastTriggerTime = totalSamples;
+                        }
+                    }
+                }
+            }
+
+            // 3. 检查数据是否攒够 (Window Full?)
+            if (algoState === 'WAITING_DATA') {
+                if (totalSamples >= triggerIndex + AUC_CONFIG.WINDOW_AFTER) {
+                    performAUCAnalysis();
+                    algoState = 'IDLE';
+                }
+            }
         }
-        setTimeout(resizeCanvas, 500);
 
-        // --- 2. 绘图主逻辑 ---
+        // 执行 AUC 积分分析
+        function performAUCAnalysis() {
+            // 提取窗口数据: [Trigger - BEFORE, Trigger + AFTER]
+            const startAbs = triggerIndex - AUC_CONFIG.WINDOW_BEFORE;
+            const len = AUC_CONFIG.WINDOW_BEFORE + AUC_CONFIG.WINDOW_AFTER;
+            const segment = new Float32Array(len);
+            
+            // 从环形缓冲区复制 (处理回绕)
+            for (let i = 0; i < len; i++) {
+                let idx = (startAbs + i) % BUFFER_SIZE;
+                if (idx < 0) idx += BUFFER_SIZE;
+                segment[i] = ringBuffer[idx];
+            }
+
+            // 1. 计算 Mean & Std
+            let sumAbs = 0;
+            const absSeg = new Float32Array(len);
+            for(let i=0; i<len; i++) {
+                absSeg[i] = Math.abs(segment[i]);
+                sumAbs += absSeg[i];
+            }
+            const mean = sumAbs / len;
+
+            let sumSqDiff = 0;
+            for(let i=0; i<len; i++) {
+                sumSqDiff += (absSeg[i] - mean) ** 2;
+            }
+            const std = Math.sqrt(sumSqDiff / len);
+
+            if (std <= 0) return;
+
+            // 2. Z-score 积分
+            let noisePointsCount = 0;
+            let aucSum = 0;
+            // 🔥 这里使用了全局配置中的 NOISE_THRESHOLD (由滑条控制)
+            const threshold = AUC_CONFIG.NOISE_THRESHOLD;
+
+            for(let i=0; i<len; i++) {
+                const zScore = (absSeg[i] - mean) / std;
+                if (zScore > threshold) {
+                    noisePointsCount++;
+                    aucSum += absSeg[i];
+                }
+            }
+
+            // 3. 最终判定
+            const isDischarge = (noisePointsCount >= AUC_CONFIG.BURST_THRESHOLD) && 
+                                (aucSum >= AUC_CONFIG.AUC_THRESHOLD);
+
+            // 4. 结果输出
+            if (isDischarge) {
+                console.log(`🔴 [故障判定] AUC:${aucSum.toFixed(0)} > ${AUC_CONFIG.AUC_THRESHOLD}, Pts:${noisePointsCount}`);
+                
+                window.g_isFaultDetected = true;
+                
+                // 为了让 UI 显示数值，取触发点的原始值 (加回 2048)
+                // 也可以直接用 aucSum 来代表强度，看你需求
+                const peakVal = Math.abs(segment[AUC_CONFIG.WINDOW_BEFORE]) + 2048;
+                window.g_realtimeMag = peakVal;
+
+                // UI 变红提示
+                const elMag = document.getElementById('magSignalVal');
+                if(elMag) elMag.style.color = "#ff4444";
+                
+                // 0.5秒后自动复位状态，防止一直锁定
+                setTimeout(() => { window.g_isFaultDetected = false; }, 500);
+            }
+        }
+
+
+        // ============================================================
+        // 🎨 绘图逻辑 (保留原有双通道绘制)
+        // ============================================================
         function drawSignal() {
             const w = canvas.width;
             const h = canvas.height;
@@ -1798,115 +1921,32 @@
 
             const halfH = h / 2;
 
-            // 清空背景
+            // 清屏
             ctx.fillStyle = "#000000";
             ctx.fillRect(0, 0, w, h);
 
-            // 绘制中间分界线
+            // 中线
             ctx.strokeStyle = "#444";
             ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(0, halfH);
-            ctx.lineTo(w, halfH);
-            ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, halfH); ctx.lineTo(w, halfH); ctx.stroke();
 
-            // 绘制 Ch1 (磁信号)
+            // ✅ 绘制 Ch1 (磁信号)
             if (channel1Data && channel1Data.length > 0) {
                 drawChannel(channel1Data, 0, halfH, "#00ccff");
             }
 
-            // 绘制 Ch2 (声信号)
+            // ✅ 绘制 Ch2 (声信号 - 保持不变)
             if (channel2Data && channel2Data.length > 0) {
                 drawChannel(channel2Data, halfH, halfH, "#ff3333");
             }
-
-            // 更新左侧数值显示 (带历史滚动)
-            updateSignalValues();
+            
+            // 更新 UI 数值
+            updateUIValues();
+            
+            requestAnimationFrame(drawSignal);
         }
 
-        // ✅ 终极版：双向突变 + 自适应动态阈值检测
-        function updateSignalValues() {
-            let effectiveSignal = 0; // 当前这一帧的信号强度特征值
-            let isFault = false;     // 是否判定为故障
-
-            // --- A. 计算当前帧的信号特征 (兼容上下突变) ---
-            if (channel1Data.length > 0) {
-                const currentMax = Math.max(...channel1Data);
-                const currentMin = Math.min(...channel1Data);
-
-                // 计算这一帧内部的平均值 (基准线)
-                const sum = channel1Data.reduce((a, b) => a + b, 0);
-                const frameAvg = sum / channel1Data.length;
-
-                // 计算向上和向下的偏离幅度
-                const devUp = currentMax - frameAvg;
-                const devDown = frameAvg - currentMin;
-
-                // 取最大的偏离幅度作为特征值
-                // 这样无论是向下凹陷还是向上凸起，特征值都会变大
-                const maxDeviation = Math.max(devUp, devDown);
-
-                // 我们记录的特征值 = 基准线 + 最大偏离幅度
-                effectiveSignal = frameAvg + maxDeviation;
-            }
-
-            // --- B. 统计学动态检测算法 (Z-Score) ---
-            if (effectiveSignal > 0) {
-                // 1. 先把当前数据加入历史队列
-                signalBaselineQueue.push(effectiveSignal);
-                if (signalBaselineQueue.length > HISTORY_SIZE) {
-                    signalBaselineQueue.shift(); // 移除最老的数据
-                }
-
-                // 2. 只有当历史数据攒够了(比如攒够20帧)，才开始检测，避免刚启动误报
-                if (signalBaselineQueue.length > 20) {
-                    // 计算历史平均值 (Mean)
-                    const historySum = signalBaselineQueue.reduce((a, b) => a + b, 0);
-                    const historyMean = historySum / signalBaselineQueue.length;
-
-                    // 计算标准差 (Standard Deviation) - 衡量最近的波动有多大
-                    const variance = signalBaselineQueue.reduce((sum, val) => {
-                        return sum + Math.pow(val - historyMean, 2);
-                    }, 0) / signalBaselineQueue.length;
-                    const stdDev = Math.sqrt(variance);
-
-                    // ⚠️ 核心判定公式：
-                    // 当前值 > 历史平均值 + (灵敏度 * 波动范围)
-                    // 这里的 Math.max(stdDev, 10) 是为了防止信号纯平直线时标准差为0导致误判
-                    // 使用变量 sensitivityFactor
-                    const dynamicThreshold = historyMean + (sensitivityFactor * Math.max(stdDev, 10));
-
-                    // 如果当前信号强度 超过了 动态阈值，判定为突变
-                    if (effectiveSignal > dynamicThreshold) {
-                        isFault = true;
-                        console.log(`⚡ 检测到突变! 当前:${effectiveSignal.toFixed(0)} > 阈值:${dynamicThreshold.toFixed(0)}`);
-                    }
-                }
-            }
-
-            // --- C. 将结果暴露给全局，供 3D 绘图 ---
-            // 这里做个特殊处理：如果判定为故障，传回真实强度；否则传0或低值，
-            // 这样 updateVis 那边只需要判断 g_realtimeMag > 0 即可 (或者你保留原来的阈值逻辑也可以)
-
-            // 为了配合 updateVis，我们直接把判定结果存入一个全局标记
-            window.g_isFaultDetected = isFault;
-            window.g_realtimeMag = effectiveSignal; // 仅供UI显示数值用
-
-            // --- D. 更新 UI (左侧信息栏) ---
-            // 磁信号历史滚动
-            // 1. 上方：实时电磁信号 (保持原样)
-            magHistory.push(Math.floor(effectiveSignal));
-            if (magHistory.length > 3) magHistory.shift();
-            const elMag = document.getElementById('magSignalVal');
-            if (elMag) {
-                elMag.textContent = magHistory.join('   ');
-                elMag.style.color = isFault ? "#ff4444" : "#00e5ff";
-            }
-        }
-
-        /**
-         * 绘制单个通道通用函数
-         */
+        // 通用单通道绘图函数 (✅ 保持不变)
         function drawChannel(data, topY, height, color) {
             ctx.strokeStyle = color;
             ctx.lineWidth = 1.5;
@@ -1918,8 +1958,6 @@
             for (let i = 0; i < len; i++) {
                 const x = (i / len) * w;
                 let val = data[i];
-
-                // 简单的钳位
                 if (val > Y_MAX) val = Y_MAX;
                 if (val < 0) val = 0;
 
@@ -1931,65 +1969,87 @@
             }
             ctx.stroke();
 
-            // 绘制文字标签
             ctx.fillStyle = color;
             ctx.font = "12px monospace";
             const label = topY === 0 ? `电磁信号` : `声信号`;
             ctx.fillText(label, 5, topY + 15);
         }
 
-        // --- 3. WebSocket 连接 ---
-        // 按照要求：使用硬编码的 IP 地址
-        const wsUrl = "ws://10.21.31.104:8001/ws/signal";
+        // 更新左侧滚动的数值 (UI)
+        function updateUIValues() {
+            // 1. 磁信号数值 (取最新数据的最大值，或者由 AUC 结果驱动)
+            if (channel1Data.length > 0) {
+                // 为了界面跳动效果，我们依然取当前帧的一个代表值
+                // 这里取当前帧最大值作为显示
+                const currVal = Math.max(...channel1Data);
+                magHistory.push(Math.floor(currVal));
+                if (magHistory.length > 3) magHistory.shift();
+                
+                const elMag = document.getElementById('magSignalVal');
+                if(elMag) {
+                    elMag.textContent = magHistory.join('   ');
+                    if (!window.g_isFaultDetected) elMag.style.color = "#00e5ff";
+                }
+            }
 
-        console.log(`📡 正在连接信号服务: ${wsUrl}`);
+            // 2. ✅ 声信号数值 (保持不变)
+            if (channel2Data.length > 0) {
+                const currSnd = Math.max(...channel2Data);
+                sndHistory.push(Math.floor(currSnd));
+                if (sndHistory.length > 3) sndHistory.shift();
+
+                const elSnd = document.getElementById('sndSignalVal');
+                // 假设你的 HTML 里有 sndSignalVal 这个 ID，如果没有可忽略
+                if (elSnd) {
+                    elSnd.textContent = sndHistory.join('   ');
+                }
+            }
+        }
+
+        // --- 4. WebSocket 连接 (✅ 保持不变) ---
+        const wsUrl = "ws://10.21.31.104:8001/ws/signal";
         const ws = new WebSocket(wsUrl);
 
-        ws.onopen = () => {
-            console.log("📡 双通道信号服务已连接");
+        ws.onopen = () => { 
+            console.log("📡 AUC Signal Engine Connected");
             if(statusDiv) {
-                statusDiv.textContent = "● DUAL CH LIVE";
+                statusDiv.textContent = "● AUC LIVE";
                 statusDiv.style.color = "#0f0";
             }
             resizeCanvas();
         };
 
-        // ⚠️ 关键修正：这里必须处理信号数据，而不是 SLAM 数据
         ws.onmessage = (event) => {
             try {
                 const msg = JSON.parse(event.data);
-
-                // 修正判定条件：处理 mixed_signal 或 signal 类型
                 if (msg.type === "mixed_signal" || msg.type === "signal") {
-                    // 1. 提取数据
-                    if (msg.mag_data) channel1Data = msg.mag_data;
-                    else if (msg.ch1) channel1Data = msg.ch1;
+                    // 1. 处理磁信号 (Ch1) -> 送入 AUC 算法 & 绘图缓存
+                    if (msg.mag_data) {
+                        channel1Data = msg.mag_data; // 存下来画图用
+                        processMagAlgorithm(msg.mag_data); // 送去算 AUC
+                    } else if (msg.ch1) {
+                        channel1Data = msg.ch1;
+                        processMagAlgorithm(msg.ch1);
+                    }
 
-                    if (msg.snd_data) channel2Data = msg.snd_data;
-                    else if (msg.ch2) channel2Data = msg.ch2;
-
-                    // 2. 触发重绘 (重绘时会调用 updateSignalValues 更新历史数值)
-                    requestAnimationFrame(drawSignal);
+                    // 2. ✅ 处理声信号 (Ch2) -> 仅存下来画图 (保持不变)
+                    if (msg.snd_data) {
+                        channel2Data = msg.snd_data;
+                    } else if (msg.ch2) {
+                        channel2Data = msg.ch2;
+                    }
                 }
             } catch (e) {
-                console.error("❌ 数据解析错误", e);
+                console.error("Data Parse Error", e);
             }
         };
 
         ws.onerror = (err) => {
-            console.error("❌ WebSocket 错误:", err);
-            if(statusDiv) {
-                statusDiv.textContent = "● ERROR";
-                statusDiv.style.color = "#f00";
-            }
+            if(statusDiv) { statusDiv.textContent = "● ERROR"; statusDiv.style.color = "#f00"; }
         };
 
         ws.onclose = () => {
-            console.log("⚠️ WebSocket 连接断开");
-            if(statusDiv) {
-                statusDiv.textContent = "● OFFLINE";
-                statusDiv.style.color = "#f00";
-            }
+            if(statusDiv) { statusDiv.textContent = "● OFFLINE"; statusDiv.style.color = "#f00"; }
         };
     })();
 
@@ -2264,6 +2324,13 @@
     container.style.background = "#111";
     container.style.position = "relative"; // 确保子元素绝对定位相对于此容器
 
+    let mapCursor = 0;
+    let lastKeyframePose = { x: -999, y: -999 };
+
+    // ✅ 新增：用于连续破损区域追踪的状态变量
+    let lastFaultMarker = null;    // 存储当前最新的那个红球 Mesh
+    let lastFaultCablePos = null;  // 存储上一次有效破损点的坐标 (Vector3)
+
     // ==========================================
     // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
     // ==========================================
@@ -2517,8 +2584,7 @@
     mapMesh.frustumCulled = false;
     scene.add(mapMesh);
 
-    let mapCursor = 0;
-    let lastKeyframePose = { x: -999, y: -999 };
+    
 
     // C. 机器狗轨迹
     const trailGroup = new THREE.Group();
@@ -3039,23 +3105,25 @@
         }
     }
 
-    // 5. 旧清除按钮
+    // 5. 旧清除按钮 (修改后：只清除蓝色机器狗轨迹)
     const btnClearDog = document.getElementById("btnClearDogPath");
     if (btnClearDog) {
         btnClearDog.onclick = function() {
+            console.log("🧹 清除机器狗轨迹...");
+            
+            // 1. 清除轨迹数据点
             trailPoints.length = 0;
             lastTrailPos.set(-999, -999, 0);
+
+            // 2. 清除轨迹 Mesh
             if (currentTrailMesh) {
                 trailGroup.remove(currentTrailMesh);
-                currentTrailMesh.geometry.dispose();
+                if (currentTrailMesh.geometry) currentTrailMesh.geometry.dispose();
+                if (currentTrailMesh.material) currentTrailMesh.material.dispose();
                 currentTrailMesh = null;
             }
-            while(faultMarkerGroup.children.length > 0){
-                const mesh = faultMarkerGroup.children[0];
-                faultMarkerGroup.remove(mesh);
-                if(mesh.geometry) mesh.geometry.dispose();
-            }
-            lastFaultPos.set(-999, -999, -999);
+            
+            // ✅ 已删除 faultMarkerGroup 的清除逻辑，现在由 btnClearFaults 专用按钮负责
         };
     }
 
@@ -3076,6 +3144,41 @@
 
             mapCursor = 0;
             lastKeyframePose = { x: -999, y: -999 };
+        };
+    }
+    // ✅ [新增] 清除破损点按钮逻辑
+    const btnClearFaults = document.getElementById("btnClearFaults");
+    if (btnClearFaults) {
+        btnClearFaults.onclick = function() {
+            console.log("🧹 清除所有破损点标记...");
+
+            // 1. 重置连续追踪的状态变量 (防止红线乱连)
+            if (typeof lastFaultMarker !== 'undefined') lastFaultMarker = null;
+            if (typeof lastFaultCablePos !== 'undefined') lastFaultCablePos = null;
+
+            // 2. 清除红色球体组 (faultMarkerGroup)
+            // 注意：faultMarkerGroup 是在 initSlamVis 开头定义的
+            if (faultMarkerGroup) {
+                while(faultMarkerGroup.children.length > 0){
+                    const mesh = faultMarkerGroup.children[0];
+                    faultMarkerGroup.remove(mesh);
+                    // 释放内存
+                    if(mesh.geometry) mesh.geometry.dispose();
+                    if(mesh.material) mesh.material.dispose();
+                }
+            }
+
+            // 3. 清除红色电缆路径组 (redCableGroup)
+            // 注意：redCableGroup 是在 initSlamVis 开头定义的
+            if (redCableGroup) {
+                while(redCableGroup.children.length > 0){
+                    const mesh = redCableGroup.children[0];
+                    redCableGroup.remove(mesh);
+                    // 释放内存
+                    if(mesh.geometry) mesh.geometry.dispose();
+                    if(mesh.material) mesh.material.dispose();
+                }
+            }
         };
     }
 
@@ -3297,15 +3400,22 @@
             const isFault = window.g_isFaultDetected === true;
 
             // =========================================================
-            // ✅✅✅ [核心修改] 破损点逻辑：投影到电缆路径
+            // 🚀 [新] 连续破损区域追踪逻辑
             // =========================================================
+            
+            // 定义全局变量 (放在 updateVis 函数外部，或者 initSlamVis 闭包顶部)
+            // 如果这些变量还没定义，请将被替换代码块上方的这两行声明移动到 initSlamVis 函数最开头：
+            // let lastFaultMarker = null;  // 记录上一个“临时红点”
+            // let lastFaultCablePos = null; // 记录上一个破损点的坐标（用于画线）
+
             if (isFault) {
                 // 1. 检查是否存在电缆路径
                 if (window.savedCablePath && window.savedCablePath.length > 0) {
                     
-                    // 2. 寻找最近的电缆点
+                    // 2. 寻找最近的电缆点 (投影)
                     let minDistance = Infinity;
                     let closestPoint = null;
+                    let closestIdx = -1;
 
                     for (let i = 0; i < window.savedCablePath.length; i++) {
                         const pathPt = window.savedCablePath[i];
@@ -3313,28 +3423,63 @@
                         if (dist < minDistance) {
                             minDistance = dist;
                             closestPoint = pathPt;
+                            closestIdx = i;
                         }
                     }
 
                     if (closestPoint) {
-                        // 3. 去重检查：如果这个电缆点距离上一次标注的点超过 0.05米，才进行标注
-                        if (closestPoint.distanceTo(lastFaultPos) > 0.05) {
-                            const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
+                        // 3. 空间去重 (防止原地不动时重复触发)
+                        // 只有当距离上一次记录点 > 0.05m 时才更新
+                        if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.05) {
+                            
+                            // --- A. 删除上一个临时红点 ---
+                            if (lastFaultMarker) {
+                                faultMarkerGroup.remove(lastFaultMarker);
+                                if(lastFaultMarker.geometry) lastFaultMarker.geometry.dispose();
+                                lastFaultMarker = null;
+                            }
+
+                            // --- B. 创建新的红色破损点 (代表当前最新位置) ---
+                            const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
                             const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
                             const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
-                            
-                            // ⚠️ 关键修正：设置位置为电缆上的投影点，而非机器狗位置
                             faultMesh.position.copy(closestPoint);
                             
                             faultMarkerGroup.add(faultMesh);
-                            lastFaultPos.copy(closestPoint);
                             
-                            console.log(`🔴 探测到电缆破损! 已标注在电缆路径上:`, closestPoint);
+                            // 更新引用
+                            lastFaultMarker = faultMesh;
+
+                            // --- C. 绘制红色电缆段 (连接上一个点和当前点) ---
+                            if (lastFaultCablePos) {
+                                // 创建一段红色管线连接两点
+                                // 使用 CatmullRomCurve3 虽然好，但两点间直接 Line/Tube 也可以
+                                const segmentPath = [lastFaultCablePos, closestPoint];
+                                const curve = new THREE.CatmullRomCurve3(segmentPath);
+                                const tubeGeo = new THREE.TubeGeometry(curve, 1, 0.04, 8, false); // 半径比黄色电缆稍粗(0.04 vs 0.03)
+                                const tubeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                                const redSegment = new THREE.Mesh(tubeGeo, tubeMat);
+                                
+                                redCableGroup.add(redSegment);
+                            }
+
+                            // --- D. 更新状态 ---
+                            // 注意：这里需要深拷贝位置，否则 lastFaultCablePos 会随 closestPoint 引用变化
+                            lastFaultCablePos = closestPoint.clone(); 
+
+                            console.log(`🔴 [追踪] 更新破损点至:`, closestPoint);
                         }
                     }
-                } else {
-                    // 若无路径，不标注
                 }
+            } else {
+                // (可选) 如果你需要“断续”逻辑：
+                // 当信号消失一段时间后，重置 lastFaultCablePos，
+                // 这样下一次再检测到信号时，会视为一个新的独立破损区域的起点，而不会把两个很远的区域连起来。
+                // 
+                // if (signalLostTimer > 2000ms) { 
+                //     lastFaultCablePos = null; 
+                //     lastFaultMarker = null; // 此时保留最后一个红点作为该区域终点
+                // }
             }
             
             // ✅✅✅ 修改：如果处于电缆跟踪模式，禁止绘制机器狗的蓝色轨迹

@@ -34,7 +34,7 @@
                         </div>
                         <div class="info-item" style="flex-direction: column; align-items: stretch; gap: 5px;">
                             <div style="display: flex; justify-content: space-between;">
-                                <span class="info-label">灵敏度系数：</span>
+                                <span class="info-label">Z-score阈值：</span>
                                 <span id="sensitivityDisplay" class="info-value" style="color: #00ff00;">3.0</span>
                             </div>
                             <input type="range" id="sensitivitySlider" class="custom-range"
@@ -379,9 +379,12 @@
                             <span>路径规划与定位地图</span>
 
                             <div class="header-btn-group">
-                                <!-- ✅ 新增: 消除点云按钮 (放在机器狗路径按钮左边) -->
                                 <button id="btnClearCloud" class="header-btn-mini">
                                     消除点云
+                                </button>
+                                
+                                <button id="btnClearFaults" class="header-btn-mini">
+                                    消除破损点
                                 </button>
 
                                 <button id="btnClearDogPath" class="header-btn-mini">
