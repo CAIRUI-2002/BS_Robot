@@ -3106,8 +3106,8 @@
         btnTrack.id = "btnTrackCableOverlay";
         // 设置样式：悬浮在 pathMapArea 右上角
         btnTrack.style.position = "absolute";
-        // ✅✅✅ 修改 2: 将按钮位置下移到 170px，位于“清除”按钮下方
-        btnTrack.style.top = "170px";
+        // ✅✅✅ 修改 2: 将按钮位置下移到 200px，位于“清除”按钮下方
+        btnTrack.style.top = "200px";
         btnTrack.style.right = "10px";
         btnTrack.style.zIndex = "999";
         btnTrack.style.padding = "8px 12px";
@@ -3296,15 +3296,44 @@
             const currentPos = new THREE.Vector3(px, py, pz);
             const isFault = window.g_isFaultDetected === true;
 
+            // =========================================================
+            // ✅✅✅ [核心修改] 破损点逻辑：投影到电缆路径
+            // =========================================================
             if (isFault) {
-                if (currentPos.distanceTo(lastFaultPos) > 0.1) {
-                    const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
-                    const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                    const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
-                    faultMesh.position.copy(currentPos);
-                    faultMarkerGroup.add(faultMesh);
-                    lastFaultPos.copy(currentPos);
-                    console.log(`🔴 探测到电缆破损! 位置:`, currentPos);
+                // 1. 检查是否存在电缆路径
+                if (window.savedCablePath && window.savedCablePath.length > 0) {
+                    
+                    // 2. 寻找最近的电缆点
+                    let minDistance = Infinity;
+                    let closestPoint = null;
+
+                    for (let i = 0; i < window.savedCablePath.length; i++) {
+                        const pathPt = window.savedCablePath[i];
+                        const dist = currentPos.distanceTo(pathPt);
+                        if (dist < minDistance) {
+                            minDistance = dist;
+                            closestPoint = pathPt;
+                        }
+                    }
+
+                    if (closestPoint) {
+                        // 3. 去重检查：如果这个电缆点距离上一次标注的点超过 0.05米，才进行标注
+                        if (closestPoint.distanceTo(lastFaultPos) > 0.05) {
+                            const sphereGeo = new THREE.SphereGeometry(0.1, 16, 16);
+                            const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                            const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                            
+                            // ⚠️ 关键修正：设置位置为电缆上的投影点，而非机器狗位置
+                            faultMesh.position.copy(closestPoint);
+                            
+                            faultMarkerGroup.add(faultMesh);
+                            lastFaultPos.copy(closestPoint);
+                            
+                            console.log(`🔴 探测到电缆破损! 已标注在电缆路径上:`, closestPoint);
+                        }
+                    }
+                } else {
+                    // 若无路径，不标注
                 }
             }
             
@@ -3408,7 +3437,7 @@
                     scanPos[c++] = valZ * scaleFactor;
 
                     const intensity = (i + 3 < scan.length) ? scan[i+3] : 0;
-                    const maxVal = 255.0;
+                    const maxVal = 10.0;
                     let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
                     const color = new THREE.Color();
                     color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
