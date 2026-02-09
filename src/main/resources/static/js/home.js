@@ -22,7 +22,7 @@
     // 对应 Python 代码中的核心参数
     const AUC_CONFIG = {
         SAMPLING_RATE: 10000,   // 采样率
-        PULSE_THRESHOLD: 500,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
+        PULSE_THRESHOLD: 300,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
         DISTANCE_MIN: 1000,     // 粗筛：最小脉冲间隔 (防止重复触发)
         
         // --- 核心判定参数 ---
@@ -33,6 +33,52 @@
         // --- 窗口设置 ---
         WINDOW_BEFORE: 2000,    // 峰值前取点
         WINDOW_AFTER: 5000      // 峰值后取点 (等待数据攒够)
+    };
+
+    // ==========================================
+    // ✅ 新增：AUC 算法参数微调控制
+    // ==========================================
+    window.adjustAucParam = function(type, delta) {
+        // 1. 获取显示元素
+        const elPulse = document.getElementById('disp_pulse_threshold');
+        const elAuc = document.getElementById('disp_auc_threshold');
+        const elZ = document.getElementById('sensitivityDisplay'); // ✅ 新增：获取 Z-score 显示元素
+
+        if (type === 'PULSE') {
+            // --- 调整 Pulse Threshold ---
+            AUC_CONFIG.PULSE_THRESHOLD += delta;
+            
+            // 限制最小值为 0
+            if (AUC_CONFIG.PULSE_THRESHOLD < 0) AUC_CONFIG.PULSE_THRESHOLD = 0;
+            
+            // 更新 UI
+            if (elPulse) elPulse.textContent = AUC_CONFIG.PULSE_THRESHOLD;
+            console.log(`🎛️ [参数调整] 脉冲阈值 -> ${AUC_CONFIG.PULSE_THRESHOLD}`);
+            
+        } else if (type === 'AUC') {
+            // --- 调整 AUC Threshold ---
+            AUC_CONFIG.AUC_THRESHOLD += delta;
+            
+            // 限制最小值为 0
+            if (AUC_CONFIG.AUC_THRESHOLD < 0) AUC_CONFIG.AUC_THRESHOLD = 0;
+            
+            // 更新 UI
+            if (elAuc) elAuc.textContent = AUC_CONFIG.AUC_THRESHOLD.toFixed(0);
+            console.log(`🎛️ [参数调整] 能量积分阈值 -> ${AUC_CONFIG.AUC_THRESHOLD}`);
+
+        } else if (type === 'ZSCORE') { 
+            // ✅✅✅ 补全了这部分逻辑 ✅✅✅
+            
+            // --- 调整 Z-score Threshold ---
+            AUC_CONFIG.NOISE_THRESHOLD += delta;
+
+            // 限制最小值 (防止设为负数或0)
+            if (AUC_CONFIG.NOISE_THRESHOLD < 0.1) AUC_CONFIG.NOISE_THRESHOLD = 0.1;
+
+            // 更新 UI (保留1位小数)
+            if (elZ) elZ.textContent = AUC_CONFIG.NOISE_THRESHOLD.toFixed(1);
+            console.log(`🎛️ [参数调整] Z-score 阈值 -> ${AUC_CONFIG.NOISE_THRESHOLD.toFixed(1)}`);
+        }
     };
 
     // ====== 🌊 峰值监测全局变量 ======
@@ -193,31 +239,31 @@
         return { row: centerR, col: centerC, radius: radius };
     }
 
-    // ==========================================
+// ==========================================
     // 2. 页面初始化逻辑 (DOMContentLoaded)
     // ==========================================
 
     document.addEventListener("DOMContentLoaded", function () {
-       // ==========================================
-        // ✅ [修改] 灵敏度滑条 -> 控制 Z-score 阈值
         // ==========================================
-        const sensSlider = document.getElementById('sensitivitySlider');
-        const sensDisplay = document.getElementById('sensitivityDisplay');
+        // ✅ [修改] 初始化所有 AUC 算法参数显示 (Z-score, Pulse, AUC)
+        // ==========================================
+        // 说明：原有的 sensitivitySlider 滑条已被移除，现在三个参数统一使用加减按钮控制。
+        // 这里只需要负责页面加载时，把 AUC_CONFIG 里的默认值填入界面即可。
 
-        if (sensSlider && sensDisplay) {
-            // 1. 初始化显示
-            // 建议 HTML 中 input range 的 min="2.0" max="6.0" step="0.1" value="3.5"
-            sensDisplay.textContent = AUC_CONFIG.NOISE_THRESHOLD.toFixed(1);
-            sensSlider.value = AUC_CONFIG.NOISE_THRESHOLD;
+        // 1. 获取显示数值的 DOM 元素
+        const elZ = document.getElementById('sensitivityDisplay');       // Z-score 显示
+        const elPulse = document.getElementById('disp_pulse_threshold'); // 脉冲阈值显示
+        const elAuc = document.getElementById('disp_auc_threshold');     // 能量积分显示
 
-            // 2. 监听滑动
-            sensSlider.addEventListener('input', function() {
-                const val = parseFloat(this.value);
-                AUC_CONFIG.NOISE_THRESHOLD = val; // ✅ 更新 AUC 配置
-                sensDisplay.textContent = val.toFixed(1);
-                
-                // console.log("Z-score 阈值调整为:", val);
-            });
+        // 2. 将全局配置 (AUC_CONFIG) 中的默认值填入 UI
+        if (elZ) {
+            elZ.textContent = AUC_CONFIG.NOISE_THRESHOLD.toFixed(1); // 保留1位小数
+        }
+        if (elPulse) {
+            elPulse.textContent = AUC_CONFIG.PULSE_THRESHOLD;        // 整数
+        }
+        if (elAuc) {
+            elAuc.textContent = AUC_CONFIG.AUC_THRESHOLD;            // 整数
         }
         // --- A. 获取 DOM ---
         const btn3D = $("btn3DReconstruct");
@@ -2537,13 +2583,13 @@
     // A. 机器狗
     const dogGroup = new THREE.Group();
     const bodyMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(0.4, 0.2, 0.1),
+        new THREE.BoxGeometry(0.9, 0.50, 0.2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
     );
     const arrowHelper = new THREE.ArrowHelper(
         new THREE.Vector3(1, 0, 0),
         new THREE.Vector3(0, 0, 0),
-        0.6,
+        1.0,
         0x00ff00
     );
     dogGroup.add(bodyMesh);
@@ -2566,7 +2612,7 @@
     scene.add(scanMesh);
 
     // B2. 历史地图层
-    const mapMaxPoints = 500000;
+    const mapMaxPoints = 1000000;
     const mapGeom = new THREE.BufferGeometry();
     const mapPositions = new Float32Array(mapMaxPoints * 3);
     const mapColors = new Float32Array(mapMaxPoints * 3); 
@@ -3606,7 +3652,7 @@
                     const mapCol = mapMesh.geometry.attributes.color.array; 
 
                     for (let k = 0; k < c; k++) {
-                        if (mapCursor >= 500000 * 3) mapCursor = 0;
+                        if (mapCursor >= mapMaxPoints * 3) mapCursor = 0;
                         mapPos[mapCursor] = scanPos[k];
                         mapCol[mapCursor] = scanCol[k]; 
                         mapCursor++;
