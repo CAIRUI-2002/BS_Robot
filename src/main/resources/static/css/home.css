@@ -1844,38 +1844,3 @@ input[type="range"]::-webkit-slider-thumb {
 #btnClearFaults:active {
     transform: translateY(1px);
 }
-/* =========================================
-   新增：电缆数据详情显示区样式
-   ========================================= */
-.cable-data-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    width: 100%;
-    padding: 0 15px;
-    box-sizing: border-box;
-}
-
-.cable-data-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: rgba(0, 204, 255, 0.05); /* 浅蓝色半透明背景 */
-    border: 1px solid rgba(0, 204, 255, 0.2); /* 浅蓝边框 */
-    padding: 8px 12px;
-    border-radius: 6px;
-    box-shadow: inset 0 0 8px rgba(0, 0, 0, 0.5);
-}
-
-.cd-label {
-    color: #87c8ff;
-    font-size: 13px;
-}
-
-.cd-value {
-    color: #00ff00; /* 绿色高亮数值 */
-    font-family: 'Consolas', monospace;
-    font-size: 15px;
-    font-weight: bold;
-    text-shadow: 0 0 5px rgba(0, 255, 0, 0.3); /* 荧光效果 */
-}

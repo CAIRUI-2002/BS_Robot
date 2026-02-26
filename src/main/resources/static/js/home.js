@@ -3293,7 +3293,6 @@
             cablePoints.length = 0;
             segmentPoints.length = 0;
             lastCablePos.set(-999, -999, 0);
-            window.savedCablePath = []; // ✅ 清空保存的路径
             
             if (currentCableMesh) {
                 cableGroup.remove(currentCableMesh);
@@ -3305,10 +3304,6 @@
                 redCableGroup.remove(mesh);
                 if(mesh.geometry) mesh.geometry.dispose();
             }
-            
-            // ✅ 新增：重置UI上的长度显示
-            const elLength = document.getElementById('valCableLength');
-            if (elLength) elLength.textContent = "0.00 m";
         };
     }
 
@@ -3437,22 +3432,6 @@
     })();
 
     // --- 6. WebSocket ---
-    // ✅ 新增：计算电缆总长度并更新 UI 
-    function updateCableDataUI() {
-        let totalLength = 0;
-        // 如果存在平滑后的路径数组，遍历计算相邻点之间的欧氏距离
-        if (window.savedCablePath && window.savedCablePath.length > 1) {
-            for (let i = 1; i < window.savedCablePath.length; i++) {
-                totalLength += window.savedCablePath[i].distanceTo(window.savedCablePath[i - 1]);
-            }
-        }
-        
-        // 更新界面的探测长度数值
-        const elLength = document.getElementById('valCableLength');
-        if (elLength) {
-            elLength.textContent = totalLength.toFixed(2) + " m";
-        }
-    }
     const ROBOT_IP = "10.21.31.104";
     const wsUrl = "ws://" + ROBOT_IP + ":9090";
     console.log("正在尝试连接 WebSocket:", wsUrl);
@@ -3672,8 +3651,6 @@
                         
                         // ✅✅✅ 保存平滑后的路径供跟踪使用
                         window.savedCablePath = displayPoints;
-                        // ✅ 新增：每次更新路径后，重新计算长度并刷新UI
-                        updateCableDataUI();
 
                         // 绘制平滑曲线
                         const curve = new THREE.CatmullRomCurve3(displayPoints);
