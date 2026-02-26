@@ -2582,19 +2582,78 @@
 
     // A. 机器狗
     const dogGroup = new THREE.Group();
-    const bodyMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(0.9, 0.50, 0.2),
-        new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
-    );
+    
+    // 保留红色箭头，方便你调试机器狗的真实朝向是否正确
     const arrowHelper = new THREE.ArrowHelper(
         new THREE.Vector3(1, 0, 0),
         new THREE.Vector3(0, 0, 0),
         1.0,
         0x00ff00
     );
-    dogGroup.add(bodyMesh);
     dogGroup.add(arrowHelper);
     scene.add(dogGroup);
+
+    // ==========================================
+    // 💡 新增：为 3D 模型添加环境光与平行光
+    // GLB 模型使用 PBR 材质，没有光照会显示为纯黑
+    // ==========================================
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.2); 
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    directionalLight.position.set(10, -10, 20); // 根据你的 Z 轴向上的坐标系调整光源位置
+    scene.add(directionalLight);
+
+    // ==========================================
+    // 🐕 新增：异步加载 M20 Pro 的 GLB 模型
+    // ==========================================
+    if (typeof THREE.GLTFLoader !== 'undefined') {
+        const loader = new THREE.GLTFLoader();
+        
+        loader.load('/models/M20_3D.glb', function (gltf) {
+            const m20Model = gltf.scene;
+            
+            // 1. 缩放调整：GLB 内部单位可能和你的场景 (m) 不一致，按需调整
+            m20Model.scale.set(1, 1, 1); 
+            
+            // 2. 姿态调整：如果发现狗侧躺着或倒着，调整欧拉角
+            // 提示：你场景的 Z 轴是朝上的，很多 3D 软件导出的 Y 轴朝上
+            m20Model.rotation.x = Math.PI / 2; // 如果站立方向不对，尝试解开这行注释
+            m20Model.rotation.y = 0;
+            m20Model.rotation.z = 0; // 朝向修正（与红色 arrowHelper 保持一致）
+            
+            // 3. 🚩【核心修改】位置偏移调整：把狗拎起来
+    // 参数分别是：x(前后), y(左右), z(上下)
+    // 这里的 0.6 是假设狗站高 60cm，你可以根据实际视觉效果微调这个数字
+    m20Model.position.set(0, 0, 0.6); 
+            
+            // 遍历模型并开启阴影/调整材质（可选）
+            m20Model.traverse((child) => {
+                if (child.isMesh) {
+                    // child.material.wireframe = true; // 测试用：如果模型太黑可以看线框
+                }
+            });
+
+            dogGroup.add(m20Model);
+            console.log("✅ 绝影 M20 Pro 3D 模型加载成功！");
+            
+        }, undefined, function (error) {
+            console.error("❌ 模型加载失败，降级显示方块:", error);
+            // 失败兜底：显示原来的绿框
+            const bodyMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.9, 0.50, 0.2),
+                new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+            );
+            dogGroup.add(bodyMesh);
+        });
+    } else {
+        console.warn("⚠️ 未引入 GLTFLoader.js，使用默认方块代替");
+        const bodyMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(0.9, 0.50, 0.2),
+            new THREE.MeshBasicMaterial({ color: 0x00ff00, wireframe: true })
+        );
+        dogGroup.add(bodyMesh);
+    }
 
     // B1. 实时雷达层
     const scanGeom = new THREE.BufferGeometry();

@@ -31,3 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Custom / Large Files ###
+# 忽略前端加载的超大 3D 模型文件，防止超出 GitHub 100MB 限制
+src/main/resources/static/models/*.glb
