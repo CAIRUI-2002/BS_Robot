@@ -2625,7 +2625,7 @@
             // 3. 🚩【核心修改】位置偏移调整：把狗拎起来
     // 参数分别是：x(前后), y(左右), z(上下)
     // 这里的 0.6 是假设狗站高 60cm，你可以根据实际视觉效果微调这个数字
-    m20Model.position.set(0, 0, 0.6); 
+    m20Model.position.set(0, 0, 0); 
             
             // 遍历模型并开启阴影/调整材质（可选）
             m20Model.traverse((child) => {
@@ -2952,41 +2952,141 @@
     }
 
     let isRotating = false, isPanning = false;
+    let popup3DPos = null; // 用于记录点击的 3D 世界坐标
     let prevPos = { x: 0, y: 0 };
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
-    // 1. 选点
-    renderer.domElement.addEventListener('click', (e) => {
-        if (!isPicking) return;
+    // ==========================================
+    // 新增：鼠标悬浮检测（电缆 Hover 变小手）
+    // ==========================================
+    const hoverMouse = new THREE.Vector2();
+    renderer.domElement.addEventListener('mousemove', (e) => {
+        if (isPicking) return; // 如果正在“选点导航”模式，不改变指针
 
+        // 1. 获取鼠标在画布上的归一化坐标
+        const rect = renderer.domElement.getBoundingClientRect();
+        hoverMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        hoverMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+        // 2. 射线检测是否碰到了电缆
+        if (currentCableMesh) {
+            raycaster.setFromCamera(hoverMouse, camera);
+            const intersects = raycaster.intersectObject(currentCableMesh);
+            
+            // 如果鼠标正好在电缆上，变成小手；否则恢复默认
+            if (intersects.length > 0) {
+                renderer.domElement.style.cursor = 'pointer';
+            } else {
+                renderer.domElement.style.cursor = 'default';
+            }
+        }
+    });
+    // 1. 选点与电缆信息查询
+    renderer.domElement.addEventListener('click', (e) => {
         const rect = renderer.domElement.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
         raycaster.setFromCamera(mouse, camera);
-        const intersects = raycaster.intersectObject(clickPlane);
+        
+        // --- A. 如果当前处于 [📍选点] 导航模式 ---
+        if (isPicking) {
+            const intersects = raycaster.intersectObject(clickPlane);
+            if (intersects.length > 0) {
+                const p = intersects[0].point;
+                const target = { x: p.x, y: p.y };
+                const path = planPathAStar(currentRobotPose, target);
 
-        if (intersects.length > 0) {
-            const p = intersects[0].point;
-            const target = { x: p.x, y: p.y };
-            const path = planPathAStar(currentRobotPose, target);
+                if (path && path.length > 0) {
+                    navPath = path;
+                    navGoal = path[path.length-1];
+                    flagObj.position.set(navGoal.x, navGoal.y, 0);
+                    flagObj.visible = true;
 
-            if (path && path.length > 0) {
-                navPath = path;
-                navGoal = path[path.length-1];
-                flagObj.position.set(navGoal.x, navGoal.y, 0);
-                flagObj.visible = true;
+                    isPicking = false;
+                    const btn = document.getElementById('btnSetNavPoint');
+                    if(btn) btn.classList.remove('active');
+                    renderer.domElement.style.cursor = 'default';
 
-                isPicking = false;
-                const btn = document.getElementById('btnSetNavPoint');
-                if(btn) btn.classList.remove('active');
-                renderer.domElement.style.cursor = 'default';
-
-                if(elNavError) elNavError.textContent = "--";
-                updateNavLine();
-                updateDistanceUI();
+                    if(elNavError) elNavError.textContent = "--";
+                    updateNavLine();
+                    updateDistanceUI();
+                }
             }
+            return;
+        }
+
+        // --- B. 如果是非选点模式，严格检测是否点中了黄色电缆 ---
+        if (currentCableMesh) {
+            // 1. 严格射线检测：只有真正点中电缆的 3D 几何体才会触发（与悬浮变小手的逻辑完全一致）
+            const intersects = raycaster.intersectObject(currentCableMesh);
+            
+            if (intersects.length > 0) {
+                // 2. 获取射线击中电缆表面的精确 3D 坐标
+                const hitPoint = intersects[0].point;
+                popup3DPos = hitPoint.clone(); // 记录该坐标，让弹窗精准贴在这里
+
+                let minDistanceToSegment = Infinity;
+                let bestAccumulatedDist = 0;
+                let currentAccumulatedDist = 0;
+
+                // 3. 高精度计算：遍历真实路径，算出该击中点在整条电缆上的精确连续长度
+                if (window.savedCablePath && window.savedCablePath.length > 1) {
+                    for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+                        const p1 = window.savedCablePath[i];
+                        const p2 = window.savedCablePath[i+1];
+                        
+                        // 计算当前线段的向量
+                        const dx = p2.x - p1.x;
+                        const dy = p2.y - p1.y;
+                        const dz = p2.z - p1.z;
+                        const segLenSq = dx*dx + dy*dy + dz*dz; 
+                        const segLen = Math.sqrt(segLenSq);
+                        
+                        // 计算击中点到该线段的投影比例 t (0~1)
+                        let t = 0;
+                        if (segLenSq > 0) {
+                            const dot = ((hitPoint.x - p1.x) * dx + (hitPoint.y - p1.y) * dy + (hitPoint.z - p1.z) * dz);
+                            t = Math.max(0, Math.min(1, dot / segLenSq));
+                        }
+                        
+                        // 计算投影点的真实 3D 坐标
+                        const projX = p1.x + t * dx;
+                        const projY = p1.y + t * dy;
+                        const projZ = p1.z + t * dz;
+                        
+                        // 计算击中点与投影点之间的 3D 空间距离
+                        const distToProj = Math.hypot(hitPoint.x - projX, hitPoint.y - projY, hitPoint.z - projZ);
+                        
+                        // 寻找离击中点最近的那一小段线段
+                        if (distToProj < minDistanceToSegment) {
+                            minDistanceToSegment = distToProj;
+                            // 精确距离 = 前面所有线段长度之和 + 当前线段上投影过去的长度
+                            bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
+                        }
+                        
+                        // 累加整段长度
+                        currentAccumulatedDist += segLen;
+                    }
+                }
+
+                // 4. 更新 UI 文本并显示弹窗
+                document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
+                document.getElementById('popupDepth').textContent = "待同步"; 
+                document.getElementById('popupGps').textContent = "未就绪";
+                
+                const elPopup = document.getElementById('cableInfoPopup');
+                if (elPopup) elPopup.style.display = 'block';
+                
+                return; // 成功点中电缆后，直接返回，不再执行后续代码
+            }
+        }
+
+        // --- C. 如果点击了空白处，隐藏弹窗 ---
+        const elPopup = document.getElementById('cableInfoPopup');
+        if (elPopup && e.target.tagName !== 'BUTTON') {
+            elPopup.style.display = 'none';
         }
     });
 
@@ -3304,6 +3404,8 @@
                 redCableGroup.remove(mesh);
                 if(mesh.geometry) mesh.geometry.dispose();
             }
+            // 追加这行：同时隐藏信息弹窗
+            document.getElementById('cableInfoPopup').style.display = 'none';
         };
     }
 
@@ -3489,7 +3591,12 @@
             }
 
             dogGroup.position.set(px, py, pz);
-            dogGroup.rotation.z = pose.yaw;
+            // ✅ 新增提取 pitch 角度，如果没有则默认为 0
+            const pitch = pose.pitch !== undefined ? pose.pitch : 0.0;
+            
+            // ✅ 核心修改：同时设置 pitch(绕Y轴) 和 yaw(绕Z轴)
+            // 'ZYX' 是旋转顺序，必须指定，否则在同时有偏航和俯仰时模型会发生万向节死锁导致倾斜
+            dogGroup.rotation.set(0, pitch, pose.yaw, 'ZYX');
 
             if (typeof gridHelper !== 'undefined') {
                 gridHelper.position.set(px, py, 0);
@@ -3724,8 +3831,36 @@
             }
         }
     }
+    // 将 3D 点击位置实时投影到 2D 屏幕，使弹出框跟随地图旋转缩放
+    function updatePopupPosition() {
+        const elPopup = document.getElementById('cableInfoPopup');
+        if (!popup3DPos || !elPopup || elPopup.style.display === 'none') return;
+        
+        // 克隆坐标并将其投影到相机的标准设备坐标(NDC)
+        const vector = popup3DPos.clone();
+        vector.project(camera); 
 
-    function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+        // 如果模型在相机背后，隐藏浮窗
+        if (vector.z > 1.0) {
+            elPopup.style.display = 'none';
+            return;
+        }
+
+        const rect = renderer.domElement.getBoundingClientRect();
+        // 转换回 CSS 的屏幕像素坐标
+        const x = (vector.x * 0.5 + 0.5) * rect.width;
+        const y = (-(vector.y * 0.5) + 0.5) * rect.height;
+
+        elPopup.style.left = `${x}px`;
+        elPopup.style.top = `${y}px`;
+    }
+
+    // 修改：将原来的 animate 函数展开，并加入 updatePopupPosition()
+    function animate() { 
+        requestAnimationFrame(animate); 
+        renderer.render(scene, camera); 
+        updatePopupPosition(); // ✅ 每一帧实时刷新弹窗位置，使其跟随地图拖拽
+    }
     animate();
 
     new ResizeObserver(() => {

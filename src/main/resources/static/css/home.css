@@ -1844,3 +1844,57 @@ input[type="range"]::-webkit-slider-thumb {
 #btnClearFaults:active {
     transform: translateY(1px);
 }
+/* ==========================================
+   ✅ [新增] 电缆信息点击弹出框样式
+   ========================================== */
+.cable-info-popup {
+    position: absolute;
+    background: rgba(10, 30, 50, 0.85); /* 深蓝色半透明背景 */
+    border: 1px solid #ffd700;          /* 黄色边框与电缆呼应 */
+    color: #eaf6ff;
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    z-index: 200;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    min-width: 160px;
+    pointer-events: auto; /* 允许点击内部的关闭按钮 */
+    
+    /* 将弹出框的基准点设置在底部中间，并向上偏移一点，以免挡住点击位置 */
+    transform: translate(-50%, -100%);
+    margin-top: -10px; 
+}
+
+.popup-title {
+    font-weight: bold;
+    color: #ffd700;
+    border-bottom: 1px dashed rgba(255, 215, 0, 0.4);
+    padding-bottom: 5px;
+    margin-bottom: 8px;
+}
+
+.popup-item {
+    margin-bottom: 4px;
+    line-height: 1.5;
+}
+
+.hl-text {
+    color: #00ff00;
+    font-family: 'Consolas', monospace;
+}
+
+.popup-close {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    cursor: pointer;
+    color: #aaa;
+    font-size: 18px;
+    font-weight: bold;
+    transition: color 0.2s;
+}
+
+.popup-close:hover {
+    color: #ff4444;
+}
