@@ -15,6 +15,13 @@
     const ARM_BACKEND_URL = "http://" + window.location.hostname + ":8080";
     const ARM_API_BASE = "http://10.21.31.200:5000";
 
+    // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
+    window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
+    window.slamAnchor = null;       // 起点对应的 SLAM 坐标 {x, y}
+    window.headingOffset = 0;       // 两个坐标系的角度差 (弧度)
+    window.isGpsCalibrated = false; // 是否已完成标定
+    window.currentGps = null;       // 机器狗当前的最新 GPS
+
     // ====== 🌊 自适应检测全局变量 ======
     const HISTORY_SIZE = 50;  // 记录最近 50 帧的数据作为背景参考
     let signalBaselineQueue = []; // 存储历史信号强度
@@ -238,6 +245,32 @@
         const radius = Math.max((maxR - minR), (maxC - minC)) / 2;
         return { row: centerR, col: centerC, radius: radius };
     }
+
+    // SLAM 本地坐标 (x,y) 转 全局 GPS 经纬度 (lat,lon)
+    window.slamToGps = function(targetX, targetY) {
+        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
+            return null; // 尚未标定完成
+        }
+
+        // 1. 计算目标点相对于锚点的位移向量 (单位：米)
+        const dx = targetX - window.slamAnchor.x;
+        const dy = targetY - window.slamAnchor.y;
+
+        // 2. 将向量旋转到真实地球的正东、正北方向
+        const trueDx = dx * Math.cos(window.headingOffset) - dy * Math.sin(window.headingOffset);
+        const trueDy = dx * Math.sin(window.headingOffset) + dy * Math.cos(window.headingOffset);
+
+        // 3. 地理常数换算：将米转换回经纬度偏移
+        // 纬度 1度 ≈ 111320米，经度 1度 ≈ 111320 * cos(纬度) 米
+        const latOffset = trueDy / 111320;
+        const lonOffset = trueDx / (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
+
+        // 4. 返回叠加后的绝对经纬度
+        return {
+            lat: window.gpsAnchor.lat + latOffset,
+            lon: window.gpsAnchor.lon + lonOffset
+        };
+    };
 
 // ==========================================
     // 2. 页面初始化逻辑 (DOMContentLoaded)
@@ -573,6 +606,40 @@
 
         // 🔥 启动第一次请求 (不要再用 setInterval 了！)
         fetchArmAngles();
+
+        // ==========================================
+        // 🧪 [室内测试专用] 强制虚拟 GPS 标定 (快捷键 Shift + C)
+        // ==========================================
+        document.addEventListener('keydown', function(event) {
+            // 忽略输入框内的按键
+            if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+
+            // 按下 Shift + C 触发室内测试标定
+            if (event.code === 'KeyC' && event.shiftKey) {
+                // 确保机器狗已经上线并且有 SLAM 坐标
+                if (window.currentRobotPose && window.currentRobotPose.x !== -999 && window.currentRobotPose.x !== undefined) {
+                    
+                    // 1. 设置一个虚拟的基准 GPS 锚点 (这里以武汉某地为例，你可以随便改)
+                    window.gpsAnchor = { lat: 30.522222, lon: 114.354444 }; 
+                    
+                    // 2. 将机器狗当前的 SLAM 坐标与虚拟 GPS 强行绑定
+                    window.slamAnchor = { x: window.currentRobotPose.x, y: window.currentRobotPose.y };
+                    
+                    // 3. 假设 SLAM 坐标系的 X 轴正好指向正东方向 (偏角设为0)
+                    window.headingOffset = 0; 
+                    
+                    // 4. 强制修改状态锁
+                    window.isGpsCalibrated = true;
+                    window.currentGps = window.gpsAnchor; // 伪造当前信号，防止 UI 显示“标定中”
+
+                    console.log("✅ [室内测试] 虚拟 GPS 标定已强制完成！");
+                    alert("📍 虚拟 GPS 标定成功！现在可以点击地图上的电缆测试经纬度换算了。");
+                } else {
+                    console.warn("⚠️ 尚未获取到机器狗的 SLAM 坐标，请先让机器狗连上并稍微动一下。");
+                    alert("⚠️ 尚未获取到机器狗坐标，请先遥控机器狗走一步再标定。");
+                }
+            }
+        });
     });
 
     // ==========================================
@@ -622,11 +689,57 @@
                 }
             });
 
+            // ==================================================
+            // 🌟 新增：订阅 GPS 数据，并进行自动标定
+            // ==================================================
+            stompClient.subscribe('/topic/gps', function (message) {
+                try {
+                    const gpsData = JSON.parse(message.body);
+                    // 只有在信号良好 (qual > 0) 时才处理
+                    if (gpsData.qual > 0) {
+                        window.currentGps = gpsData; 
+
+                        // ⚠️ 假设 currentRobotPose 在这里可以获取到 (它在下方定义的)
+                        const pose = window.currentRobotPose; 
+
+                        // --- 自动标定逻辑 ---
+                        if (!window.isGpsCalibrated && pose && pose.x !== -999) {
+                            if (!window.gpsAnchor) {
+                                // 1. 钉下锚点
+                                window.gpsAnchor = { lat: gpsData.lat, lon: gpsData.lon };
+                                window.slamAnchor = { x: pose.x, y: pose.y };
+                                console.log("📍 GPS基准锚点已记录!");
+                            } else {
+                                // 2. 机器狗走出 1 米后，计算角度差
+                                const dx = pose.x - window.slamAnchor.x;
+                                const dy = pose.y - window.slamAnchor.y;
+                                const dist = Math.hypot(dx, dy);
+
+                                if (dist > 1.0) { 
+                                    const slamAngle = Math.atan2(dy, dx);
+                                    
+                                    const latMeters = (gpsData.lat - window.gpsAnchor.lat) * 111320;
+                                    const lonMeters = (gpsData.lon - window.gpsAnchor.lon) * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
+                                    const gpsAngle = Math.atan2(latMeters, lonMeters); // Y(北), X(东)
+
+                                    window.headingOffset = gpsAngle - slamAngle;
+                                    window.isGpsCalibrated = true;
+                                    console.log(`🧭 GPS标定完成! 偏角: ${(window.headingOffset * 180 / Math.PI).toFixed(2)}度`);
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("GPS数据解析错误:", e);
+                }
+            });
+
         }, function (error) {
             console.error('WebSocket 连接失败:', error);
             updateConnectionUI(false);
         });
     }
+    
 
     // ✅ 新增：专门用于更新左侧连接状态 UI 的函数
     function updateConnectionUI(isConnected) {
@@ -2755,6 +2868,7 @@
     let isNavigating = false;
     let navInterval = null;
     let currentRobotPose = { x: 0, y: 0, yaw: 0 };
+    window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：挂载到全局
 
     // 核心路径变量
     let navPath = [];
@@ -3072,9 +3186,20 @@
                 }
 
                 // 4. 更新 UI 文本并显示弹窗
+                // 👉 核心修改：利用转换公式，瞬间推算出点击位置的真实经纬度
+                let gpsText = "未就绪 (等待标定)";
+                const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
+                
+                if (calculatedGps) {
+                    gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
+                } else if (window.currentGps) {
+                    gpsText = "标定中...请移动机器狗>1米";
+                }
+
+                // 更新 UI 文本并显示弹窗
                 document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
                 document.getElementById('popupDepth').textContent = "待同步"; 
-                document.getElementById('popupGps').textContent = "未就绪";
+                document.getElementById('popupGps').textContent = gpsText; // ✅ 数据已同步！
                 
                 const elPopup = document.getElementById('cableInfoPopup');
                 if (elPopup) elPopup.style.display = 'block';
@@ -3579,6 +3704,8 @@
             }
 
             currentRobotPose = { x: px, y: py, yaw: pose.yaw };
+            window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
+
             updateNavLine();
             updateDistanceUI();
 

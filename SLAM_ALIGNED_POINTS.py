@@ -110,14 +110,26 @@ class SlamBridge(Node):
     def send_to_backend(self, payload):
         """ 通过 HTTP POST 发送 GPS 数据给 Spring Boot """
         try:
-            # 关键：设置 timeout=0.5 秒防止阻塞 ROS 2 核心线程，影响点云刷新
+            # 关键：设置 timeout=0.5 秒防止阻塞 ROS 2 核心线程
             requests.post(self.backend_url, json=payload, timeout=0.5)
+            
         except requests.exceptions.Timeout:
-            self.get_logger().warning("⚠️ GPS 转发超时：后端服务器响应过慢")
+            self._log_throttled_warning("⚠️ GPS 转发超时：后端服务器响应过慢")
         except requests.exceptions.ConnectionError:
-            self.get_logger().warning("⚠️ GPS 转发失败：无法连接到后端服务器")
+            self._log_throttled_warning("⚠️ GPS 转发失败：无法连接到后端服务器")
         except Exception as e:
             pass
+
+    def _log_throttled_warning(self, msg):
+        """ 节流日志输出：每隔 3 秒最多打印一次警告，防止刷屏 """
+        current_time = time.time()
+        # 假设你在 __init__ 中定义了 self.last_error_time = 0
+        if not hasattr(self, 'last_error_time'):
+            self.last_error_time = 0
+            
+        if current_time - self.last_error_time > 3.0:
+            self.get_logger().warning(msg)
+            self.last_error_time = current_time
 
     # ====================================================
     # 以下为原有的 SLAM 点云与里程计处理逻辑 (未作修改)
