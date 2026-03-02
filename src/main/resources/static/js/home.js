@@ -2625,7 +2625,7 @@
             // 3. 🚩【核心修改】位置偏移调整：把狗拎起来
     // 参数分别是：x(前后), y(左右), z(上下)
     // 这里的 0.6 是假设狗站高 60cm，你可以根据实际视觉效果微调这个数字
-    m20Model.position.set(0, 0, 0); 
+    m20Model.position.set(0, 0, 0.35); 
             
             // 遍历模型并开启阴影/调整材质（可选）
             m20Model.traverse((child) => {
@@ -3561,7 +3561,8 @@
             const scaleFactor = 1.0;
             const px = pose.x * scaleFactor;
             const py = pose.y * scaleFactor;
-            const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
+            // ✅ 新增逻辑：提取真实的 Z 轴高度，减去 0.3m 的补偿值
+            const pz = ((pose.z !== undefined ? pose.z : 0.05) - 0.25) * scaleFactor;
 
             const isRTK = data.is_rtk === true;
             if (typeof lastRTKStatus === 'undefined') {

@@ -117,26 +117,36 @@ class SlamBridge(Node):
 
     def odom_callback(self, msg):
         """ 解析 /SLAM_ODOM 位姿 """
-        # 结构与普通 ODOM 一致
         tx = msg.pose.pose.position.x
         ty = msg.pose.pose.position.y
-        # 您提供的 echo 中 z 也是有的，如果需要 3D 显示可以加上 z
-        # tz = msg.pose.pose.position.z 
+        tz = msg.pose.pose.position.z  # ✅ 提取真实的 Z 轴高度
 
-        # 四元数转偏航角 (Yaw)
+        # 提取四元数
         qx = msg.pose.pose.orientation.x
         qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
 
+        # 1. 计算偏航角 (Yaw) - 左右转向
         siny_cosp = 2 * (qw * qz + qx * qy)
         cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
         yaw = math.atan2(siny_cosp, cosy_cosp)
 
+        # 2. ✅ 新增：计算俯仰角 (Pitch) - 上下抬头/低头
+        sinp = 2 * (qw * qy - qz * qx)
+        # 防止极端情况下浮点数溢出超过 [-1, 1] 导致 math.asin 报错
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp) 
+        else:
+            pitch = math.asin(sinp)
+
+        # 3. 将数据打包发给网页
         self.robot_pose = {
             'x': round(tx, 3),
             'y': round(ty, 3),
-            'yaw': round(yaw, 3)
+            'z': round(tz, 3),
+            'yaw': round(yaw, 3),
+            'pitch': round(pitch, 3) # ✅ 新增：将 pitch 添加到数据包中
         }
 
 # --- WebSocket 服务 ---
