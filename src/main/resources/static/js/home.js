@@ -2487,8 +2487,9 @@
     let lastKeyframePose = { x: -999, y: -999 };
 
     // ✅ 新增：用于连续破损区域追踪的状态变量
-    let lastFaultMarker = null;    // 存储当前最新的那个红球 Mesh
+    let lastFaultMarker = null;    // 存储当前最新的那个红球/闪电 Mesh
     let lastFaultCablePos = null;  // 存储上一次有效破损点的坐标 (Vector3)
+    let maxFaultIdx = -1;          // 🌟 新增：记录当前探测到的最远电缆点索引
 
     // ==========================================
     // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
@@ -3485,16 +3486,21 @@
             // 1. 重置连续追踪的状态变量 (防止红线乱连)
             if (typeof lastFaultMarker !== 'undefined') lastFaultMarker = null;
             if (typeof lastFaultCablePos !== 'undefined') lastFaultCablePos = null;
+            maxFaultIdx = -1;  // 🌟 新增：重置最远探测进度
 
             // 2. 清除红色球体组 (faultMarkerGroup)
-            // 注意：faultMarkerGroup 是在 initSlamVis 开头定义的
             if (faultMarkerGroup) {
                 while(faultMarkerGroup.children.length > 0){
-                    const mesh = faultMarkerGroup.children[0];
-                    faultMarkerGroup.remove(mesh);
-                    // 释放内存
-                    if(mesh.geometry) mesh.geometry.dispose();
-                    if(mesh.material) mesh.material.dispose();
+                    const obj = faultMarkerGroup.children[0];
+                    faultMarkerGroup.remove(obj);
+                    // 递归释放内存 (兼容 Group 和 单个 Mesh)
+                    obj.traverse(child => {
+                        if(child.geometry) child.geometry.dispose();
+                        if(child.material) {
+                            if(child.material.map) child.material.map.dispose();
+                            child.material.dispose();
+                        }
+                    });
                 }
             }
 
@@ -3753,62 +3759,111 @@
                 // 1. 检查是否存在电缆路径
                 if (window.savedCablePath && window.savedCablePath.length > 0) {
                     
-                    // 2. 寻找最近的电缆点 (投影)
+                    // 2. 寻找机器狗在电缆上的高精度垂直投影点
                     let minDistance = Infinity;
                     let closestPoint = null;
                     let closestIdx = -1;
 
-                    for (let i = 0; i < window.savedCablePath.length; i++) {
-                        const pathPt = window.savedCablePath[i];
-                        const dist = currentPos.distanceTo(pathPt);
+                    // 遍历所有相邻点组成的线段
+                    for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+                        const p1 = window.savedCablePath[i];
+                        const p2 = window.savedCablePath[i+1];
+                        
+                        // 计算线段的向量方向
+                        const dx = p2.x - p1.x;
+                        const dy = p2.y - p1.y;
+                        const dz = p2.z - p1.z;
+                        const segLenSq = dx*dx + dy*dy + dz*dz; 
+                        
+                        let t = 0;
+                        if (segLenSq > 0) {
+                            // 计算机器狗坐标在当前线段上的投影比例 (0 ~ 1)
+                            const dot = ((currentPos.x - p1.x) * dx + (currentPos.y - p1.y) * dy + (currentPos.z - p1.z) * dz);
+                            t = Math.max(0, Math.min(1, dot / segLenSq));
+                        }
+                        
+                        // 计算出精确的 3D 垂足坐标
+                        const projX = p1.x + t * dx;
+                        const projY = p1.y + t * dy;
+                        const projZ = p1.z + t * dz;
+                        const projPt = new THREE.Vector3(projX, projY, projZ);
+                        
+                        // 计算机器狗真实位置到这个垂足的距离
+                        const dist = currentPos.distanceTo(projPt);
+                        
                         if (dist < minDistance) {
                             minDistance = dist;
-                            closestPoint = pathPt;
-                            closestIdx = i;
+                            closestPoint = projPt; // 使用计算出的垂足，而不是死板的原始顶点
+                            closestIdx = i;        // 记录索引，用于“单向推进锁”防倒退
                         }
                     }
 
                     if (closestPoint) {
-                        // 3. 空间去重 (防止原地不动时重复触发)
-                        // 只有当距离上一次记录点 > 0.05m 时才更新
-                        if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.05) {
+                        // 3. 🌟 单向推进机制 (防止倒车时标志后退)
+                        // 只有当机器狗探测到了电缆更前方的点（当前索引 > 历史最大索引）时，才考虑更新
+                        if (closestIdx > maxFaultIdx) {
                             
-                            // --- A. 删除上一个临时红点 ---
-                            if (lastFaultMarker) {
-                                faultMarkerGroup.remove(lastFaultMarker);
-                                if(lastFaultMarker.geometry) lastFaultMarker.geometry.dispose();
-                                lastFaultMarker = null;
-                            }
-
-                            // --- B. 创建新的红色破损点 (代表当前最新位置) ---
-                            const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
-                            const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                            const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
-                            faultMesh.position.copy(closestPoint);
-                            
-                            faultMarkerGroup.add(faultMesh);
-                            
-                            // 更新引用
-                            lastFaultMarker = faultMesh;
-
-                            // --- C. 绘制红色电缆段 (连接上一个点和当前点) ---
-                            if (lastFaultCablePos) {
-                                // 创建一段红色管线连接两点
-                                // 使用 CatmullRomCurve3 虽然好，但两点间直接 Line/Tube 也可以
-                                const segmentPath = [lastFaultCablePos, closestPoint];
-                                const curve = new THREE.CatmullRomCurve3(segmentPath);
-                                const tubeGeo = new THREE.TubeGeometry(curve, 1, 0.04, 8, false); // 半径比黄色电缆稍粗(0.04 vs 0.03)
-                                const tubeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                                const redSegment = new THREE.Mesh(tubeGeo, tubeMat);
+                            // 距离去重，防止原地微小抖动频繁重绘
+                            if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.05) {
                                 
-                                redCableGroup.add(redSegment);
+                                // --- A. 删除上一个临时点 --- (由于上个回答你已经改了带闪电的逻辑，这里原样保留你的 A、B、C 步骤)
+                                if (lastFaultMarker) {
+                                    faultMarkerGroup.remove(lastFaultMarker);
+                                    lastFaultMarker.traverse(child => {
+                                        if(child.geometry) child.geometry.dispose();
+                                        if(child.material) {
+                                            if(child.material.map) child.material.map.dispose();
+                                            child.material.dispose();
+                                        }
+                                    });
+                                    lastFaultMarker = null;
+                                }
+
+                                // --- B. 创建新的破损点组合 (红球 + 闪电标志) ---
+                                const faultGroup = new THREE.Group();
+                                faultGroup.position.copy(closestPoint);
+
+                                const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
+                                const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                                const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                                faultGroup.add(faultMesh);
+
+                                const canvas = document.createElement("canvas");
+                                canvas.width = 128; canvas.height = 128;
+                                const ctx = canvas.getContext("2d");
+                                ctx.clearRect(0, 0, 128, 128);
+                                ctx.font = "bold 90px Arial";
+                                ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                                ctx.fillStyle = "#ffdd00"; ctx.shadowColor = "#ff0000"; ctx.shadowBlur = 15;
+                                ctx.fillText("⚡", 64, 64);
+
+                                const texture = new THREE.CanvasTexture(canvas);
+                                const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }); 
+                                const lightningSprite = new THREE.Sprite(spriteMat);
+                                lightningSprite.scale.set(0.6, 0.6, 1);
+                                lightningSprite.position.set(0, 0, 0.3);
+                                faultGroup.add(lightningSprite);
+
+                                faultMarkerGroup.add(faultGroup);
+                                lastFaultMarker = faultGroup;
+
+                                // --- C. 绘制红色电缆段 ---
+                                if (lastFaultCablePos) {
+                                    const segmentPath = [lastFaultCablePos, closestPoint];
+                                    const curve = new THREE.CatmullRomCurve3(segmentPath);
+                                    const tubeGeo = new THREE.TubeGeometry(curve, 1, 0.04, 8, false);
+                                    const tubeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                                    const redSegment = new THREE.Mesh(tubeGeo, tubeMat);
+                                    redCableGroup.add(redSegment);
+                                }
+
+                                // --- D. 更新状态 ---
+                                lastFaultCablePos = closestPoint.clone(); 
+                                console.log(`🔴 [追踪] 破损点向前推进至:`, closestPoint);
                             }
-
-                            // --- D. 更新状态 ---
-                            // 注意：这里需要深拷贝位置，否则 lastFaultCablePos 会随 closestPoint 引用变化
-                            lastFaultCablePos = closestPoint.clone(); 
-
-                            console.log(`🔴 [追踪] 更新破损点至:`, closestPoint);
+                            
+                            // 🌟 核心：无论是否发生了大于 0.05m 的位移，只要索引前进了，就更新最大索引
+                            maxFaultIdx = closestIdx;
                         }
                     }
                 }
