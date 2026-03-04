@@ -2876,8 +2876,9 @@
     let navOriginalPath = [];
     let activeNavTrail = [];
 
-    // ✅ 新增：电缆跟踪专用状态变量
-    let isCableTrackingMode = false; // 是否处于“跟踪电缆”模式（会禁止画轨迹）
+    // ✅ 新增：电缆跟踪与寻找破损点专用状态变量
+    let isCableTrackingMode = false; // 是否处于“跟踪电缆”模式
+    let isFaultFindingMode = false;  // 是否处于“寻找破损点”模式 (新增)
     let cableTrackingState = 'IDLE'; // IDLE, TO_START, FOLLOWING
 
     const elNavPanel = document.getElementById('navInfoPanel');
@@ -3327,8 +3328,8 @@
         console.log("🚀 开始导航...");
         isNavigating = true;
         
-        // 只有当不是电缆跟踪模式时，才记录 A* 原始路径供误差分析
-        if (!isCableTrackingMode) {
+        // 只有当不是电缆跟踪且不是寻找破损模式时，才记录 A* 原始路径
+        if (!isCableTrackingMode && !isFaultFindingMode) {
             navOriginalPath = [...navPath];
             navOriginalPath.unshift({x: currentRobotPose.x, y: currentRobotPose.y});
             activeNavTrail = [];
@@ -3346,33 +3347,37 @@
         if(typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, true);
         console.log("🛑 导航停止");
         
-        // ✅✅✅ 修正：电缆跟踪模式停止逻辑
-        if (isCableTrackingMode) {
-            // 如果是正在去起点的路上就到了（说明到了起点） -> 切换为正式跟踪
+        // ✅✅✅ 修正：电缆跟踪与寻找破损模式停止逻辑
+        if (isCableTrackingMode || isFaultFindingMode) {
             if (cableTrackingState === 'TO_START' && isSuccess) {
-                console.log("✅ 已到达电缆起点，开始沿线跟踪...");
+                console.log("✅ 已到达起始切入点，开始沿线运行...");
                 cableTrackingState = 'FOLLOWING';
                 
-                // 将完整电缆路径设为导航路径
-                if (window.savedCablePath && window.savedCablePath.length > 0) {
-                    // 转换 THREE.Vector3 到 {x,y}
+                if (isCableTrackingMode && window.savedCablePath) {
                     navPath = window.savedCablePath.map(p => ({x: p.x, y: p.y}));
-                    startNav();
+                } else if (isFaultFindingMode && window.offsetCablePath) {
+                    navPath = window.offsetCablePath; // 使用计算好的偏移路径
                 }
+                startNav();
             } else {
-                // 其他情况（FOLLOWING 结束，或者中途手动停止） -> 彻底停止，恢复按钮和绘制权限
-                console.log("⏹️ 电缆跟踪结束/停止");
+                console.log("⏹️ 自动跟踪/寻找任务结束或停止");
                 
-                // 1. 重置标志位，允许后续手动控制时画轨迹
                 isCableTrackingMode = false;
+                isFaultFindingMode = false;
                 cableTrackingState = 'IDLE';
 
-                // 2. 恢复按钮 UI
-                const btn = document.getElementById("btnTrackCableOverlay");
-                if(btn) {
-                    btn.innerText = "⚡ 跟踪电缆";
-                    btn.style.color = "#00ccff";
-                    btn.style.border = "1px solid #00ccff";
+                // 恢复两个按钮 UI
+                const btn1 = document.getElementById("btnTrackCableOverlay");
+                if(btn1) {
+                    btn1.innerText = "⚡ 跟踪电缆";
+                    btn1.style.color = "#00ccff";
+                    btn1.style.border = "1px solid #00ccff";
+                }
+                const btn2 = document.getElementById("btnFindFaultOverlay");
+                if(btn2) {
+                    btn2.innerText = "🔍 寻找破损点";
+                    btn2.style.color = "#ffaa00";
+                    btn2.style.border = "1px solid #ffaa00";
                 }
             }
         } else {
@@ -3570,6 +3575,10 @@
 
         // 点击事件逻辑
         btnTrack.onclick = function() {
+            if (isFaultFindingMode) {
+                alert("⚠️ 请先停止寻找破损点模式！");
+                return;
+            }
             // 如果已经在跟踪（或去起点的路上），点击则停止
             if (isNavigating && isCableTrackingMode) {
                 console.log("🛑 用户点击停止跟踪");
@@ -3659,6 +3668,156 @@
                 
                 console.log(`📍 锁定最近点索引: ${closestIdx}, 距离: ${minD.toFixed(2)}m`);
                 navPath = pathPoints.slice(closestIdx);
+                startNav();
+            }
+        };
+        // ========================================================
+        // ✅✅✅ 新增：注入“寻找破损点”悬浮按钮逻辑
+        // ========================================================
+        const btnFault = document.createElement('button');
+        btnFault.innerText = "🔍 寻找破损点";
+        btnFault.id = "btnFindFaultOverlay";
+        btnFault.style.position = "absolute";
+        btnFault.style.top = "240px"; // 放在跟踪电缆按钮下方
+        btnFault.style.right = "10px";
+        btnFault.style.zIndex = "999";
+        btnFault.style.padding = "8px 12px";
+        btnFault.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+        btnFault.style.border = "1px solid #ffaa00"; // 橙黄色主题
+        btnFault.style.color = "#ffaa00";
+        btnFault.style.borderRadius = "4px";
+        btnFault.style.cursor = "pointer";
+        btnFault.style.fontSize = "14px";
+        btnFault.style.fontWeight = "bold";
+        btnFault.style.transition = "all 0.3s";
+
+        btnFault.onmouseover = () => { btnFault.style.backgroundColor = "rgba(255, 170, 0, 0.2)"; };
+        btnFault.onmouseout = () => { btnFault.style.backgroundColor = "rgba(0, 0, 0, 0.6)"; };
+
+        container.appendChild(btnFault);
+
+        btnFault.onclick = function() {
+            // 如果已经在寻找（或去起点的路上），点击则停止
+            if (isNavigating && isFaultFindingMode) {
+                console.log("🛑 用户点击停止寻找破损点");
+                stopNav(false);
+                return;
+            }
+
+            if (isCableTrackingMode) {
+                alert("⚠️ 请先停止跟踪电缆！");
+                return;
+            }
+
+            if (!window.savedCablePath || window.savedCablePath.length < 2) {
+                alert("⚠️ 未检测到有效的电缆路径！请先进行自动巡线生成路径。");
+                return;
+            }
+
+            isFaultFindingMode = true;
+            btnFault.innerText = "⏹ 停止寻找";
+            btnFault.style.color = "#ff4444";
+            btnFault.style.border = "1px solid #ff4444";
+
+            // === 核心算法：计算左右偏移 0.3m 的路径 ===
+            const pathPoints = window.savedCablePath.map(p => ({x: p.x, y: p.y}));
+            const n = pathPoints.length;
+            const normals = [];
+
+            // 1. 求出路径上每个点的“向左”法向量
+            for (let i = 0; i < n; i++) {
+                let dx, dy;
+                // 用相邻点作差求切向量
+                if (i === 0) {
+                    dx = pathPoints[1].x - pathPoints[0].x;
+                    dy = pathPoints[1].y - pathPoints[0].y;
+                } else if (i === n - 1) {
+                    dx = pathPoints[n-1].x - pathPoints[n-2].x;
+                    dy = pathPoints[n-1].y - pathPoints[n-2].y;
+                } else {
+                    dx = pathPoints[i+1].x - pathPoints[i-1].x;
+                    dy = pathPoints[i+1].y - pathPoints[i-1].y;
+                }
+                const len = Math.hypot(dx, dy);
+                if (len > 0) { dx /= len; dy /= len; }
+                
+                // 将切向量 (dx, dy) 逆时针旋转 90 度得到向左的法向量 (-dy, dx)
+                normals.push({nx: -dy, ny: dx});
+            }
+
+            // 2. 叉乘法：判断机器狗在电缆左侧还是右侧
+            const p0 = pathPoints[0];
+            const pNext = pathPoints[Math.min(5, n - 1)]; 
+            const dirX = pNext.x - p0.x;
+            const dirY = pNext.y - p0.y;
+            const rx = currentRobotPose.x - p0.x;
+            const ry = currentRobotPose.y - p0.y;
+            
+            // 计算 2D 叉积
+            const cross = dirX * ry - dirY * rx;
+            let offsetDist = 0.3; // 默认向左偏移 0.3m
+            if (cross < 0) {
+                offsetDist = -0.3; // 如果叉积小于0，说明在右侧，向右偏移 0.3m
+                console.log("👉 机器狗位于电缆右侧，生成右侧 0.3m 平行路径");
+            } else {
+                console.log("👈 机器狗位于电缆左侧，生成左侧 0.3m 平行路径");
+            }
+
+            // 3. 生成平行偏移的新路径
+            const offsetPath = [];
+            for (let i = 0; i < n; i++) {
+                offsetPath.push({
+                    x: pathPoints[i].x + normals[i].nx * offsetDist,
+                    y: pathPoints[i].y + normals[i].ny * offsetDist
+                });
+            }
+            window.offsetCablePath = offsetPath; // 存入全局供 TO_START 状态调用
+
+            // === 柔性并入逻辑 (以偏移路径为基准) ===
+            const op0 = offsetPath[0];
+            const odirX = offsetPath[Math.min(5, n-1)].x - op0.x;
+            const odirY = offsetPath[Math.min(5, n-1)].y - op0.y;
+            const orx = currentRobotPose.x - op0.x;
+            const ory = currentRobotPose.y - op0.y;
+            
+            const dotProduct = orx * odirX + ory * odirY;
+            const distToStart = Math.hypot(orx, ory);
+
+            const isBehindStart = (dotProduct < -0.1) && (distToStart > 1.0);
+
+            if (isBehindStart) {
+                console.log("🚀 位于偏移路径起点后方，A* 导航至平行起点...");
+                cableTrackingState = 'TO_START';
+                const path = planPathAStar(currentRobotPose, op0);
+                if (path) {
+                    navPath = path;
+                    startNav();
+                } else {
+                     alert("⚠️ 无法规划路径到平行起点，尝试直接平行切入...");
+                     cableTrackingState = 'FOLLOWING';
+                     navPath = offsetPath;
+                     startNav();
+                }
+            } else {
+                console.log("✅ 启用柔性平行并入 (Flexible Parallel Merge)...");
+                cableTrackingState = 'FOLLOWING';
+                let minD = Infinity;
+                let closestIdx = 0;
+                for(let i=0; i<offsetPath.length; i++) {
+                    const d = Math.hypot(offsetPath[i].x - currentRobotPose.x, offsetPath[i].y - currentRobotPose.y);
+                    if(d < minD) {
+                        minD = d;
+                        closestIdx = i;
+                    }
+                }
+                
+                if (closestIdx >= offsetPath.length - 1) {
+                    alert("⚠️ 已经到达电缆终点附近！");
+                    stopNav(false);
+                    return;
+                }
+                
+                navPath = offsetPath.slice(closestIdx);
                 startNav();
             }
         };
@@ -3922,7 +4081,8 @@
 
             // ✅✅✅ 修改：增加 isAutoTracking 判断
             // 只有在 (是特征点) AND (不是在跟踪回放模式) AND (正在自动巡线录制模式) 时，才绘制电缆
-            if (isFeaturePoint && !isCableTrackingMode && isAutoTracking) {
+            // ✅✅✅ 修改：增加 isFaultFindingMode 判断
+            if (isFeaturePoint && !isCableTrackingMode && !isFaultFindingMode && isAutoTracking) {
                 const dist = currentPos.distanceTo(lastCablePos);
                 if (dist > 0.1) {
                     const cablePt = new THREE.Vector3(px, py, 0.08);
