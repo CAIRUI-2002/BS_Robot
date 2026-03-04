@@ -2054,7 +2054,9 @@
                 console.log(`🔴 [故障判定] AUC:${aucSum.toFixed(0)} > ${AUC_CONFIG.AUC_THRESHOLD}, Pts:${noisePointsCount}`);
                 
                 window.g_isFaultDetected = true;
-                
+                // ✅✅✅ [新增] 专门给二分法等待期使用的信号触发标志
+                window.g_faultTriggeredInBS = true;
+
                 // 为了让 UI 显示数值，取触发点的原始值 (加回 2048)
                 // 也可以直接用 aucSum 来代表强度，看你需求
                 const peakVal = Math.abs(segment[AUC_CONFIG.WINDOW_BEFORE]) + 2048;
@@ -2490,6 +2492,65 @@
     let lastFaultMarker = null;    // 存储当前最新的那个红球/闪电 Mesh
     let lastFaultCablePos = null;  // 存储上一次有效破损点的坐标 (Vector3)
     let maxFaultIdx = -1;          // 🌟 新增：记录当前探测到的最远电缆点索引
+
+    // ==========================================
+    // 🌟🌟🌟 [新增] 二分法精准定位核心状态与工具函数
+    // ==========================================
+    let bsState = 'INACTIVE'; // 状态: INACTIVE, INIT_WAIT, MOVING, EVAL_WAIT, DONE
+    let bsGoodDist = 0;       // 有信号的距离 (P_good)
+    let bsBadDist = 0;        // 无信号的距离 (P_bad)
+    let bsTargetDist = 0;     // 当前机器狗需要前往的目标距离
+    let bsWaitEndTime = 0;    // 5秒等待结束的时间戳
+    let lastFaultRobotDist = -1; // 上一次正常测到信号时，机器狗在偏移路径上的行驶距离
+    let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
+
+    // 1. 计算整条路径的距离积分
+    function computePathDists(path) {
+        offsetPathDists = [0];
+        let d = 0;
+        for(let i = 1; i < path.length; i++) {
+            d += Math.hypot(path[i].x - path[i-1].x, path[i].y - path[i-1].y);
+            offsetPathDists.push(d);
+        }
+    }
+
+    // 2. 计算当前坐标在路径上所处的“里程数” (距离起点的距离)
+    function getDistOnPath(pose, path) {
+        if(!path || path.length < 2) return 0;
+        let minDist = Infinity, bestT = 0, bestIdx = 0;
+        for(let i = 0; i < path.length - 1; i++) {
+            const p1 = path[i], p2 = path[i+1];
+            const dx = p2.x - p1.x, dy = p2.y - p1.y;
+            const len2 = dx*dx + dy*dy;
+            let t = 0;
+            if (len2 > 0) t = ((pose.x - p1.x)*dx + (pose.y - p1.y)*dy) / len2;
+            t = Math.max(0, Math.min(1, t));
+            const px = p1.x + t*dx, py = p1.y + t*dy;
+            const dist = Math.hypot(pose.x - px, pose.y - py);
+            if(dist < minDist) {
+                minDist = dist; bestT = t; bestIdx = i;
+            }
+        }
+        return offsetPathDists[bestIdx] + bestT * Math.hypot(path[bestIdx+1].x - path[bestIdx].x, path[bestIdx+1].y - path[bestIdx].y);
+    }
+
+    // 3. 根据给定的“里程数”，反推该点的 (x, y) 坐标
+    function getPoseAtDist(targetDist, path) {
+        if(targetDist <= 0) return {x: path[0].x, y: path[0].y};
+        if(targetDist >= offsetPathDists[offsetPathDists.length-1]) return {x: path[path.length-1].x, y: path[path.length-1].y};
+        for(let i = 0; i < offsetPathDists.length - 1; i++) {
+            if(targetDist >= offsetPathDists[i] && targetDist <= offsetPathDists[i+1]) {
+                const segLen = offsetPathDists[i+1] - offsetPathDists[i];
+                let t = 0;
+                if (segLen > 0) t = (targetDist - offsetPathDists[i]) / segLen;
+                return {
+                    x: path[i].x + t * (path[i+1].x - path[i].x),
+                    y: path[i].y + t * (path[i+1].y - path[i].y)
+                };
+            }
+        }
+        return {x: path[path.length-1].x, y: path[path.length-1].y};
+    }
 
     // ==========================================
     // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
@@ -3386,9 +3447,35 @@
         }
     }
 
-    // ✅ 核心控制：纯追踪 (Pure Pursuit)
+    // ✅ 核心控制：纯追踪 (Pure Pursuit) + 二分法拦截
     function controlLoop() {
         if(navPath.length === 0) { stopNav(true); return; }
+
+        // =========================================================
+        // 🌟🌟🌟 [新增] 二分法破损点精确定位逻辑拦截
+        // =========================================================
+        if (isFaultFindingMode && window.offsetCablePath && window.offsetCablePath.length > 0) {
+            if (offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
+            const currentDist = getDistOnPath(currentRobotPose, window.offsetCablePath);
+
+            // 触发条件：正常前进状态，且上一个破损点已记录，且走出 2m 还没新破损点
+            if (bsState === 'INACTIVE' && lastFaultRobotDist >= 0 && (currentDist - lastFaultRobotDist > 2.0)) {
+                console.log("🛑 [二分法触发] 超过 2m 未发现新破损点，准备启动精确定位...");
+                bsState = 'INIT_WAIT';
+                bsGoodDist = lastFaultRobotDist; // 上次有信号的距离
+                bsBadDist = currentDist;         // 当前无信号的距离
+                window.g_faultTriggeredInBS = false; 
+                bsWaitEndTime = Date.now() + 5000; // 原地等待 5 秒
+                sendMoveCommand(0, 0, 0, 0, true); // 立即停车
+                return;
+            }
+
+            // 如果已经进入了二分法状态，接管控制，不再执行下面的常规纯追踪
+            if (bsState !== 'INACTIVE') {
+                handleBinarySearchControl(currentDist);
+                return; 
+            }
+        }
 
         const LOOKAHEAD_DIST = 0.8;
         let targetIdx = 0;
@@ -3440,6 +3527,109 @@
             sendMoveCommand(v, w, 0, 0, false);
         }
     }
+    function handleBinarySearchControl(currentDist) {
+        const now = Date.now();
+
+        // 阶段 1: 触发后的首次 5秒 等待
+        if (bsState === 'INIT_WAIT') {
+            if (now < bsWaitEndTime) return; // 还在等
+            
+            // 5秒后仍无信号，开始倒车寻找中间点
+            bsTargetDist = (bsGoodDist + bsBadDist) / 2.0; // 首次目标就是倒退一半 (1m)
+            bsState = 'MOVING';
+            console.log(`🔙 [二分定位] 开始倒退至 ${bsTargetDist.toFixed(2)}m 处...`);
+            return;
+        }
+
+        // 阶段 2: 到达某个测试点后，等待 5秒 评估是否有信号
+        if (bsState === 'EVAL_WAIT') {
+            if (now < bsWaitEndTime) return;
+
+            // 5秒评估结束，看期间有没有触发过信号
+            if (window.g_faultTriggeredInBS) {
+                console.log(`✅ [二分定位] 在 ${currentDist.toFixed(2)}m 处检测到信号！更新有信号边界。`);
+                bsGoodDist = currentDist; // 更新有信号边界
+            } else {
+                console.log(`❌ [二分定位] 在 ${currentDist.toFixed(2)}m 处无信号！更新无信号边界。`);
+                bsBadDist = currentDist;  // 更新无信号边界
+            }
+
+            // 检查误差是否满足退出条件 (小于 0.1m)
+            if (Math.abs(bsBadDist - bsGoodDist) <= 0.1) {
+                console.log(`🎯 [二分定位] 定位完成！误差已 <= 0.1m。最终真实破损点位于: ${bsGoodDist.toFixed(2)}m`);
+                bsState = 'DONE';
+                setStatus("🎯 破损点精准定位完成！", "success");
+                stopNav(true);
+                return;
+            }
+
+            // 计算新的目标点并进入移动状态
+            bsTargetDist = (bsGoodDist + bsBadDist) / 2.0;
+            bsState = 'MOVING';
+
+            // ✅ 新增：在每次发车前清空上一轮的信号，确保在去下一个点的路上干净地重新检测
+            window.g_faultTriggeredInBS = false;
+            const action = (bsTargetDist > currentDist) ? "向前移动" : "倒退移动";
+            console.log(`🤖 [二分定位] 准备${action}至: ${bsTargetDist.toFixed(2)}m (搜索区间: ${Math.min(bsGoodDist, bsBadDist).toFixed(2)} ~ ${Math.max(bsGoodDist, bsBadDist).toFixed(2)})`);
+            return;
+        }
+
+        // 阶段 3: 向目标点移动 (支持倒车防偏移)
+        if (bsState === 'MOVING') {
+            const distError = bsTargetDist - currentDist;
+            
+            // 如果误差小于 0.1m，视为到达目标
+            if (Math.abs(distError) < 0.1) {
+                sendMoveCommand(0, 0, 0, 0, true); // 停车
+                bsState = 'EVAL_WAIT';
+                // ❌ 删除下面这行！不要在刚停下来的时候清空移动中好不容易抓到的信号！
+                // window.g_faultTriggeredInBS = false; 
+                bsWaitEndTime = Date.now() + 5000; // 等待 5秒
+                console.log("⏱️ [二分定位] 到达目标点，原地等待 5 秒检测信号...");
+                return;
+            }
+
+            // 获取目标坐标
+            const targetPose = getPoseAtDist(bsTargetDist, window.offsetCablePath);
+            const dx = targetPose.x - currentRobotPose.x;
+            const dy = targetPose.y - currentRobotPose.y;
+            
+            let targetYaw = Math.atan2(dy, dx);
+            let diff = targetYaw - currentRobotPose.yaw;
+            while(diff > Math.PI) diff -= 2*Math.PI;
+            while(diff < -Math.PI) diff += 2*Math.PI;
+
+            let v = 0.0, w = 0.0;
+
+            if (distError < 0) {
+                // === 倒车模式 ===
+                v = -0.15; // 慢速倒退
+                // 倒车时，机器狗的前方是远离目标的，所以要把目标偏航角反转 180 度进行纠偏
+                let reverseYaw = targetYaw + Math.PI;
+                while(reverseYaw > Math.PI) reverseYaw -= 2*Math.PI;
+                while(reverseYaw < -Math.PI) reverseYaw += 2*Math.PI;
+
+                diff = reverseYaw - currentRobotPose.yaw;
+                while(diff > Math.PI) diff -= 2*Math.PI;
+                while(diff < -Math.PI) diff += 2*Math.PI;
+            } else {
+                // === 前进模式 ===
+                v = 0.15; // 慢速前进
+            }
+
+            // 结合车头误差计算转向
+            if(Math.abs(diff) > 0.8) {
+                v = (distError < 0) ? -0.05 : 0.05; // 角度偏大时降速
+                w = diff > 0 ? 0.4 : -0.4;
+            } else {
+                w = diff * 1.0;
+            }
+
+            if(typeof sendMoveCommand === 'function') {
+                sendMoveCommand(v, w, 0, 0, false);
+            }
+        }
+    }
 
     // 5. 旧清除按钮 (修改后：只清除蓝色机器狗轨迹)
     const btnClearDog = document.getElementById("btnClearDogPath");
@@ -3487,6 +3677,10 @@
     if (btnClearFaults) {
         btnClearFaults.onclick = function() {
             console.log("🧹 清除所有破损点标记...");
+
+            maxFaultIdx = -1;  // 🌟 新增：重置最远探测进度
+            bsState = 'INACTIVE'; // ✅ 重置二分法状态
+            lastFaultRobotDist = -1;
 
             // 1. 重置连续追踪的状态变量 (防止红线乱连)
             if (typeof lastFaultMarker !== 'undefined') lastFaultMarker = null;
@@ -3714,6 +3908,10 @@
                 return;
             }
 
+            bsState = 'INACTIVE';
+            lastFaultRobotDist = -1;
+            offsetPathDists = [];
+            maxFaultIdx = -1;
             isFaultFindingMode = true;
             btnFault.innerText = "⏹ 停止寻找";
             btnFault.style.color = "#ff4444";
@@ -3957,15 +4155,22 @@
                         }
                     }
 
-                    if (closestPoint) {
-                        // 3. 🌟 单向推进机制 (防止倒车时标志后退)
-                        // 只有当机器狗探测到了电缆更前方的点（当前索引 > 历史最大索引）时，才考虑更新
-                        if (closestIdx > maxFaultIdx) {
+                   if (closestPoint) {
+                        // 🌟 核心修正：严格执行“单向向前推进”逻辑
+                        // 判断规则：只有当新探测到的点（closestIdx）大于上一次记录的最远点（maxFaultIdx）时，才允许向前方更新！
+                        // 这样即使机器狗后退到变红的区域内探测到信号，也会被这里拦截，标志保持在最前端不动。
+                        if (maxFaultIdx === -1 || closestIdx > maxFaultIdx) {
                             
+                            // ✅ 只有在常规追踪模式下，才记录最新信号的距离
+                            if (bsState === 'INACTIVE') {
+                                if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
+                                if (window.offsetCablePath) lastFaultRobotDist = getDistOnPath(currentPos, window.offsetCablePath);
+                            }
+
                             // 距离去重，防止原地微小抖动频繁重绘
-                            if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.05) {
+                            if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.02) {
                                 
-                                // --- A. 删除上一个临时点 --- (由于上个回答你已经改了带闪电的逻辑，这里原样保留你的 A、B、C 步骤)
+                                // --- A. 删除上一个临时点 ---
                                 if (lastFaultMarker) {
                                     faultMarkerGroup.remove(lastFaultMarker);
                                     lastFaultMarker.traverse(child => {
@@ -4018,11 +4223,16 @@
 
                                 // --- D. 更新状态 ---
                                 lastFaultCablePos = closestPoint.clone(); 
-                                console.log(`🔴 [追踪] 破损点向前推进至:`, closestPoint);
+                                
+                                // 🌟 关键锁死：将当前的最远进度记录下来。下次只要没超过这个进度，坚决不更新！
+                                maxFaultIdx = closestIdx;
+
+                                if (bsState === 'INACTIVE') {
+                                    console.log(`🔴 [追踪] 发现更前端的破损点，标志向前推进至:`, closestPoint);
+                                } else {
+                                    console.log(`🎯 [二分定位] 边界扩大，标志刷新至最前端精确位置:`, closestPoint);
+                                }
                             }
-                            
-                            // 🌟 核心：无论是否发生了大于 0.05m 的位移，只要索引前进了，就更新最大索引
-                            maxFaultIdx = closestIdx;
                         }
                     }
                 }
