@@ -1052,31 +1052,95 @@ html, body {
 #pipelineDataArea {
     display: flex !important;
     flex-direction: column;
+    
+    /* ✅ 核心修改：强制内部元素向两侧拉伸，无视前面的 center 设置 */
+    align-items: stretch !important; 
+    
     padding: 0 !important;
-    background-color: #1a1a1a; /* 深色背景模拟屏幕 */
+    background-color: #1a1a1a; 
+    width: 100%;  
+    height: 100%; 
 }
 
-/* 上半部分 (留空) */
+/* 上半部分 (实景抓拍区) - 自动占满所有剩余空间 */
 .pipeline-upper {
-    flex: 1; /* 占 50% 高度 */
-    border-bottom: 1px dashed #444; /* 虚线分隔 */
+    flex: 1; 
+    width: 100%; /* ✅ 核心修改：明确指定宽度 100% */
+    border-bottom: 1px dashed #444; 
+    display: flex;
+    flex-direction: column; 
+    padding: 10px 12px; 
+    box-sizing: border-box;
+    overflow: hidden; 
+}
+
+/* 标题样式 */
+.fault-capture-title {
+    font-size: 13px;
+    color: #ffd700;
+    text-align: center;
+    font-weight: bold;
+    margin-bottom: 8px;
+    flex-shrink: 0;
+}
+
+/* 图片纵向排布容器 */
+.fault-capture-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px; /* 两张图片之间的间距 */
+    width: 100%;
+    box-sizing: border-box; /* ✅ 新增：防止宽度溢出 */
+    overflow: hidden; 
+}
+
+/* 绿框/橙框图片外层容器 */
+.img-wrapper {
+    flex: 1; 
+    width: 100%; 
+    box-sizing: border-box; /* ✅ 核心修复：把边框厚度强制算在 100% 内部，防止撑爆 */
+    background: rgba(0, 0, 0, 0.8); 
+    border-radius: 4px;
     display: flex;
     justify-content: center;
     align-items: center;
+    overflow: hidden;
+    position: relative;
 }
 
-/* 下半部分 (箭头显示区) */
+/* 绿框与橙框保持不变 */
+.front-wrapper { border: 1px solid #00ff00; }
+.rear-wrapper { border: 1px solid #ffaa00; }
+
+/* 图片本身自适应大小 */
+.img-wrapper img {
+    width: 100%;
+    height: 100%;
+    /* contain: 保持图片比例缩放不被裁切；
+       如果想强行铺满整个框不留黑边，可改为 object-fit: cover; */
+    object-fit: contain; 
+    color: rgba(255, 255, 255, 0.2);
+    font-size: 12px;
+    text-align: center;
+}
+
+/* 下半部分 (罗盘箭头区) - 缩小并固定高度 */
 .pipeline-lower {
-    flex: 1; /* 占 50% 高度 */
+    /* ✅ 核心修改：加上 !important 强制生效，无视文件后面的重复代码 */
+    flex: 0 0 200px !important; 
+    width: 100%;
     display: flex;
-    justify-content: center; /* 左右居中 */
-    align-items: center;     /* 垂直居中 */
-    gap: 20px;               /* 箭头之间的间距 */
+    justify-content: center;
+    align-items: center;
+    padding: 10px;
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 /* 2. 箭头样式基础 (默认熄灭状态) */
 .arrow-icon {
-    font-size: 60px;       /* 箭头大小 */
+    font-size: 40px;       /* 箭头大小 */
     color: #333;           /* 默认暗灰色 (熄灭) */
     text-shadow: 0 0 2px #000;
     transition: all 0.2s;  /* 亮起时的过渡动画 */
@@ -1577,7 +1641,7 @@ input[type="range"]::-webkit-slider-thumb {
 /* 2. 调整侧边箭头 (核心修改：定位到半圆中间) */
 .side-arrow {
     position: absolute;
-    font-size: 4rem;
+    font-size: 3rem;
     color: #555;
     transition: all 0.3s;
     z-index: 2;

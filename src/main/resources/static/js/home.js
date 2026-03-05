@@ -3196,79 +3196,91 @@
 
         // --- B. 如果是非选点模式，严格检测是否点中了黄色电缆 ---
         if (currentCableMesh) {
-            // 1. 严格射线检测：只有真正点中电缆的 3D 几何体才会触发（与悬浮变小手的逻辑完全一致）
-            const intersects = raycaster.intersectObject(currentCableMesh);
-            
-            if (intersects.length > 0) {
-                // 2. 获取射线击中电缆表面的精确 3D 坐标
-                const hitPoint = intersects[0].point;
-                popup3DPos = hitPoint.clone(); // 记录该坐标，让弹窗精准贴在这里
+            // --- B. 如果是非选点模式，检测点击电缆或破损点 ---
+        let hitPoint = null;
+        let clickedFaultId = null;
 
-                let minDistanceToSegment = Infinity;
-                let bestAccumulatedDist = 0;
-                let currentAccumulatedDist = 0;
-
-                // 3. 高精度计算：遍历真实路径，算出该击中点在整条电缆上的精确连续长度
-                if (window.savedCablePath && window.savedCablePath.length > 1) {
-                    for (let i = 0; i < window.savedCablePath.length - 1; i++) {
-                        const p1 = window.savedCablePath[i];
-                        const p2 = window.savedCablePath[i+1];
-                        
-                        // 计算当前线段的向量
-                        const dx = p2.x - p1.x;
-                        const dy = p2.y - p1.y;
-                        const dz = p2.z - p1.z;
-                        const segLenSq = dx*dx + dy*dy + dz*dz; 
-                        const segLen = Math.sqrt(segLenSq);
-                        
-                        // 计算击中点到该线段的投影比例 t (0~1)
-                        let t = 0;
-                        if (segLenSq > 0) {
-                            const dot = ((hitPoint.x - p1.x) * dx + (hitPoint.y - p1.y) * dy + (hitPoint.z - p1.z) * dz);
-                            t = Math.max(0, Math.min(1, dot / segLenSq));
-                        }
-                        
-                        // 计算投影点的真实 3D 坐标
-                        const projX = p1.x + t * dx;
-                        const projY = p1.y + t * dy;
-                        const projZ = p1.z + t * dz;
-                        
-                        // 计算击中点与投影点之间的 3D 空间距离
-                        const distToProj = Math.hypot(hitPoint.x - projX, hitPoint.y - projY, hitPoint.z - projZ);
-                        
-                        // 寻找离击中点最近的那一小段线段
-                        if (distToProj < minDistanceToSegment) {
-                            minDistanceToSegment = distToProj;
-                            // 精确距离 = 前面所有线段长度之和 + 当前线段上投影过去的长度
-                            bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
-                        }
-                        
-                        // 累加整段长度
-                        currentAccumulatedDist += segLen;
-                    }
-                }
-
-                // 4. 更新 UI 文本并显示弹窗
-                // 👉 核心修改：利用转换公式，瞬间推算出点击位置的真实经纬度
-                let gpsText = "未就绪 (等待标定)";
-                const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
-                
-                if (calculatedGps) {
-                    gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
-                } else if (window.currentGps) {
-                    gpsText = "标定中...请移动机器狗>1米";
-                }
-
-                // 更新 UI 文本并显示弹窗
-                document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
-                document.getElementById('popupDepth').textContent = "待同步"; 
-                document.getElementById('popupGps').textContent = gpsText; // ✅ 数据已同步！
-                
-                const elPopup = document.getElementById('cableInfoPopup');
-                if (elPopup) elPopup.style.display = 'block';
-                
-                return; // 成功点中电缆后，直接返回，不再执行后续代码
+        // 1. 优先检测是否点中了破损点 (遍历 faultMarkerGroup)
+        const intersectsFault = raycaster.intersectObject(faultMarkerGroup, true);
+        if (intersectsFault.length > 0) {
+            hitPoint = intersectsFault[0].point;
+            // 向上寻找绑定的 faultId
+            let obj = intersectsFault[0].object;
+            while (obj && !obj.userData.faultId && obj.parent) {
+                obj = obj.parent;
             }
+            clickedFaultId = obj.userData?.faultId;
+        } 
+        // 2. 否则检测是否点中了黄色电缆
+        else if (currentCableMesh) {
+            const intersectsCable = raycaster.intersectObject(currentCableMesh);
+            if (intersectsCable.length > 0) {
+                hitPoint = intersectsCable[0].point;
+            }
+        }
+
+        // 只要点中了有效物体（电缆或破损点）
+        if (hitPoint) {
+            popup3DPos = hitPoint.clone();
+
+            let minDistanceToSegment = Infinity;
+            let bestAccumulatedDist = 0;
+            let currentAccumulatedDist = 0;
+
+            if (window.savedCablePath && window.savedCablePath.length > 1) {
+                for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+                    const p1 = window.savedCablePath[i];
+                    const p2 = window.savedCablePath[i+1];
+                    const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+                    const segLenSq = dx*dx + dy*dy + dz*dz; 
+                    const segLen = Math.sqrt(segLenSq);
+                    
+                    let t = 0;
+                    if (segLenSq > 0) {
+                        const dot = ((hitPoint.x - p1.x) * dx + (hitPoint.y - p1.y) * dy + (hitPoint.z - p1.z) * dz);
+                        t = Math.max(0, Math.min(1, dot / segLenSq));
+                    }
+                    const projX = p1.x + t * dx, projY = p1.y + t * dy, projZ = p1.z + t * dz;
+                    const distToProj = Math.hypot(hitPoint.x - projX, hitPoint.y - projY, hitPoint.z - projZ);
+                    
+                    if (distToProj < minDistanceToSegment) {
+                        minDistanceToSegment = distToProj;
+                        bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
+                    }
+                    currentAccumulatedDist += segLen;
+                }
+            }
+
+            let gpsText = "未就绪 (等待标定)";
+            const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
+            if (calculatedGps) gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
+            else if (window.currentGps) gpsText = "标定中...请移动机器狗>1米";
+
+            document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
+            document.getElementById('popupDepth').textContent = "待同步"; 
+            document.getElementById('popupGps').textContent = gpsText; 
+            
+            const elPopup = document.getElementById('cableInfoPopup');
+            if (elPopup) elPopup.style.display = 'block';
+
+            // ✅ 核心：更新右上角固定的实景抓拍预留区
+            const frontImg = document.getElementById('dispCaptureFront');
+            const rearImg = document.getElementById('dispCaptureRear');
+            
+            if (frontImg && rearImg) {
+                if (clickedFaultId && window.faultImagesMap && window.faultImagesMap.has(clickedFaultId)) {
+                    // 1. 点中了破损点，且存在抓拍图片 -> 显示图片
+                    const imgs = window.faultImagesMap.get(clickedFaultId);
+                    frontImg.src = imgs.front;
+                    rearImg.src = imgs.rear;
+                } else {
+                    // 2. 点中了普通电缆，或者该破损点尚未抓拍 -> 清空 src，恢复等待状态
+                    frontImg.src = "";
+                    rearImg.src = "";
+                }
+            }
+            return; 
+        }
         }
 
         // --- C. 如果点击了空白处，隐藏弹窗 ---
@@ -3652,6 +3664,54 @@
             // ✅ 已删除 faultMarkerGroup 的清除逻辑，现在由 btnClearFaults 专用按钮负责
         };
     }
+    // ✅ 新增: 存储破损点图片的全局字典
+    window.faultImagesMap = new Map();
+
+    const btnCaptureFault = document.getElementById("btnCaptureFault");
+    if (btnCaptureFault) {
+        btnCaptureFault.onclick = function() {
+            // 确保当前有破损点存在
+            if (!lastFaultMarker || !lastFaultMarker.userData.faultId) {
+                alert("⚠️ 当前没有检测到破损点，无法进行抓拍绑定！");
+                return;
+            }
+
+            const faultId = lastFaultMarker.userData.faultId;
+            const originalText = this.innerHTML;
+            this.innerHTML = "⏳ 抓拍读取中...";
+            this.disabled = true;
+
+            // 调用 Python 后端的抓拍接口
+            fetch("http://10.21.31.104:5000/api/capture")
+                .then(res => {
+                    if (!res.ok) throw new Error("网络响应异常");
+                    return res.json();
+                })
+                .then(data => {
+                    if (data.status === "success") {
+                        // 将图片存入字典
+                        window.faultImagesMap.set(faultId, { 
+                            front: data.front || "", 
+                            rear: data.rear || "" 
+                        });
+                        this.innerHTML = "✅ 原帧绑定成功";
+                    } else {
+                        alert("❌ 后端抓拍失败: " + data.message);
+                        this.innerHTML = "❌ 抓拍失败";
+                    }
+                })
+                .catch(err => {
+                    console.error("抓拍出错:", err);
+                    this.innerHTML = "❌ 请求超时";
+                })
+                .finally(() => {
+                    setTimeout(() => { 
+                        this.innerHTML = originalText; 
+                        this.disabled = false;
+                    }, 2000);
+                });
+        };
+    }
 
     // ✅ 新增: 清除点云数据按钮逻辑
     const btnClearCloud = document.getElementById("btnClearCloud");
@@ -3677,6 +3737,14 @@
     if (btnClearFaults) {
         btnClearFaults.onclick = function() {
             console.log("🧹 清除所有破损点标记...");
+            // ✅ 新增：清除绑定的图片数据及界面显示
+            if (window.faultImagesMap) window.faultImagesMap.clear();
+            const frontImg = document.getElementById('dispCaptureFront');
+            const rearImg = document.getElementById('dispCaptureRear');
+            if (frontImg && rearImg) {
+                frontImg.src = "";
+                rearImg.src = "";
+            }
 
             maxFaultIdx = -1;  // 🌟 新增：重置最远探测进度
             bsState = 'INACTIVE'; // ✅ 重置二分法状态
@@ -4186,6 +4254,8 @@
                                 // --- B. 创建新的破损点组合 (红球 + 闪电标志) ---
                                 const faultGroup = new THREE.Group();
                                 faultGroup.position.copy(closestPoint);
+                                // ✅ 新增：给每个破损点分配一个唯一的 ID，用于绑定抓拍图片
+                                faultGroup.userData.faultId = 'fault_' + Date.now();
 
                                 const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
                                 const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
