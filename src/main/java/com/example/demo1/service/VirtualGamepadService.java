@@ -1,11 +1,5 @@
 package com.example.demo1.service;
 
-import org.springframework.beans.factory.DisposableBean;
-import org.springframework.beans.factory.InitializingBean;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
-import org.springframework.stereotype.Service;
-
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -13,9 +7,17 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.stereotype.Service;
 
 @Service
 public class VirtualGamepadService implements InitializingBean, DisposableBean {
@@ -75,13 +77,16 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * 接收管线仪数据的接口 (供 Controller 调用)
      * @param signal 0=正中, 1=电缆在左(需左移), 2=电缆在右(需右移)
      */
-    public void updatePipelineSignal(int signal) {
+    public void updatePipelineSignal(int signal, Float depth) { // 修改方法签名
         this.pipelineSignal = signal;
         this.lastSignalTime = System.currentTimeMillis(); // 更新心跳时间
 
-        // 推送到 /topic/pipeline，前端 JS 订阅了这个地址
+        // 推送到 /topic/pipeline，将单值改为对象
         if (template != null) {
-            template.convertAndSend("/topic/pipeline", signal);
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("signal", signal);
+            payload.put("depth", depth); // 如果没有深度，这里会是 null
+            template.convertAndSend("/topic/pipeline", (Object) payload);
         }
     }
 

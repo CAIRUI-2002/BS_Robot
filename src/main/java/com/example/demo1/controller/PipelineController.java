@@ -1,8 +1,13 @@
 package com.example.demo1.controller;
 
-import com.example.demo1.service.VirtualGamepadService;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.example.demo1.service.VirtualGamepadService;
 
 @RestController
 @RequestMapping("/api/pipeline")
@@ -13,13 +18,13 @@ public class PipelineController {
 
     /**
      * ✅ 树莓派调用的接口
-     * URL: http://<电脑IP>:8080/api/pipeline/update?signal=1
-     * signal: 0=正中, 1=偏左, 2=偏右
+     * URL: http://<电脑IP>:8080/api/pipeline/update?signal=1&depth=15
      */
     @GetMapping("/update")
-    public String updateSignal(@RequestParam int signal) {
-        gamepadService.updatePipelineSignal(signal);
-        return "success: " + signal;
+    public String updateSignal(@RequestParam int signal, 
+                               @RequestParam(required = false) Float depth) { // 新增 depth 参数
+        gamepadService.updatePipelineSignal(signal, depth);
+        return "success: signal=" + signal + ", depth=" + depth;
     }
 
     /**

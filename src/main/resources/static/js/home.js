@@ -663,27 +663,21 @@
             updateConnectionUI(true);
 
             // ==================================================
-            // 🌟 新增：订阅管线仪数据 (关键修改在这里)
+            // 🌟 新增：订阅管线仪数据
             // ==================================================
             stompClient.subscribe('/topic/pipeline', function (message) {
                 try {
-                    // 后端 template.convertAndSend 发送的是整数 (0, 1, 2)
-                    // message.body 也是字符串 "0", "1", "2"
-                    var signal = parseInt(message.body);
+                    // 解析后端发来的 JSON {signal: 0, depth: 15.0}
+                    var data = JSON.parse(message.body);
+                    var signal = data.signal !== undefined ? data.signal : parseInt(message.body);
+                    var depth = data.depth !== undefined ? data.depth : null;
 
-                    // 如果解析失败，或者后端改发了 JSON，做个兼容
-                    if (isNaN(signal)) {
-                        var data = JSON.parse(message.body);
-                        signal = data.signal || data;
-                    }
-
-                    // 调用你在文件末尾定义的那个函数
                     updatePipelineDisplay(signal);
-                    // ✅✅✅ [新增] 将信号存入全局变量，供 Three.js 读取
+                    
+                    // 存入全局变量
                     window.g_pipelineSignal = signal;
+                    window.g_pipelineDepth = depth; // ✅ 新增：记录当前最新深度
 
-                    // (可选) 打印日志方便调试
-                    // console.log("收到管线信号:", signal);
                 } catch (e) {
                     console.error("管线数据解析错误:", e);
                 }
@@ -2888,6 +2882,7 @@
     const cableMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
     const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
     const cablePoints = [];
+    let lastDepthUpdateIdx = 0; // ✅ 新增：记录上一次更新深度的数组索引
     let segmentPoints = [];
     let lastCablePos = new THREE.Vector3(-999, -999, 0);
     let lastSignal = -1;
@@ -3221,47 +3216,59 @@
 
         // 只要点中了有效物体（电缆或破损点）
         if (hitPoint) {
-            popup3DPos = hitPoint.clone();
+                popup3DPos = hitPoint.clone();
 
-            let minDistanceToSegment = Infinity;
-            let bestAccumulatedDist = 0;
-            let currentAccumulatedDist = 0;
+                let minDistanceToSegment = Infinity;
+                let bestAccumulatedDist = 0;
+                let currentAccumulatedDist = 0;
+                let hitDepth = null; // ✅ 新增：用于暂存点击位置的深度
 
-            if (window.savedCablePath && window.savedCablePath.length > 1) {
-                for (let i = 0; i < window.savedCablePath.length - 1; i++) {
-                    const p1 = window.savedCablePath[i];
-                    const p2 = window.savedCablePath[i+1];
-                    const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
-                    const segLenSq = dx*dx + dy*dy + dz*dz; 
-                    const segLen = Math.sqrt(segLenSq);
-                    
-                    let t = 0;
-                    if (segLenSq > 0) {
-                        const dot = ((hitPoint.x - p1.x) * dx + (hitPoint.y - p1.y) * dy + (hitPoint.z - p1.z) * dz);
-                        t = Math.max(0, Math.min(1, dot / segLenSq));
+                if (window.savedCablePath && window.savedCablePath.length > 1) {
+                    for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+                        const p1 = window.savedCablePath[i];
+                        const p2 = window.savedCablePath[i+1];
+                        const dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z;
+                        const segLenSq = dx*dx + dy*dy + dz*dz; 
+                        const segLen = Math.sqrt(segLenSq);
+                        
+                        let t = 0;
+                        if (segLenSq > 0) {
+                            const dot = ((hitPoint.x - p1.x) * dx + (hitPoint.y - p1.y) * dy + (hitPoint.z - p1.z) * dz);
+                            t = Math.max(0, Math.min(1, dot / segLenSq));
+                        }
+                        const projX = p1.x + t * dx, projY = p1.y + t * dy, projZ = p1.z + t * dz;
+                        const distToProj = Math.hypot(hitPoint.x - projX, hitPoint.y - projY, hitPoint.z - projZ);
+                        
+                        if (distToProj < minDistanceToSegment) {
+                            minDistanceToSegment = distToProj;
+                            bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
+                            // ✅ 获取该线段起点的深度属性
+                            hitDepth = p1.userData ? p1.userData.depth : null;
+                        }
+                        currentAccumulatedDist += segLen;
                     }
-                    const projX = p1.x + t * dx, projY = p1.y + t * dy, projZ = p1.z + t * dz;
-                    const distToProj = Math.hypot(hitPoint.x - projX, hitPoint.y - projY, hitPoint.z - projZ);
-                    
-                    if (distToProj < minDistanceToSegment) {
-                        minDistanceToSegment = distToProj;
-                        bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
-                    }
-                    currentAccumulatedDist += segLen;
                 }
-            }
 
-            let gpsText = "未就绪 (等待标定)";
-            const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
-            if (calculatedGps) gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
-            else if (window.currentGps) gpsText = "标定中...请移动机器狗>1米";
+                let gpsText = "未就绪 (等待标定)";
+                const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
+                if (calculatedGps) gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
+                else if (window.currentGps) gpsText = "标定中...请移动机器狗>1米";
 
-            document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
-            document.getElementById('popupDepth').textContent = "待同步"; 
-            document.getElementById('popupGps').textContent = gpsText; 
-            
-            const elPopup = document.getElementById('cableInfoPopup');
-            if (elPopup) elPopup.style.display = 'block';
+                document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
+                
+                // ✅ 修改：将弹窗深度更新为绑定的真实数值
+                // 假设 Python 发送的深度单位是 cm，如果是 m 请去掉 / 100
+                if (hitDepth != null) {
+                    document.getElementById('popupDepth').textContent = (hitDepth / 100).toFixed(2) + " m"; 
+                } else {
+                    document.getElementById('popupDepth').textContent = "未检测到"; 
+                }
+                
+                document.getElementById('popupGps').textContent = gpsText; 
+                
+                const elPopup = document.getElementById('cableInfoPopup');
+                if (elPopup) elPopup.style.display = 'block';
+
 
             // ✅ 核心：更新右上角固定的实景抓拍预留区
             const frontImg = document.getElementById('dispCaptureFront');
@@ -3790,6 +3797,7 @@
         btnClearCable.onclick = function() {
             cablePoints.length = 0;
             segmentPoints.length = 0;
+            lastDepthUpdateIdx = 0; // ✅ 新增：重置深度绑定游标
             lastCablePos.set(-999, -999, 0);
             
             if (currentCableMesh) {
@@ -4366,20 +4374,39 @@
                 const dist = currentPos.distanceTo(lastCablePos);
                 if (dist > 0.1) {
                     const cablePt = new THREE.Vector3(px, py, 0.08);
+                    cablePt.userData = { depth: null }; // ✅ 初始化深度数据
                     cablePoints.push(cablePt);
                     lastCablePos = cablePt;
 
-                    if (cablePoints.length > 2000) cablePoints.shift();
+                    // ✅ 核心回溯绑定逻辑：收到 signal=0 且有深度数据时
+                    if (sig === 0 && window.g_pipelineDepth != null) {
+                        // 将上一个 0 之后到当前的所有电缆点，全部标为当前深度
+                        for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
+                            cablePoints[i].userData.depth = window.g_pipelineDepth;
+                        }
+                        lastDepthUpdateIdx = cablePoints.length; // 更新游标
+                    }
+
+                    if (cablePoints.length > 2000) {
+                        cablePoints.shift();
+                        if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--; // 数组左移，游标也要跟着移
+                    }
+
                     if (cablePoints.length > 3) {
                         if (currentCableMesh) {
                             cableGroup.remove(currentCableMesh);
                             currentCableMesh.geometry.dispose();
                             currentCableMesh = null;
                         }
+                        
                         // 调用卡尔曼平滑
                         let displayPoints = KalmanSmoother.smooth(cablePoints);
                         
-                        // ✅✅✅ 保存平滑后的路径供跟踪使用
+                        // ✅ 将原始点的深度属性同步给平滑后的显示点
+                        for (let i = 0; i < displayPoints.length; i++) {
+                            displayPoints[i].userData = { depth: cablePoints[i].userData.depth };
+                        }
+                        
                         window.savedCablePath = displayPoints;
 
                         // 绘制平滑曲线
