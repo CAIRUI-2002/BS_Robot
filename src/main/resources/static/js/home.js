@@ -641,7 +641,45 @@
             }
         });
     });
+    // ==========================================
+    // ✅ 新增：针对管线仪深度的非对称 1D 卡尔曼滤波器
+    // ==========================================
+    class DepthKalmanFilter {
+        constructor() {
+            this.q = 0.05; // 过程噪声：越小，越相信系统模型（表现为平滑但略微迟钝）
+            this.r = 2.0;  // 测量噪声：越大，越不相信原始测量值（表现为强力过滤波动）
+            this.p = 1.0;  // 估计误差协方差
+            this.x = null; // 当前最优估计深度
+        }
 
+        update(measurement) {
+            if (this.x === null) {
+                this.x = measurement;
+                return this.x;
+            }
+            
+            // 【核心优化】非对称噪声处理：
+            // 机器狗偏离正上方时，探测到的深度（斜边）必然变大。
+            let dynamicR = this.r;
+            if (measurement > this.x + 1.5) { 
+                // 1. 如果测量值突然增大超过 1.5cm，说明大概率是偏离了正上方，极度不信任这个大数值
+                dynamicR = this.r * 10.0; 
+            } else if (measurement < this.x) {
+                // 2. 如果测量值变小，说明机器狗正在回归正上方（越来越接近真实垂直深度），非常信任并快速收敛
+                dynamicR = this.r * 0.1; 
+            }
+
+            // 卡尔曼预测与更新
+            this.p = this.p + this.q;
+            const k = this.p / (this.p + dynamicR);
+            this.x = this.x + k * (measurement - this.x);
+            this.p = (1 - k) * this.p;
+
+            return this.x;
+        }
+    }
+    // 实例化全局深度滤波器
+    const depthKF = new DepthKalmanFilter();
     // ==========================================
     // 3. WebSocket 与 机器人控制函数
     // ==========================================
@@ -676,7 +714,12 @@
                     
                     // 存入全局变量
                     window.g_pipelineSignal = signal;
-                    window.g_pipelineDepth = depth; // ✅ 新增：记录当前最新深度
+                    
+                    // ✅ 修改：引入卡尔曼滤波，不再直接使用原始起伏的深度
+                    if (depth !== null) {
+                        window.g_pipelineRawDepth = depth; // 保留原始值供控制台调试
+                        window.g_pipelineDepth = depthKF.update(depth); // 存入滤波后的平滑真实深度
+                    }
 
                 } catch (e) {
                     console.error("管线数据解析错误:", e);
@@ -2882,7 +2925,6 @@
     const cableMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
     const redCableMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
     const cablePoints = [];
-    let lastDepthUpdateIdx = 0; // ✅ 新增：记录上一次更新深度的数组索引
     let segmentPoints = [];
     let lastCablePos = new THREE.Vector3(-999, -999, 0);
     let lastSignal = -1;
@@ -3471,28 +3513,70 @@
         if(navPath.length === 0) { stopNav(true); return; }
 
         // =========================================================
-        // 🌟🌟🌟 [新增] 二分法破损点精确定位逻辑拦截
+        // 🌟🌟🌟 [修改] 步进等待 (Step-and-Wait) + 二分法定位接管
         // =========================================================
         if (isFaultFindingMode && window.offsetCablePath && window.offsetCablePath.length > 0) {
             if (offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
             const currentDist = getDistOnPath(currentRobotPose, window.offsetCablePath);
 
-            // 触发条件：正常前进状态，且上一个破损点已记录，且走出 2m 还没新破损点
-            if (bsState === 'INACTIVE' && lastFaultRobotDist >= 0 && (currentDist - lastFaultRobotDist > 2.0)) {
-                console.log("🛑 [二分法触发] 超过 2m 未发现新破损点，准备启动精确定位...");
-                bsState = 'INIT_WAIT';
-                bsGoodDist = lastFaultRobotDist; // 上次有信号的距离
-                bsBadDist = currentDist;         // 当前无信号的距离
-                window.g_faultTriggeredInBS = false; 
-                bsWaitEndTime = Date.now() + 5000; // 原地等待 5 秒
-                sendMoveCommand(0, 0, 0, 0, true); // 立即停车
-                return;
-            }
+            // 确保机器狗已经并入偏移路径，而不是还在去起点的路上
+            if (cableTrackingState === 'FOLLOWING') {
+                
+                // 1. 初始化步进阶段
+                if (bsState === 'INACTIVE') {
+                    bsState = 'STEP_FORWARD';
+                    bsTargetDist = currentDist + 2.0; // 设定 2m 后的目标距离
+                    bsGoodDist = currentDist;         // 默认当前起点为有信号区域
+                    console.log(`🚀 [破损点步进] 开始步进，目标距离: ${bsTargetDist.toFixed(2)}m`);
+                }
 
-            // 如果已经进入了二分法状态，接管控制，不再执行下面的常规纯追踪
-            if (bsState !== 'INACTIVE') {
-                handleBinarySearchControl(currentDist);
-                return; 
+                // 2. 步进前行阶段 (STEP_FORWARD)
+                else if (bsState === 'STEP_FORWARD') {
+                    if (currentDist >= bsTargetDist) {
+                        // 到达 2m 节点，立即停车并开始 20 秒倒计时
+                        bsState = 'STEP_WAIT';
+                        bsWaitEndTime = Date.now() + 20000; // 等待 20 秒
+                        window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
+                        sendMoveCommand(0, 0, 0, 0, true);
+                        console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 20 秒检测信号...`);
+                        return; // 拦截结束，不执行下面的纯追踪
+                    }
+                    // 还没走到 2m，这里不 return，放行去执行下方的常规纯追踪 (前进)
+                }
+
+                // 3. 停车等待 20 秒阶段 (STEP_WAIT)
+                else if (bsState === 'STEP_WAIT') {
+                    sendMoveCommand(0, 0, 0, 0, false); // 发送心跳包，保持原地停车
+
+                    // A. 等待期间检测到信号：立即中断等待，继续前行
+                    if (window.g_faultTriggeredInBS) {
+                        console.log(`✅ [破损点步进] 收到破损点信号！立即继续前进 2m...`);
+                        bsGoodDist = currentDist;         // 更新有信号边界
+                        bsTargetDist = currentDist + 2.0; // 目标再推 2m
+                        bsState = 'STEP_FORWARD';
+                        window.g_faultTriggeredInBS = false;
+                        return; 
+                    }
+
+                    // B. 20 秒满，未检测到信号：触发二分法
+                    if (Date.now() >= bsWaitEndTime) {
+                        console.log(`🛑 [二分定位触发] 20 秒无信号！进入二分法寻找 (搜索区间: ${bsGoodDist.toFixed(2)}m ~ ${currentDist.toFixed(2)}m)`);
+                        bsBadDist = currentDist; // 更新无信号边界
+                        bsState = 'MOVING';      // 直接跳转到二分法移动阶段
+                        bsTargetDist = (bsGoodDist + bsBadDist) / 2.0; // 目标锁定为中点 (比如倒退 1m)
+                        window.g_faultTriggeredInBS = false;
+                        return;
+                    }
+
+                    // C. 还在 20 秒内，继续等待
+                    return;
+                }
+
+                // 4. 二分法接管阶段 (复用原来的逻辑)
+                else if (bsState === 'MOVING' || bsState === 'EVAL_WAIT' || bsState === 'DONE' || bsState === 'INIT_WAIT') {
+                    handleBinarySearchControl(currentDist);
+                    return; 
+                }
             }
         }
 
@@ -3560,22 +3644,28 @@
             return;
         }
 
-        // 阶段 2: 到达某个测试点后，等待 5秒 评估是否有信号
+        // 阶段 2: 到达某个测试点后，等待 20秒 评估是否有信号 (支持信号立即打断)
         if (bsState === 'EVAL_WAIT') {
-            if (now < bsWaitEndTime) return;
+            const signalDetectedNow = window.g_faultTriggeredInBS; // 是否已经抓到了信号
+            const timeIsUp = (now >= bsWaitEndTime);               // 是否已经等够了 20 秒
 
-            // 5秒评估结束，看期间有没有触发过信号
-            if (window.g_faultTriggeredInBS) {
-                console.log(`✅ [二分定位] 在 ${currentDist.toFixed(2)}m 处检测到信号！更新有信号边界。`);
+            // 【核心修改】如果既没收到信号，时间也没到，就继续原地等
+            if (!signalDetectedNow && !timeIsUp) {
+                return; 
+            }
+
+            // --- 评估结算阶段：收到信号了，或者时间终于到了 ---
+            if (signalDetectedNow) {
+                console.log(`✅ [二分定位] ⚡ 提前在 ${currentDist.toFixed(2)}m 处检测到信号！立刻中断等待，更新有信号边界。`);
                 bsGoodDist = currentDist; // 更新有信号边界
             } else {
-                console.log(`❌ [二分定位] 在 ${currentDist.toFixed(2)}m 处无信号！更新无信号边界。`);
+                console.log(`❌ [二分定位] ⏳ 等待 20 秒满，在 ${currentDist.toFixed(2)}m 处无信号！更新无信号边界。`);
                 bsBadDist = currentDist;  // 更新无信号边界
             }
 
-            // 检查误差是否满足退出条件 (小于 0.1m)
-            if (Math.abs(bsBadDist - bsGoodDist) <= 0.1) {
-                console.log(`🎯 [二分定位] 定位完成！误差已 <= 0.1m。最终真实破损点位于: ${bsGoodDist.toFixed(2)}m`);
+            // 检查误差是否满足退出条件 (小于 0.2m)
+            if (Math.abs(bsBadDist - bsGoodDist) <= 0.2) {
+                console.log(`🎯 [二分定位] 定位完成！误差已 <= 0.2m。最终真实破损点位于: ${bsGoodDist.toFixed(2)}m`);
                 bsState = 'DONE';
                 setStatus("🎯 破损点精准定位完成！", "success");
                 stopNav(true);
@@ -3586,7 +3676,7 @@
             bsTargetDist = (bsGoodDist + bsBadDist) / 2.0;
             bsState = 'MOVING';
 
-            // ✅ 新增：在每次发车前清空上一轮的信号，确保在去下一个点的路上干净地重新检测
+            // 清理上一轮的信号标志，准备前往下一个点
             window.g_faultTriggeredInBS = false;
             const action = (bsTargetDist > currentDist) ? "向前移动" : "倒退移动";
             console.log(`🤖 [二分定位] 准备${action}至: ${bsTargetDist.toFixed(2)}m (搜索区间: ${Math.min(bsGoodDist, bsBadDist).toFixed(2)} ~ ${Math.max(bsGoodDist, bsBadDist).toFixed(2)})`);
@@ -3603,8 +3693,8 @@
                 bsState = 'EVAL_WAIT';
                 // ❌ 删除下面这行！不要在刚停下来的时候清空移动中好不容易抓到的信号！
                 // window.g_faultTriggeredInBS = false; 
-                bsWaitEndTime = Date.now() + 5000; // 等待 5秒
-                console.log("⏱️ [二分定位] 到达目标点，原地等待 5 秒检测信号...");
+                bsWaitEndTime = Date.now() + 20000; // 等待 20秒
+                console.log("⏱️ [二分定位] 到达目标点，原地等待 20 秒检测信号...");
                 return;
             }
 
@@ -4029,12 +4119,12 @@
             
             // 计算 2D 叉积
             const cross = dirX * ry - dirY * rx;
-            let offsetDist = 0.3; // 默认向左偏移 0.3m
+            let offsetDist = 1.5; // 默认向左偏移 1.5m
             if (cross < 0) {
-                offsetDist = -0.3; // 如果叉积小于0，说明在右侧，向右偏移 0.3m
-                console.log("👉 机器狗位于电缆右侧，生成右侧 0.3m 平行路径");
+                offsetDist = -1.5; // 如果叉积小于0，说明在右侧，向右偏移 1.5m
+                console.log("👉 机器狗位于电缆右侧，生成右侧 1.5m 平行路径");
             } else {
-                console.log("👈 机器狗位于电缆左侧，生成左侧 0.3m 平行路径");
+                console.log("👈 机器狗位于电缆左侧，生成左侧 1.5m 平行路径");
             }
 
             // 3. 生成平行偏移的新路径
@@ -4237,8 +4327,8 @@
                         // 这样即使机器狗后退到变红的区域内探测到信号，也会被这里拦截，标志保持在最前端不动。
                         if (maxFaultIdx === -1 || closestIdx > maxFaultIdx) {
                             
-                            // ✅ 只有在常规追踪模式下，才记录最新信号的距离
-                            if (bsState === 'INACTIVE') {
+                            // ✅ 只有在步进前行或等待模式下，才记录最新信号的距离
+                            if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
                                 if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
                                 if (window.offsetCablePath) lastFaultRobotDist = getDistOnPath(currentPos, window.offsetCablePath);
                             }
@@ -4305,7 +4395,7 @@
                                 // 🌟 关键锁死：将当前的最远进度记录下来。下次只要没超过这个进度，坚决不更新！
                                 maxFaultIdx = closestIdx;
 
-                                if (bsState === 'INACTIVE') {
+                                if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
                                     console.log(`🔴 [追踪] 发现更前端的破损点，标志向前推进至:`, closestPoint);
                                 } else {
                                     console.log(`🎯 [二分定位] 边界扩大，标志刷新至最前端精确位置:`, closestPoint);
@@ -4374,18 +4464,12 @@
                 const dist = currentPos.distanceTo(lastCablePos);
                 if (dist > 0.1) {
                     const cablePt = new THREE.Vector3(px, py, 0.08);
-                    cablePt.userData = { depth: null }; // ✅ 初始化深度数据
+                    
+                    // ✅ 取消 sig===0 的限制与延迟回溯，直接绑定实时卡尔曼滤波后的最优深度
+                    cablePt.userData = { depth: window.g_pipelineDepth != null ? window.g_pipelineDepth : null }; 
+                    
                     cablePoints.push(cablePt);
                     lastCablePos = cablePt;
-
-                    // ✅ 核心回溯绑定逻辑：收到 signal=0 且有深度数据时
-                    if (sig === 0 && window.g_pipelineDepth != null) {
-                        // 将上一个 0 之后到当前的所有电缆点，全部标为当前深度
-                        for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
-                            cablePoints[i].userData.depth = window.g_pipelineDepth;
-                        }
-                        lastDepthUpdateIdx = cablePoints.length; // 更新游标
-                    }
 
                     if (cablePoints.length > 2000) {
                         cablePoints.shift();
