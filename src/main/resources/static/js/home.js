@@ -3532,8 +3532,18 @@
 
                 // 2. 步进前行阶段 (STEP_FORWARD)
                 else if (bsState === 'STEP_FORWARD') {
+                    
+                    // ✅ [新增] 运动中检测到信号：动态推迟目标点 (无缝顺延，不停车)
+                    if (window.g_faultTriggeredInBS) {
+                        console.log(`⚡ [破损点步进] 运动中 (${currentDist.toFixed(2)}m处) 检测到信号！重新以此点推算 2m 目标...`);
+                        bsGoodDist = currentDist;         // 刷新有信号边界为当前位置
+                        bsTargetDist = currentDist + 2.0; // 目标直接顺延，从当前点再往后推 2m
+                        window.g_faultTriggeredInBS = false; // 消费掉这个信号
+                        // 这里我们不 return，让代码继续往下走，这样机器狗就不会有任何停顿，直接平滑继续走
+                    }
+
                     if (currentDist >= bsTargetDist) {
-                        // 到达 2m 节点，立即停车并开始 20 秒倒计时
+                        // 到达最新的 2m 节点，立即停车并开始 20 秒倒计时
                         bsState = 'STEP_WAIT';
                         bsWaitEndTime = Date.now() + 20000; // 等待 20 秒
                         window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
