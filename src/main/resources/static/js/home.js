@@ -88,6 +88,33 @@
         }
     };
 
+    // ====== 🌊 [新] FFT 频段控制配置 ======
+const FFT_CONFIG = {
+    FREQ_MIN: 300,  // 默认显示频率下限
+    FREQ_MAX: 600   // 默认显示频率上限
+};
+
+// 全局存储最新一次触发的 FFT 频谱数据
+window.latestAcousticFFT = null; 
+
+// ====== 新增：FFT 参数调节函数 ======
+window.adjustFftParam = function(type, delta) {
+    const elMin = document.getElementById('disp_fft_min');
+    const elMax = document.getElementById('disp_fft_max');
+
+    if (type === 'MIN') {
+        FFT_CONFIG.FREQ_MIN += delta;
+        if (FFT_CONFIG.FREQ_MIN < 0) FFT_CONFIG.FREQ_MIN = 0;
+        if (FFT_CONFIG.FREQ_MIN >= FFT_CONFIG.FREQ_MAX) FFT_CONFIG.FREQ_MIN = FFT_CONFIG.FREQ_MAX - 10;
+        if (elMin) elMin.textContent = FFT_CONFIG.FREQ_MIN;
+    } else if (type === 'MAX') {
+        FFT_CONFIG.FREQ_MAX += delta;
+        if (FFT_CONFIG.FREQ_MAX <= FFT_CONFIG.FREQ_MIN) FFT_CONFIG.FREQ_MAX = FFT_CONFIG.FREQ_MIN + 10;
+        if (elMax) elMax.textContent = FFT_CONFIG.FREQ_MAX;
+    }
+    console.log(`🎛️ [FFT参数] 显示范围 -> ${FFT_CONFIG.FREQ_MIN}Hz ~ ${FFT_CONFIG.FREQ_MAX}Hz`);
+};
+
     // ====== 🌊 峰值监测全局变量 ======
 // 存储最近 50 帧的 { deviation: 偏离度, val: 信号强度 }
     let mutationWindow = [];
@@ -179,6 +206,61 @@
             .then(msg => console.log("速度更新反馈:", msg))
             .catch(err => console.error("速度更新失败:", err));
     };
+
+    // ==========================================
+// 核心：基于 Radix-2 的轻量级快速傅里叶变换 (FFT)
+// ==========================================
+function computeMagnitudeFFT(realInput) {
+    const N = realInput.length; // 必须是 2 的整数次幂 (例如 16384)
+    const real = new Float32Array(realInput);
+    const imag = new Float32Array(N);
+
+    // 位反转 (Bit Reversal)
+    let j = 0;
+    for (let i = 0; i < N - 1; i++) {
+        if (i < j) {
+            let tr = real[i]; real[i] = real[j]; real[j] = tr;
+        }
+        let k = N >> 1;
+        while (k <= j) { j -= k; k >>= 1; }
+        j += k;
+    }
+
+    // 蝶形运算 (Cooley-Tukey)
+    for (let L = 2; L <= N; L <<= 1) {
+        const halfL = L >> 1;
+        const theta = -2 * Math.PI / L;
+        const w_r_step = Math.cos(theta);
+        const w_i_step = Math.sin(theta);
+
+        for (let k = 0; k < N; k += L) {
+            let w_r = 1, w_i = 0;
+            for (let step = 0; step < halfL; step++) {
+                const idx = k + step;
+                const idx2 = idx + halfL;
+                
+                const t_r = w_r * real[idx2] - w_i * imag[idx2];
+                const t_i = w_r * imag[idx2] + w_i * real[idx2];
+                
+                real[idx2] = real[idx] - t_r;
+                imag[idx2] = imag[idx] - t_i;
+                real[idx] += t_r;
+                imag[idx] += t_i;
+
+                const next_w_r = w_r * w_r_step - w_i * w_i_step;
+                const next_w_i = w_r * w_i_step + w_i * w_r_step;
+                w_r = next_w_r; w_i = next_w_i;
+            }
+        }
+    }
+
+    // 计算幅值 (Magnitude) -> 只取前半部分（Nyquist 频率内）
+    const mag = new Float32Array(N / 2);
+    for (let i = 0; i < N / 2; i++) {
+        mag[i] = Math.sqrt(real[i] * real[i] + imag[i] * imag[i]);
+    }
+    return mag;
+}
 
     // 连通域检测算法 (GPR)
     function detectBlobs(matrix) {
@@ -1981,6 +2063,7 @@
         // --- 2. [新增] AUC 算法专用变量 (仅针对磁信号) ---
         const BUFFER_SIZE = 20000;
         const ringBuffer = new Float32Array(BUFFER_SIZE);
+        const sndRingBuffer = new Float32Array(BUFFER_SIZE); // 声信号同步环形缓存
         let writePtr = 0;       // 写入指针
         let totalSamples = 0;   // 绝对计数器
         let algoState = 'IDLE'; // IDLE -> WAITING_DATA
@@ -2004,38 +2087,38 @@
         // ============================================================
         
         // 处理新进来的磁信号数据 (Feed Data)
-        function processMagAlgorithm(newDataChunk) {
-            for (let i = 0; i < newDataChunk.length; i++) {
-                const rawVal = newDataChunk[i];
-                const adjustedVal = rawVal - 2048; // 去直流
-                
-                // 1. 写入环形缓冲区
-                ringBuffer[writePtr] = adjustedVal;
-                writePtr = (writePtr + 1) % BUFFER_SIZE;
-                totalSamples++;
+        function processSignals(magChunk, sndChunk) {
+    for (let i = 0; i < magChunk.length; i++) {
+        const rawMag = magChunk[i];
+        const rawSnd = sndChunk[i];
+        const adjustedMag = rawMag - 2048; // 去直流
+        
+        // 双通道同步写入环形缓冲区
+        ringBuffer[writePtr] = adjustedMag;
+        sndRingBuffer[writePtr] = rawSnd - 2048; // 声信号也去直流，防止 FFT 出现巨大的 0Hz 峰值
+        
+        writePtr = (writePtr + 1) % BUFFER_SIZE;
+        totalSamples++;
 
-                // 2. 实时触发检测 (Trigger)
-                if (algoState === 'IDLE') {
-                    if (Math.abs(adjustedVal) > AUC_CONFIG.PULSE_THRESHOLD) {
-                        // 冷却时间检查
-                        if (totalSamples - lastTriggerTime > AUC_CONFIG.DISTANCE_MIN) {
-                            // console.log(`⚡ [AUC触发] T=${totalSamples}`);
-                            algoState = 'WAITING_DATA';
-                            triggerIndex = totalSamples;
-                            lastTriggerTime = totalSamples;
-                        }
-                    }
-                }
-            }
-
-            // 3. 检查数据是否攒够 (Window Full?)
-            if (algoState === 'WAITING_DATA') {
-                if (totalSamples >= triggerIndex + AUC_CONFIG.WINDOW_AFTER) {
-                    performAUCAnalysis();
-                    algoState = 'IDLE';
+        // 原有的 AUC 实时触发检测
+        if (algoState === 'IDLE') {
+            if (Math.abs(adjustedMag) > AUC_CONFIG.PULSE_THRESHOLD) {
+                if (totalSamples - lastTriggerTime > AUC_CONFIG.DISTANCE_MIN) {
+                    algoState = 'WAITING_DATA';
+                    triggerIndex = totalSamples;
+                    lastTriggerTime = totalSamples;
                 }
             }
         }
+    }
+
+    if (algoState === 'WAITING_DATA') {
+        if (totalSamples >= triggerIndex + AUC_CONFIG.WINDOW_AFTER) {
+            performAUCAnalysis();
+            algoState = 'IDLE';
+        }
+    }
+}
 
         // 执行 AUC 积分分析
         function performAUCAnalysis() {
@@ -2087,25 +2170,63 @@
                                 (aucSum >= AUC_CONFIG.AUC_THRESHOLD);
 
             // 4. 结果输出
-            if (isDischarge) {
-                console.log(`🔴 [故障判定] AUC:${aucSum.toFixed(0)} > ${AUC_CONFIG.AUC_THRESHOLD}, Pts:${noisePointsCount}`);
-                
-                window.g_isFaultDetected = true;
-                // ✅✅✅ [新增] 专门给二分法等待期使用的信号触发标志
-                window.g_faultTriggeredInBS = true;
+if (isDischarge) {
+    console.log(`🔴 [故障判定] AUC:${aucSum.toFixed(0)}...`);
+    window.g_isFaultDetected = true;
+    window.g_faultTriggeredInBS = true;
+    
+    // ======== ⚡ 新增：触发声波 FFT 处理 ========
+    // 提取前 0.5s 到后 0.5s（共 1s，10000个点）
+    const WINDOW_POINTS = 10000;
+    const HALF_WINDOW = 5000; // 0.5秒
+    const N_FFT = 16384;      // 下一个 2 的幂次方用于高效 FFT
 
-                // 为了让 UI 显示数值，取触发点的原始值 (加回 2048)
-                // 也可以直接用 aucSum 来代表强度，看你需求
-                const peakVal = Math.abs(segment[AUC_CONFIG.WINDOW_BEFORE]) + 2048;
-                window.g_realtimeMag = peakVal;
+    const sndFftInput = new Float32Array(N_FFT);
+    const startIdx = triggerIndex - HALF_WINDOW;
 
-                // UI 变红提示
-                const elMag = document.getElementById('magSignalVal');
-                if(elMag) elMag.style.color = "#ff4444";
-                
-                // 0.5秒后自动复位状态，防止一直锁定
-                setTimeout(() => { window.g_isFaultDetected = false; }, 500);
-            }
+    for (let i = 0; i < WINDOW_POINTS; i++) {
+        let idx = (startIdx + i) % BUFFER_SIZE;
+        if (idx < 0) idx += BUFFER_SIZE;
+        
+        // 施加 Hanning 窗，减少 FFT 频谱泄露
+        const multiplier = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (WINDOW_POINTS - 1)));
+        sndFftInput[i] = sndRingBuffer[idx] * multiplier;
+    }
+
+    // 计算幅频响应
+    const magSpectrum = computeMagnitudeFFT(sndFftInput);
+    
+    // 存储给渲染引擎使用
+    window.latestAcousticFFT = {
+        spectrum: magSpectrum,
+        sampleRate: AUC_CONFIG.SAMPLING_RATE, // 10000 Hz
+        fftSize: N_FFT // 16384
+    };
+    // ============================================
+
+    const peakVal = Math.abs(segment[AUC_CONFIG.WINDOW_BEFORE]) + 2048;
+    window.g_realtimeMag = peakVal;
+
+    const elMag = document.getElementById('magSignalVal');
+    if(elMag) elMag.style.color = "#ff4444";
+    
+    setTimeout(() => { window.g_isFaultDetected = false; }, 500);
+    // ============================================
+    // 🌟🌟🌟 新增：自动切回实时波形模式的定时器 🌟🌟🌟
+    // ============================================
+    // 1. 如果之前已经有一个倒计时在跑，先清除它（防止连续触发时画面闪烁过快）
+    if (window.fftTimeoutId) {
+        clearTimeout(window.fftTimeoutId);
+    }
+    
+    // 2. 设定 5000 毫秒（5秒）后自动清空 FFT 数据
+    // 你可以根据实际巡检观察的需要，把 5000 改成 8000(8秒) 或 3000(3秒)
+    window.fftTimeoutId = setTimeout(() => {
+        window.latestAcousticFFT = null; 
+        console.log("⏱️ FFT 画面展示完毕，已自动切回实时声信号波形");
+    }, 2000); 
+    // ============================================
+}
         }
 
 
@@ -2134,15 +2255,66 @@
             }
 
             // ✅ 绘制 Ch2 (声信号 - 保持不变)
-            if (channel2Data && channel2Data.length > 0) {
-                drawChannel(channel2Data, halfH, halfH, "#ff3333");
-            }
+            if (window.latestAcousticFFT) {
+    // 发生过故障：显示 1s 窗口截取的特定频段 FFT
+    drawFFTChannel(window.latestAcousticFFT, halfH, halfH, "#ff3333");
+} else if (channel2Data && channel2Data.length > 0) {
+    // 尚未发生故障：退化为原样显示实时时域波形作为占位
+    drawChannel(channel2Data, halfH, halfH, "#ff3333");
+}
             
             // 更新 UI 数值
             updateUIValues();
             
             requestAnimationFrame(drawSignal);
         }
+
+        function drawFFTChannel(fftObj, topY, height, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+
+    const w = canvas.width;
+    const { spectrum, sampleRate, fftSize } = fftObj;
+    
+    // FFT 频率分辨率 Δf = Fs / N
+    const df = sampleRate / fftSize; 
+    
+    // 将设定的 Hz 映射到对应的索引 Bin
+    const minBin = Math.floor(FFT_CONFIG.FREQ_MIN / df);
+    const maxBin = Math.ceil(FFT_CONFIG.FREQ_MAX / df);
+
+    // 寻找当前截断频段内的最大幅值，用于动态自适应 Y 轴缩放
+    let maxMag = 0;
+    for (let i = minBin; i <= maxBin && i < spectrum.length; i++) {
+        if (spectrum[i] > maxMag) maxMag = spectrum[i];
+    }
+    if (maxMag === 0) maxMag = 1;
+
+    // 绘制频谱
+    let drewFirst = false;
+    for (let i = minBin; i <= maxBin && i < spectrum.length; i++) {
+        // X 坐标：按频段区间归一化
+        const x = ((i - minBin) / (maxBin - minBin)) * w;
+        
+        // Y 坐标：幅值自适应归一化，留 10% 顶部边距
+        const norm = (spectrum[i] / maxMag) * 0.9;
+        const y = topY + height - (norm * height);
+
+        if (!drewFirst) {
+            ctx.moveTo(x, y);
+            drewFirst = true;
+        } else {
+            ctx.lineTo(x, y);
+        }
+    }
+    ctx.stroke();
+
+    // 绘制频段标签标识
+    ctx.fillStyle = color;
+    ctx.font = "12px monospace";
+    ctx.fillText(`声波FFT: ${FFT_CONFIG.FREQ_MIN} - ${FFT_CONFIG.FREQ_MAX} Hz`, 5, topY + 15);
+}
 
         // 通用单通道绘图函数 (✅ 保持不变)
         function drawChannel(data, topY, height, color) {
@@ -2222,20 +2394,16 @@
                 const msg = JSON.parse(event.data);
                 if (msg.type === "mixed_signal" || msg.type === "signal") {
                     // 1. 处理磁信号 (Ch1) -> 送入 AUC 算法 & 绘图缓存
-                    if (msg.mag_data) {
-                        channel1Data = msg.mag_data; // 存下来画图用
-                        processMagAlgorithm(msg.mag_data); // 送去算 AUC
-                    } else if (msg.ch1) {
-                        channel1Data = msg.ch1;
-                        processMagAlgorithm(msg.ch1);
-                    }
-
-                    // 2. ✅ 处理声信号 (Ch2) -> 仅存下来画图 (保持不变)
-                    if (msg.snd_data) {
-                        channel2Data = msg.snd_data;
-                    } else if (msg.ch2) {
-                        channel2Data = msg.ch2;
-                    }
+                    // 修改为：
+if (msg.mag_data && msg.snd_data) {
+    channel1Data = msg.mag_data;
+    channel2Data = msg.snd_data;
+    processSignals(msg.mag_data, msg.snd_data);
+} else if (msg.ch1 && msg.ch2) {
+    channel1Data = msg.ch1;
+    channel2Data = msg.ch2;
+    processSignals(msg.ch1, msg.ch2);
+}
                 }
             } catch (e) {
                 console.error("Data Parse Error", e);

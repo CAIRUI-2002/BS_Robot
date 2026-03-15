@@ -82,6 +82,24 @@
                             style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
                 </div>
             </div>
+
+            <div class="info-item" style="justify-content: space-between; align-items: center;">
+    <span class="info-label">频显下限：</span>
+    <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="joint-btn minus" onclick="adjustFftParam('MIN', -50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+        <span id="disp_fft_min" class="info-value" style="min-width: 50px; text-align: center; color: #ff99ff;">300</span>
+        <button class="joint-btn plus" onclick="adjustFftParam('MIN', 50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+    </div>
+</div>
+
+<div class="info-item" style="justify-content: space-between; align-items: center;">
+    <span class="info-label">频显上限：</span>
+    <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="joint-btn minus" onclick="adjustFftParam('MAX', -50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+        <span id="disp_fft_max" class="info-value" style="min-width: 50px; text-align: center; color: #ff3333;">600</span>
+        <button class="joint-btn plus" onclick="adjustFftParam('MAX', 50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+    </div>
+</div>
             
         </div>
     </div>
