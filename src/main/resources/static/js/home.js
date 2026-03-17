@@ -3758,6 +3758,28 @@ if (msg.mag_data && msg.snd_data) {
             }
         }
 
+        // =========================================================
+        // ✅ [新增] 剔除身后的历史轨迹点，彻底解决机器狗 180 度掉头问题
+        // =========================================================
+        // 1. 寻找机器狗在当前剩余路径上“物理距离最近”的点
+        let closestIdx = 0;
+        let minD = Infinity;
+        for (let i = 0; i < navPath.length; i++) {
+            const d = Math.hypot(navPath[i].x - currentRobotPose.x, navPath[i].y - currentRobotPose.y);
+            if (d < minD) {
+                minD = d;
+                closestIdx = i;
+            }
+        }
+
+        // 2. 将最近点之前的所有“已路过”点全部从数组中销毁
+        // 这样 navPath[0] 永远是机器狗身旁或正前方的点，绝不回头
+        if (closestIdx > 0) {
+            navPath.splice(0, closestIdx);
+        }
+        // =========================================================
+
+        // 3. 在清理后的、只包含前方的路径中，正常寻找前瞻目标点
         const LOOKAHEAD_DIST = 0.8;
         let targetIdx = 0;
         let target = navPath[0];
@@ -3765,17 +3787,20 @@ if (msg.mag_data && msg.snd_data) {
         for(let i=0; i<navPath.length; i++) {
             const p = navPath[i];
             const d = Math.hypot(p.x - currentRobotPose.x, p.y - currentRobotPose.y);
+            
             if(d > LOOKAHEAD_DIST) {
                 target = p;
                 targetIdx = i;
                 break;
             }
+            // 如果走到最后都没有大于前瞻距离的点，就直接瞄准终点
             if(i === navPath.length-1) {
                 target = p;
                 targetIdx = i;
             }
         }
 
+        // 4. 剔除目标点之前的过渡点，使得路径持续向前推进
         if(targetIdx > 0) {
             navPath.splice(0, targetIdx);
         }
@@ -3796,10 +3821,13 @@ if (msg.mag_data && msg.snd_data) {
 
         let v = 0, w = 0;
         if(Math.abs(diff) > 0.8) {
-            v = 0.1;
+            // 角度偏差大于 0.8 弧度时，降速到 0.1 m/s
+            v = 0.1;  
             w = diff > 0 ? 0.6 : -0.6;
         } else {
+            // 动态调速：偏角越小，速度越接近 0.4 m/s
             v = 0.4 * (1.0 - Math.abs(diff)/1.5);
+            // 最小保底速度 0.15 m/s
             v = Math.max(0.15, v);
             w = diff * 1.5;
         }
@@ -3890,8 +3918,9 @@ if (msg.mag_data && msg.snd_data) {
 
             if (distError < 0) {
                 // === 倒车模式 ===
-                v = -0.15; // 慢速倒退
-                // 倒车时，机器狗的前方是远离目标的，所以要把目标偏航角反转 180 度进行纠偏
+                v = -0.3; // 🚀 提速：将基础倒车速度提高到 0.3 m/s (原为 -0.15)
+                
+                // 倒车时，机器狗的前方是远离目标的，所以要把目标偏航角反转 180 度进行纠偏2
                 let reverseYaw = targetYaw + Math.PI;
                 while(reverseYaw > Math.PI) reverseYaw -= 2*Math.PI;
                 while(reverseYaw < -Math.PI) reverseYaw += 2*Math.PI;
@@ -3901,15 +3930,16 @@ if (msg.mag_data && msg.snd_data) {
                 while(diff < -Math.PI) diff += 2*Math.PI;
             } else {
                 // === 前进模式 ===
-                v = 0.15; // 慢速前进
+                v = 0.3; // 🚀 提速：将二分法前进速度也统一提高到 0.3 m/s
             }
 
             // 结合车头误差计算转向
             if(Math.abs(diff) > 0.8) {
-                v = (distError < 0) ? -0.05 : 0.05; // 角度偏大时降速
-                w = diff > 0 ? 0.4 : -0.4;
+                // 🚀 提速：即使在调整车头的大角度转向时，也保留 0.15 m/s 的底速防卡顿 (原为 0.05)
+                v = (distError < 0) ? -0.15 : 0.15; 
+                w = diff > 0 ? 0.6 : -0.6; // 适当增加转向角速度，让纠偏更利落
             } else {
-                w = diff * 1.0;
+                w = diff * 1.2; // 略微增加跟随时的响应灵敏度
             }
 
             if(typeof sendMoveCommand === 'function') {
@@ -4306,13 +4336,33 @@ if (msg.mag_data && msg.snd_data) {
             }
 
             // 3. 生成平行偏移的新路径
-            const offsetPath = [];
+            let offsetPath = []; // ⚠️ 注意：这里将 const 改为 let
             for (let i = 0; i < n; i++) {
                 offsetPath.push({
                     x: pathPoints[i].x + normals[i].nx * offsetDist,
                     y: pathPoints[i].y + normals[i].ny * offsetDist
                 });
             }
+
+            // ===================================================
+            // ✅ [新增] 路径平滑处理 (滑动平均滤波)
+            // 消除法向量计算放大的微小毛刺，让机器狗运动更丝滑
+            // ===================================================
+            const SMOOTH_ITERATIONS = 8; // 平滑迭代次数 (建议值 5~10，越大越平滑)
+            for (let iter = 0; iter < SMOOTH_ITERATIONS; iter++) {
+                let tempPath = [offsetPath[0]]; // 保留起点不动
+                for (let i = 1; i < offsetPath.length - 1; i++) {
+                    // 取前后各1个点和当前点，共3个点求重心平均值
+                    tempPath.push({
+                        x: (offsetPath[i-1].x + offsetPath[i].x + offsetPath[i+1].x) / 3.0,
+                        y: (offsetPath[i-1].y + offsetPath[i].y + offsetPath[i+1].y) / 3.0
+                    });
+                }
+                tempPath.push(offsetPath[offsetPath.length - 1]); // 保留终点不动
+                offsetPath = tempPath;
+            }
+            // ===================================================
+
             window.offsetCablePath = offsetPath; // 存入全局供 TO_START 状态调用
 
             // === 柔性并入逻辑 (以偏移路径为基准) ===
