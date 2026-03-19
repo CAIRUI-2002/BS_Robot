@@ -723,45 +723,7 @@ function computeMagnitudeFFT(realInput) {
             }
         });
     });
-    // ==========================================
-    // ✅ 新增：针对管线仪深度的非对称 1D 卡尔曼滤波器
-    // ==========================================
-    class DepthKalmanFilter {
-        constructor() {
-            this.q = 0.05; // 过程噪声：越小，越相信系统模型（表现为平滑但略微迟钝）
-            this.r = 2.0;  // 测量噪声：越大，越不相信原始测量值（表现为强力过滤波动）
-            this.p = 1.0;  // 估计误差协方差
-            this.x = null; // 当前最优估计深度
-        }
-
-        update(measurement) {
-            if (this.x === null) {
-                this.x = measurement;
-                return this.x;
-            }
-            
-            // 【核心优化】非对称噪声处理：
-            // 机器狗偏离正上方时，探测到的深度（斜边）必然变大。
-            let dynamicR = this.r;
-            if (measurement > this.x + 1.5) { 
-                // 1. 如果测量值突然增大超过 1.5cm，说明大概率是偏离了正上方，极度不信任这个大数值
-                dynamicR = this.r * 10.0; 
-            } else if (measurement < this.x) {
-                // 2. 如果测量值变小，说明机器狗正在回归正上方（越来越接近真实垂直深度），非常信任并快速收敛
-                dynamicR = this.r * 0.1; 
-            }
-
-            // 卡尔曼预测与更新
-            this.p = this.p + this.q;
-            const k = this.p / (this.p + dynamicR);
-            this.x = this.x + k * (measurement - this.x);
-            this.p = (1 - k) * this.p;
-
-            return this.x;
-        }
-    }
-    // 实例化全局深度滤波器
-    const depthKF = new DepthKalmanFilter();
+    
     // ==========================================
     // 3. WebSocket 与 机器人控制函数
     // ==========================================
@@ -797,10 +759,10 @@ function computeMagnitudeFFT(realInput) {
                     // 存入全局变量
                     window.g_pipelineSignal = signal;
                     
-                    // ✅ 修改：引入卡尔曼滤波，不再直接使用原始起伏的深度
+                    // ✅ 废弃卡尔曼滤波：上位机仅在突变时发深度，用全局变量接住，等待 3D 引擎回溯绑定
                     if (depth !== null) {
-                        window.g_pipelineRawDepth = depth; // 保留原始值供控制台调试
-                        window.g_pipelineDepth = depthKF.update(depth); // 存入滤波后的平滑真实深度
+                        window.g_pipelineRawDepth = depth; 
+                        window.g_newDepthReceived = depth; // 核心：将突变深度存入专门的回溯变量
                     }
 
                 } catch (e) {
@@ -3097,6 +3059,7 @@ if (msg.mag_data && msg.snd_data) {
     let lastCablePos = new THREE.Vector3(-999, -999, 0);
     let lastSignal = -1;
     let currentCableMesh = null;
+    let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
 
     // E. 网格与交互
     const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);
@@ -4693,8 +4656,8 @@ if (msg.mag_data && msg.snd_data) {
                 if (dist > 0.1) {
                     const cablePt = new THREE.Vector3(px, py, 0.08);
                     
-                    // ✅ 取消 sig===0 的限制与延迟回溯，直接绑定实时卡尔曼滤波后的最优深度
-                    cablePt.userData = { depth: window.g_pipelineDepth != null ? window.g_pipelineDepth : null }; 
+                    // 初始生成时深度设为 null，等待后端突变深度到达后进行“区间回溯绑定”
+                    cablePt.userData = { depth: null };
                     
                     cablePoints.push(cablePt);
                     lastCablePos = cablePt;
@@ -4730,6 +4693,33 @@ if (msg.mag_data && msg.snd_data) {
                 }
             }
             lastSignal = sig;
+
+            // ==========================================
+            // 🌟 核心修改：接收到突变深度时，执行“区间回溯绑定”
+            // ==========================================
+            if (window.g_newDepthReceived !== null && window.g_newDepthReceived !== undefined) {
+                let incomingDepth = window.g_newDepthReceived;
+                window.g_newDepthReceived = null; // 消费掉该次深度数据，防止下一帧重复绑定
+
+                if (cablePoints.length > 0) {
+                    // 1. 回溯绑定原始路径点 (从上一次游标位置，一直绑到当前最新位置)
+                    for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
+                        cablePoints[i].userData.depth = incomingDepth;
+                    }
+                    console.log(`📍 深度段落回溯绑定完成！区间: [${lastDepthUpdateIdx} ~ ${cablePoints.length - 1}], 深度值: ${incomingDepth}cm`);
+                    
+                    // 2. 同步更新已经卡尔曼平滑后的显示路径 (window.savedCablePath)
+                    // 以防用户恰好点中了平滑后的曲线段
+                    if (window.savedCablePath && window.savedCablePath.length === cablePoints.length) {
+                         for (let i = lastDepthUpdateIdx; i < window.savedCablePath.length; i++) {
+                             window.savedCablePath[i].userData.depth = incomingDepth;
+                         }
+                    }
+
+                    // 3. 更新游标！下一次上位机再发突变深度时，就会从这个位置开始往后绑
+                    lastDepthUpdateIdx = cablePoints.length;
+                }
+            }
         }
 
         const scan = data.scan;
