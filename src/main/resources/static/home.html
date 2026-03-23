@@ -422,10 +422,6 @@
                                 <span>路径规划与定位地图</span>
 
                                 <div class="header-btn-group">
-                                    <button id="btnCaptureFault" class="header-btn-mini"
-                                        style="background: rgba(0, 255, 128, 0.15); color: #00ff80; border: 1px solid #00ff80; font-weight: bold;">
-                                        📸 实景抓拍
-                                    </button>
 
                                     <button id="btnClearCloud" class="header-btn-mini">
                                         消除点云
@@ -508,7 +504,14 @@
                         <div class="pf-body" id="pipelineDataArea">
 
                             <div class="pipeline-upper">
-                                <div class="fault-capture-title">📸 破损点实景抓拍</div>
+                                <div
+                                    style="display: flex; justify-content: space-between; gap: 10px; margin-bottom: 8px; flex-shrink: 0; width: 100%;">
+                                    <button onclick="captureFaultLeftSequence()"
+                                        class="test-sequence-btn capture-btn-left"
+                                        style="margin: 0; flex: 1; justify-content: center;">📸 破损点左侧拍照</button>
+                                    <button onclick="captureFaultSequence()" class="test-sequence-btn capture-btn"
+                                        style="margin: 0; flex: 1; justify-content: center;">📸 破损点右侧拍照</button>
+                                </div>
                                 <div class="fault-capture-content">
                                     <div class="img-wrapper front-wrapper">
                                         <img id="dispCaptureFront" src="" alt="[ 空白 ] 等待点击破损点..." />
