@@ -1,5 +1,7 @@
 package com.example.demo1.controller;
 
+import java.util.Locale;
+
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -10,9 +12,9 @@ import org.springframework.web.client.RestTemplate;
 @RequestMapping("/arm")
 public class ArmController {
 
-    // ✅ 核心配置：机械臂树莓派的 IP (根据你之前的日志填写)
+    
     // 务必确保机器狗能 Ping 通这个 IP
-    private static final String ARM_IP = "10.21.31.200";
+    private static final String ARM_IP = "10.21.31.104";
     private static final String ARM_PORT = "5000";
 
     // Spring 自带的 HTTP 请求工具
@@ -61,7 +63,7 @@ public class ArmController {
         try {
             // 参数转换适配 pymycobot 协议
             // 1. 关节号：前端(0-5) -> Python(1-6)
-            int jointId = index + 1;
+            int jointId = index; // 适配 Piper Python 脚本从 0 开始的数组索引
 
             // 2. 方向：前端(1/-1) -> Python(1=正向, 0=反向)
             int dir = (direction > 0) ? 1 : 0;
@@ -100,6 +102,50 @@ public class ArmController {
         } catch (Exception e) {
             System.err.println("Stop Error: " + e.getMessage());
             return "Stop Error: " + e.getMessage();
+        }
+    }
+    /**
+     * ✅ 新增：末端位姿控制 (XYZ + RX RY RZ)
+     * URL: /arm/move_end?x=150&y=0&z=150&rx=0&ry=90&rz=0
+     */
+    @GetMapping("/move_end")
+    public String moveEndPose(
+            @RequestParam(defaultValue = "0") double x,
+            @RequestParam(defaultValue = "0") double y,
+            @RequestParam(defaultValue = "0") double z,
+            @RequestParam(defaultValue = "0") double rx,
+            @RequestParam(defaultValue = "0") double ry,
+            @RequestParam(defaultValue = "0") double rz
+    ) {
+        try {
+            String url = String.format(Locale.US,
+                    "http://%s:%s/move_end?x=%f&y=%f&z=%f&rx=%f&ry=%f&rz=%f",
+                    ARM_IP, ARM_PORT, x, y, z, rx, ry, rz
+            );
+            System.out.println("🚀 [Move End Pose]: " + url);
+            restTemplate.getForObject(url, String.class);
+            return "End Pose Command Sent";
+        } catch (Exception e) {
+            return "Move End Error: " + e.getMessage();
+        }
+    }
+    /**
+     * ✅ 新增：末端点动开始接口 (连续平滑移动)
+     * URL: /arm/jog_end?axis=0&direction=1
+     * axis: 0=X, 1=Y, 2=Z, 3=RX, 4=RY, 5=RZ
+     */
+    @GetMapping("/jog_end")
+    public String jogEndRobot(
+            @RequestParam int axis,
+            @RequestParam int direction
+    ) {
+        try {
+            int dir = (direction > 0) ? 1 : -1;
+            String url = String.format("http://%s:%s/jog_end?axis=%d&direction=%d", ARM_IP, ARM_PORT, axis, dir);
+            restTemplate.getForObject(url, String.class);
+            return "Cartesian Jog Started";
+        } catch (Exception e) {
+            return "Jog End Error: " + e.getMessage();
         }
     }
 }

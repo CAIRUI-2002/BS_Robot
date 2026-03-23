@@ -13,7 +13,7 @@
     // 这样无论你是用 localhost、127.0.0.1 还是 172.x.x.x 访问，
     // 它都会自动去连同一个 IP 的 8000 端口。
     const ARM_BACKEND_URL = "http://" + window.location.hostname + ":8080";
-    const ARM_API_BASE = "http://10.21.31.200:5000";
+    const ARM_API_BASE = "http://10.21.31.104:5000";
 
     // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
     window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
@@ -605,85 +605,75 @@ function computeMagnitudeFFT(realInput) {
         // ==========================================
 
         // 1. 确保端口正确 (你的 Python 代码是 5000)
-        // 如果你之前的 ARM_BACKEND_URL 定义在文件开头且是 8080，请修改它，或者在这里覆盖它
-        // ✅ 新代码 (正确：指向机械臂的 IP 10.21.31.200)
-        const ARM_API = "http://10.21.31.200:5000";
+        const ARM_API = "http://10.21.31.104:5000";
         // 🔴 状态标志位：是否已记录过错误（防止日志重复打印）
         let hasLoggedArmError = false;
 
         function fetchArmAngles() {
-            // 1. 如果正在忙于发送控制指令（防止串口冲突），跳过本次读取，稍后重试
             if (typeof isArmBusy !== 'undefined' && isArmBusy) {
                 setTimeout(fetchArmAngles, 100);
                 return;
             }
 
-            // 2. 定义下一次请求的延迟时间 (默认 100ms = 10Hz)
             let nextDelay = 100;
-
-            // 设置超时控制器 (500ms 超时)
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 500);
+            // 建议将超时时间放宽到 2000ms，防止网络波动导致两个请求互相掐断
+            const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-            // 发起请求
-            fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal })
-                .then(res => {
-                    clearTimeout(timeoutId); // 清除超时
-                    if (!res.ok) {
-                        throw new Error("Network response was not ok");
-                    }
-                    return res.json();
-                })
-                .then(data => {
-                    // --- ✅ 连接成功逻辑 ---
+            // ✅ 使用 Promise.all 同时拉取角度和位姿
+            Promise.all([
+                fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal })
+                    .then(res => res.ok ? res.json() : Promise.reject("Angles Error")),
+                fetch(ARM_API_BASE + "/get_end_pose", { signal: controller.signal })
+                    .then(res => res.ok ? res.json() : Promise.reject("Pose Error"))
+            ])
+            .then(([anglesData, poseData]) => {
+                clearTimeout(timeoutId);
 
-                    // 如果之前报过错，说明刚从断线中恢复
-                    if (hasLoggedArmError) {
-                        console.log("%c✅ 机械臂连接已恢复！切换回高速模式。", "color: green; font-weight: bold;");
-                        hasLoggedArmError = false; // 重置错误锁
+                // --- 处理关节角度 ---
+                if (hasLoggedArmError) {
+                    console.log("%c✅ 机械臂连接已恢复！", "color: green; font-weight: bold;");
+                    hasLoggedArmError = false; 
+                    const container = document.getElementById('armDataDisplay');
+                    if(container) container.style.opacity = "1";
+                }
 
-                        // 恢复界面亮度 (可选)
-                        const container = document.getElementById('armDataDisplay');
-                        if(container) container.style.opacity = "1";
-                    }
+                if (Array.isArray(anglesData) && anglesData.length === 6) {
+    // ✅ 核心修复：将真实关节角度同步到全局状态，防止下次单关节控制时从旧角度起步
+    if (typeof currentAngles !== 'undefined') {
+        currentAngles = [...anglesData];
+    }
+    
+    for(let i=0; i<6; i++) {
+        const el = document.getElementById('disp_j' + (i+1));
+        if(el) {
+            let val = anglesData[i];
+            if (Math.abs(val) < 0.5) val = 0.0;
+            el.textContent = val.toFixed(1);
+        }
+    }
+}
 
-                    // 更新界面数值
-                    if (Array.isArray(data) && data.length === 6) {
-                        for(let i=0; i<6; i++) {
-                            // 注意：你的HTML里ID是 disp_j1 ... disp_j6
-                            const el = document.getElementById('disp_j' + (i+1));
-                            if(el) {
-                                let val = data[i];
-                                // 视觉死区过滤：小于 0.5 度显示为 0.0，防止数字乱跳
-                                if (Math.abs(val) < 0.5) val = 0.0;
-                                el.textContent = val.toFixed(1);
-                            }
-                        }
-                    }
-                })
-                .catch(err => {
-                    clearTimeout(timeoutId);
-
-                    // --- ❌ 连接失败逻辑 ---
-
-                    // 只有当“之前没报过错”时，才打印警告，防止控制台黄字刷屏
-                    if (!hasLoggedArmError) {
-                        console.warn("⚠️ 机械臂未连接 (后端未启动?)，转为低速心跳模式 (2s/次) 以防刷屏。");
-                        hasLoggedArmError = true; // 上锁
-
-                        // 让界面变暗表示离线 (可选)
-                        const container = document.getElementById('armDataDisplay');
-                        if(container) container.style.opacity = "0.5";
-                    }
-
-                    // 🔥 关键：连接失败时，将下次请求推迟到 2000ms 后
-                    // 这能让浏览器的红色报错频率降低 20 倍！
-                    nextDelay = 2000;
-                })
-                .finally(() => {
-                    // 🔄 递归调用：无论成功失败，都通过 setTimeout 发起下一次请求
-                    setTimeout(fetchArmAngles, nextDelay);
-                });
+                // --- 处理末端位姿 ---
+                if (Array.isArray(poseData) && poseData.length === 6) {
+                    currentEndPose = [...poseData];
+                    isEndPoseSynced = true;
+                }
+            })
+            .catch(err => {
+                clearTimeout(timeoutId);
+                if (!hasLoggedArmError) {
+                    console.warn("⚠️ 机械臂未连接，转为低速模式以防刷屏。");
+                    hasLoggedArmError = true; 
+                    const container = document.getElementById('armDataDisplay');
+                    if(container) container.style.opacity = "0.5";
+                }
+                nextDelay = 2000;
+            })
+            .finally(() => {
+                // 🔥 整个函数只能在这里出现一次 setTimeout！
+                setTimeout(fetchArmAngles, nextDelay);
+            });
         }
 
         // 🔥 启动第一次请求 (不要再用 setInterval 了！)
@@ -1829,20 +1819,86 @@ function computeMagnitudeFFT(realInput) {
     var currentAngles = [0, 0, 0, 0, 0, 0];
 
     // 辅助函数：限制角度范围 (防止撞机)
-    function clampAngle(angle) {
-        // 这里的范围 -170 到 170 是 myCobot 的物理极限参考
-        return Math.max(-170, Math.min(170, angle));
+    // ✅ 修改：定义 6 个关节的独立运动范围 (请根据图片修正具体数值)
+    const JOINT_LIMITS = [
+        { min: -154, max: 154 }, // J1 基座
+        { min: 0, max: 195 },   // J2 大臂
+        { min: -175, max: 0 }, // J3 小臂
+        { min: -102, max: 102 }, // J4 腕旋
+        { min: -75, max: 75 },   // J5 腕折
+        { min: -170, max: 170 }  // J6 末端
+    ];
+    // ✅ 修改：传入 index 以获取对应关节的限位
+    function clampAngle(index, angle) {
+        const limit = JOINT_LIMITS[index];
+        return Math.max(limit.min, Math.min(limit.max, angle));
     }
 
-    // 5.1 末端坐标控制 (XYZ)
-    // 注意：目前的 Java 后端脚本只接受 6 个关节角度。
-    // 如果要支持 XYZ，需要在 Python 脚本中实现逆运动学 (IK)。
-    window.controlArm = function(x, y, z) {
-        console.warn("⚠️ 后端暂仅支持关节角度控制，XYZ 控制需集成逆运动学。");
-        alert("XYZ 控制暂时不可用，请使用下方的关节控制面板。");
+    // 🔴 记录当前的末端位姿状态 (需确保定义在全局)
+    var currentEndPose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    var isEndPoseSynced = false; 
 
-        // 如果未来实现了 IK，调用方式大概如下：
-        // fetch(`${ARM_BACKEND_URL}/arm/move_ik?x=${x}&y=${y}&z=${z}...`)
+    // ✅ 新增：末端控制的定时器与锁
+    let cartesianJogTimer = null; 
+
+    // 5.1 增量式末端控制 (核心修改：立即更新本地状态，支持高频累加)
+    window.controlArmStep = function(dx, dy, dz, drx = 0, dry = 0, drz = 0) {
+        if (!isEndPoseSynced) {
+            console.warn("⚠️ 正在同步机械臂真实坐标，请稍后再点击！");
+            return;
+        }
+        
+        // 计算目标坐标
+        const targetX = currentEndPose[0] + dx;
+        const targetY = currentEndPose[1] + dy;
+        const targetZ = currentEndPose[2] + dz;
+        const targetRX = currentEndPose[3] + drx;
+        const targetRY = currentEndPose[4] + dry;
+        const targetRZ = currentEndPose[5] + drz;
+
+        // ✅ 核心：立即更新本地全局状态！
+        // 这样在定时器下一次循环到来时，就会在这个新坐标的基础上继续做加法，而不会等后端的慢反馈
+        currentEndPose[0] = targetX;
+        currentEndPose[1] = targetY;
+        currentEndPose[2] = targetZ;
+        currentEndPose[3] = targetRX;
+        currentEndPose[4] = targetRY;
+        currentEndPose[5] = targetRZ;
+
+        const url = `${ARM_BACKEND_URL}/arm/move_end?x=${targetX}&y=${targetY}&z=${targetZ}&rx=${targetRX}&ry=${targetRY}&rz=${targetRZ}`;
+
+        fetch(url, { method: "GET" })
+            .catch(err => console.error("⚠️ 末端控制请求失败:", err));
+    };
+
+    // ✅ 废弃定时器，仅标记状态
+    let isCartesianJogging = false; 
+
+    // ✅ 新增：长按开始末端连续运动
+    // 参数 axis: 0(X), 1(Y), 2(Z), 3(RX), 4(RY), 5(RZ)
+    // 参数 direction: 1 (正向) 或 -1 (反向)
+    window.startCartesianJog = function(axis, direction, event) {
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        
+        if (isCartesianJogging) return; 
+        isCartesianJogging = true;
+
+        console.log(`🚀 [前端] 开始末端连续运动: 轴 ${axis} 方向 ${direction}`);
+        const url = `${ARM_BACKEND_URL}/arm/jog_end?axis=${axis}&direction=${direction}`;
+        fetch(url).catch(err => console.error("Start 失败:", err));
+    };
+
+    // ✅ 新增：松开按钮停止运动 (复用已有的 /arm/stop)
+    window.stopCartesianJog = function() {
+        if (!isCartesianJogging) return;
+        isCartesianJogging = false;
+        
+        console.log("🛑 [前端] 松开按钮，末端长按运动停止");
+        const url = `${ARM_BACKEND_URL}/arm/stop`;
+        fetch(url).catch(err => console.error("Stop 失败:", err));
     };
 
     // 5.2 关节控制 (点击按钮步进)
@@ -1855,7 +1911,8 @@ function computeMagnitudeFFT(realInput) {
         let newAngle = currentAngles[index] + (direction > 0 ? step : -step);
 
         // 限制角度范围
-        newAngle = clampAngle(newAngle);
+        // ✅ 修改：传入 index 参数
+        newAngle = clampAngle(index, newAngle);
 
         // 更新全局状态
         currentAngles[index] = newAngle;
@@ -1899,7 +1956,7 @@ function computeMagnitudeFFT(realInput) {
         console.log("🧪 开始机械臂一键测试...");
 
         // 1. 定义动作 A：所有关节去 20 度
-        const target20 = [20, 20, 20, 20, 20, 20];
+        const target20 = [20, 20, -20, 20, 20, 20];
         const speed = 50;
 
         // 更新全局状态 (很重要！否则下次点击单关节控制时位置会乱)
@@ -1936,6 +1993,123 @@ function computeMagnitudeFFT(realInput) {
             // alert("测试序列完成！");
         }, 1000);
     };
+    // ==========================================
+// 5.4 ✅ 破损点右侧拍照位姿序列 (丝滑过渡版)
+// ==========================================
+window.captureFaultSequence = function() {
+    console.log("📸 开始机械臂破损点【右侧】拍照序列...");
+
+    // 1. 定义动作 A：右侧拍照点 J1 为负 90 度
+    const targetPose1 = [-90, 150, -80, 0, 60, 0];
+    const speed = 50;
+
+    // 更新全局状态，防止后续单击单关节控制时位置错乱
+    if (typeof currentAngles !== 'undefined') {
+        currentAngles = [...targetPose1];
+    }
+
+    // 发送动作 A 指令
+    const queryPose1 = targetPose1.map((a, i) => `j${i+1}=${a}`).join("&");
+    const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
+
+    console.log("🚀 动作1: 前往右侧拍照姿态", targetPose1);
+    fetch(urlPose1).then(res => res.text()).then(msg => {
+        console.log("右侧拍照姿态到达反馈:", msg);
+        // 💡 如果需要触发抓拍，解开下面的注释即可
+        // fetch("http://10.21.31.104:5000/api/capture").catch(err => console.error("抓拍失败", err));
+    });
+
+    // 2. 必须结结实实等 2000 毫秒（2秒），让机械臂停稳拍照
+    setTimeout(() => {
+        console.log("🔄 动作2: 2秒停留结束，抬起至右侧过渡姿态");
+
+        // 定义右侧过渡角度 [-90, 90, -80, 0, 60, 0]
+        const targetPose2 = [-90, 90, -80, 0, 60, 0];
+        
+        if (typeof currentAngles !== 'undefined') {
+            currentAngles = [...targetPose2];
+        }
+
+        const queryPose2 = targetPose2.map((a, i) => `j${i+1}=${a}`).join("&");
+        const urlPose2 = `${ARM_BACKEND_URL}/arm/move?${queryPose2}&speed=${speed}`;
+
+        fetch(urlPose2).then(res => res.text()).then(msg => console.log("发送右侧过渡姿态指令"));
+
+        // 3. 💡 核心丝滑逻辑：在机械臂即将到达过渡点、还没来得及减速时 (约 800ms)
+        // 提前下发归零指令，底层硬件会自动把两段路径像画圆弧一样平滑拼接
+        setTimeout(() => {
+            console.log("🔄 动作3: 顺滑切入归零轨迹");
+
+            const target0 = [0, 0, 0, 0, 0, 0];
+
+            if (typeof currentAngles !== 'undefined') {
+                currentAngles = [...target0];
+            }
+
+            const query0 = target0.map((a, i) => `j${i+1}=${a}`).join("&");
+            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+
+            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
+
+        }, 800); // ⏱️ 如果实机测试时发现抬起高度不够就往回收，可改大(如1000)；如果过渡点仍有顿挫，可改小(如600)
+
+    }, 2000); 
+};
+// ==========================================
+// 5.5 ✅ 破损点左侧拍照位姿序列 (丝滑过渡版)
+// ==========================================
+window.captureFaultLeftSequence = function() {
+    console.log("📸 开始机械臂破损点【左侧】拍照序列...");
+
+    // 动作 A：左侧拍照点 J1 为正 90 度
+    const targetPose1 = [90, 150, -80, 0, 60, 0];
+    const speed = 50;
+
+    if (typeof currentAngles !== 'undefined') {
+        currentAngles = [...targetPose1];
+    }
+
+    const queryPose1 = targetPose1.map((a, i) => `j${i+1}=${a}`).join("&");
+    const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
+
+    console.log("🚀 动作1: 前往左侧拍照姿态", targetPose1);
+    fetch(urlPose1).then(res => res.text()).then(msg => console.log("左侧拍照到达反馈:", msg));
+
+    // 停留 2000 毫秒后，开始抬起
+    setTimeout(() => {
+        console.log("🔄 动作2: 拍照完成，抬起至左侧过渡姿态");
+
+        // 左侧过渡点
+        const targetPose2 = [90, 90, -80, 0, 60, 0];
+        
+        if (typeof currentAngles !== 'undefined') {
+            currentAngles = [...targetPose2];
+        }
+
+        const queryPose2 = targetPose2.map((a, i) => `j${i+1}=${a}`).join("&");
+        const urlPose2 = `${ARM_BACKEND_URL}/arm/move?${queryPose2}&speed=${speed}`;
+
+        fetch(urlPose2).then(res => res.text()).then(msg => console.log("发送左侧过渡姿态指令"));
+
+        // 在即将到达过渡点时 (约 800ms) 提前下发归零指令，实现圆滑过渡
+        setTimeout(() => {
+            console.log("🔄 动作3: 顺滑切入归零轨迹");
+
+            const target0 = [0, 0, 0, 0, 0, 0];
+
+            if (typeof currentAngles !== 'undefined') {
+                currentAngles = [...target0];
+            }
+
+            const query0 = target0.map((a, i) => `j${i+1}=${a}`).join("&");
+            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+
+            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
+
+        }, 800); // ⏱️ 如果你发现它顿挫了，可以把 800 适当调小(如 600)；如果没抬够高度就收回去了，可以调大(如 1000)
+
+    }, 2000); 
+};
     // 全局变量，记录状态
     let isStopping = false; // 是否正在停止中
     // ==========================================
@@ -4821,4 +4995,4 @@ if (msg.mag_data && msg.snd_data) {
     }).observe(container);
 })();
 
-})(); // ✅✅✅ [关键修复] 这里加上了最外层的闭包结束括号！
+})(); 

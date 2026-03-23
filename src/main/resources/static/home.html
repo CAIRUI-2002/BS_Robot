@@ -1,575 +1,561 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8" />
     <title>巡检机器人作业平台</title>
     <link rel="stylesheet" href="/css/home.css" />
 </head>
+
 <body>
-<div class="home-page">
-    <div class="top-banner">
-        <img src="/img/title.png" alt="巡检机器人作业平台" />
-    </div>
+    <div class="home-page">
+        <div class="top-banner">
+            <img src="/img/title.png" alt="巡检机器人作业平台" />
+        </div>
 
-    <div class="layout">
-        <aside class="left-panel">
+        <div class="layout">
+            <aside class="left-panel">
 
-<section class="panel panel-info">
-    <div class="panel-header">信息栏</div>
-    <div class="panel-body" id="infoArea">
-        <div class="info-list">
-            
-            <div class="info-item">
-                <span class="info-label">通信链路：</span>
-                <span id="robotConnectionBadge" class="status-badge offline">离线</span>
-            </div>
+                <section class="panel panel-info">
+                    <div class="panel-header">信息栏</div>
+                    <div class="panel-body" id="infoArea">
+                        <div class="info-list">
 
-            <div class="info-item">
-                <span class="info-label">运行状态：</span>
-                <span id="currentModeLabel" class="info-value">未知</span>
-            </div>
+                            <div class="info-item">
+                                <span class="info-label">通信链路：</span>
+                                <span id="robotConnectionBadge" class="status-badge offline">离线</span>
+                            </div>
 
-            <div class="info-item">
-                <span class="info-label">电磁信号：</span>
-                <span id="magSignalVal" class="info-value">0</span>
-                <span class="unit-label"> (Max)</span>
-            </div>
+                            <div class="info-item">
+                                <span class="info-label">运行状态：</span>
+                                <span id="currentModeLabel" class="info-value">未知</span>
+                            </div>
 
-            <div class="info-item" style="justify-content: space-between; align-items: center;">
-                <span class="info-label">Z-score阈值：</span>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <button class="joint-btn minus" 
-                            onclick="adjustAucParam('ZSCORE', -0.5)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-                    
-                    <span id="sensitivityDisplay" class="info-value" 
-                          style="min-width: 40px; text-align: center; color: #00ff00;">3.0</span>
-                    
-                    <button class="joint-btn plus" 
-                            onclick="adjustAucParam('ZSCORE', 0.5)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                            <div class="info-item">
+                                <span class="info-label">电磁信号：</span>
+                                <span id="magSignalVal" class="info-value">0</span>
+                                <span class="unit-label"> (Max)</span>
+                            </div>
+
+                            <div class="info-item" style="justify-content: space-between; align-items: center;">
+                                <span class="info-label">Z-score阈值：</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button class="joint-btn minus" onclick="adjustAucParam('ZSCORE', -0.5)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+
+                                    <span id="sensitivityDisplay" class="info-value"
+                                        style="min-width: 40px; text-align: center; color: #00ff00;">3.0</span>
+
+                                    <button class="joint-btn plus" onclick="adjustAucParam('ZSCORE', 0.5)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                                </div>
+                            </div>
+
+                            <div class="info-item" style="justify-content: space-between; align-items: center;">
+                                <span class="info-label">脉冲阈值：</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button class="joint-btn minus" onclick="adjustAucParam('PULSE', -20)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+
+                                    <span id="disp_pulse_threshold" class="info-value"
+                                        style="min-width: 40px; text-align: center; color: #00e5ff;">500</span>
+
+                                    <button class="joint-btn plus" onclick="adjustAucParam('PULSE', 20)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                                </div>
+                            </div>
+
+                            <div class="info-item" style="justify-content: space-between; align-items: center;">
+                                <span class="info-label">能量积分：</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button class="joint-btn minus" onclick="adjustAucParam('AUC', -100)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+
+                                    <span id="disp_auc_threshold" class="info-value"
+                                        style="min-width: 50px; text-align: center; color: #ffd700;">2500</span>
+
+                                    <button class="joint-btn plus" onclick="adjustAucParam('AUC', 100)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                                </div>
+                            </div>
+
+                            <div class="info-item" style="justify-content: space-between; align-items: center;">
+                                <span class="info-label">频显下限：</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button class="joint-btn minus" onclick="adjustFftParam('MIN', -50)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+                                    <span id="disp_fft_min" class="info-value"
+                                        style="min-width: 50px; text-align: center; color: #ff99ff;">300</span>
+                                    <button class="joint-btn plus" onclick="adjustFftParam('MIN', 50)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                                </div>
+                            </div>
+
+                            <div class="info-item" style="justify-content: space-between; align-items: center;">
+                                <span class="info-label">频显上限：</span>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <button class="joint-btn minus" onclick="adjustFftParam('MAX', -50)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
+                                    <span id="disp_fft_max" class="info-value"
+                                        style="min-width: 50px; text-align: center; color: #ff3333;">600</span>
+                                    <button class="joint-btn plus" onclick="adjustFftParam('MAX', 50)"
+                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </section>
+
+                <section class="panel panel-op">
+                    <div class="panel-header">操作栏</div>
+                    <div class="panel-body" id="operationArea">
+
+                        <div class="side-control-pad fill-area">
+                            <div class="side-row">
+                                <button class="dir-btn mini-btn" id="btnSideMoveForward">▲</button>
+                            </div>
+
+                            <div class="side-row">
+                                <button class="dir-btn mini-btn" id="btnSideTurnLeft">◀</button>
+                                <button class="stop-btn mini-btn" id="btnSideStop">STOP</button>
+                                <button class="dir-btn mini-btn" id="btnSideTurnRight">▶</button>
+                            </div>
+
+                            <div class="side-row">
+                                <button class="dir-btn mini-btn" id="btnSideMoveBackward">▼</button>
+                            </div>
+
+                            <div class="side-row">
+                                <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeLeft">⇠</button>
+                                <span class="side-label">横移</span>
+                                <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeRight">⇢</button>
+                            </div>
+                        </div>
+
+                        <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 5px 0;"></div>
+
+                        <div class="sidebar-mode-group fill-area">
+                            <button id="btnDogStand" class="tech-mode-btn full-fill">
+                                <span class="btn-icon"></span> 机器狗站立
+                            </button>
+
+                            <button id="btnDogControl" class="tech-mode-btn full-fill">
+                                <span class="btn-icon"></span> 常规模式
+                            </button>
+
+                            <button id="btnAutoTrack" class="tech-mode-btn full-fill">
+                                <span class="btn-icon">📡</span> 启动自动巡线
+                            </button>
+                        </div>
+
+                    </div>
+                </section>
+
+
+            </aside>
+
+            <main class="main-area" id="mainArea">
+
+                <div id="gprPanel" class="gpr-panel hidden">
+                    <div class="gpr-controls">
+                        <label for="folderPathInput">数据文件夹路径（服务器上）：</label>
+                        <input type="text" id="folderPathInput"
+                            placeholder="例如：/mnt/e/Software/IdeaProjects/demo3/data" />
+
+                        <label for="segmentSelect">剖面：</label>
+                        <select id="segmentSelect" disabled>
+                            <option value="">未加载</option>
+                        </select>
+
+                        <button id="btnStartGpr">开始处理</button>
+                        <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
+                        <span id="gprStatus" class="gpr-status"></span>
+                    </div>
+
+                    <div class="gpr-views">
+                        <div class="gpr-view">
+                            <h3>原始二维剖面</h3>
+                            <canvas id="raw2dCanvas"></canvas>
+                        </div>
+                        <div class="gpr-view">
+                            <h3>偏移后二维剖面</h3>
+                            <canvas id="mig2dCanvas"></canvas>
+                        </div>
+                        <div class="gpr-view gpr-view-3d">
+                            <h3>三维视图（偏移后数据）</h3>
+                            <div id="threeContainer"></div>
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            <div class="info-item" style="justify-content: space-between; align-items: center;">
-                <span class="info-label">脉冲阈值：</span>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <button class="joint-btn minus" 
-                            onclick="adjustAucParam('PULSE', -20)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-                    
-                    <span id="disp_pulse_threshold" class="info-value" 
-                          style="min-width: 40px; text-align: center; color: #00e5ff;">500</span>
-                    
-                    <button class="joint-btn plus" 
-                            onclick="adjustAucParam('PULSE', 20)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                <div id="robotNavPanel" class="robot-panel hidden">
+                    <div class="robot-left-col">
+
+                        <div class="nav-display-area video-container">
+
+                            <div class="video-box">
+                                <span class="video-label-overlay label-front">
+                                    ● 前视广角
+                                </span>
+                                <img src="http://10.21.31.104:5000/front_feed" class="stream-img" alt="连接中..."
+                                    onerror="this.alt='无法连接视频服务';" />
+                            </div>
+
+                            <div class="video-box">
+                                <span class="video-label-overlay label-rear">
+                                    ● 后视广角
+                                </span>
+                                <img src="http://10.21.31.104:5000/rear_feed" class="stream-img" alt="连接中..."
+                                    onerror="this.alt='无法连接视频服务';" />
+                            </div>
+
+                        </div>
+
+                        <div class="nav-control-area">
+
+                            <div class="nc-left-speed">
+
+                                <div class="speed-group-fill">
+                                    <div class="speed-header">🎮 手动模式 (m/s)</div>
+                                    <div class="slider-row">
+                                        <span class="slider-label">前进:</span>
+                                        <input type="range" id="manualSpeedX" class="custom-range" min="0" max="3.0"
+                                            step="0.5" value="0.5" oninput="updateSpeedLabel('valManX', this.value)">
+                                        <span id="valManX" class="val-number">0.5</span>
+                                    </div>
+                                    <div class="slider-row">
+                                        <span class="slider-label">横移:</span>
+                                        <input type="range" id="manualSpeedY" class="custom-range" min="0" max="3.0"
+                                            step="0.5" value="0.5" oninput="updateSpeedLabel('valManY', this.value)">
+                                        <span id="valManY" class="val-number">0.5</span>
+                                    </div>
+                                </div>
+
+                                <div class="speed-group-fill">
+                                    <div class="speed-header">📡 巡线模式 (m/s)</div>
+                                    <div class="slider-row">
+                                        <span class="slider-label">前进:</span>
+                                        <input type="range" id="autoSpeedX" class="custom-range" min="0" max="3.0"
+                                            step="0.2" value="0.2" onchange="updateAutoSpeed()">
+                                        <span id="valAutoX" class="val-number">0.2</span>
+                                    </div>
+                                    <div class="slider-row">
+                                        <span class="slider-label">横移:</span>
+                                        <input type="range" id="autoSpeedY" class="custom-range" min="0" max="3.0"
+                                            step="0.2" value="0.2" onchange="updateAutoSpeed()">
+                                        <span id="valAutoY" class="val-number">0.2</span>
+                                    </div>
+                                </div>
+
+                            </div>
+
+                            <div class="nc-right-arm-video" id="armDataDisplay">
+                                <div class="arm-data-container">
+                                    <div class="arm-data-header">
+                                        <span class="pulse-dot">●</span> 机械臂实时姿态 (°)
+                                    </div>
+                                    <div class="arm-joints-grid">
+                                        <div class="joint-box">
+                                            <span class="j-label">J1 基座</span>
+                                            <span class="j-val" id="disp_j1">--</span>
+                                        </div>
+                                        <div class="joint-box">
+                                            <span class="j-label">J2 大臂</span>
+                                            <span class="j-val" id="disp_j2">--</span>
+                                        </div>
+                                        <div class="joint-box">
+                                            <span class="j-label">J3 小臂</span>
+                                            <span class="j-val" id="disp_j3">--</span>
+                                        </div>
+                                        <div class="joint-box">
+                                            <span class="j-label">J4 腕旋</span>
+                                            <span class="j-val" id="disp_j4">--</span>
+                                        </div>
+                                        <div class="joint-box">
+                                            <span class="j-label">J5 腕折</span>
+                                            <span class="j-val" id="disp_j5">--</span>
+                                        </div>
+                                        <div class="joint-box">
+                                            <span class="j-label">J6 末端</span>
+                                            <span class="j-val" id="disp_j6">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+
+                    <div class="robot-right-col">
+                        <div class="control-group-box">
+                            <div class="group-title">末端姿态控制 (Cartesian)</div>
+                            <div class="cartesian-grid">
+                                <div class="cart-col">
+                                    <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, 1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(2, 1, event)"
+                                        ontouchend="stopCartesianJog()">⬆<br>升</button>
+                                    <div class="axis-label">Z轴</div>
+                                    <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, -1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(2, -1, event)"
+                                        ontouchend="stopCartesianJog()">⬇<br>降</button>
+                                </div>
+
+                                <div class="cart-dpad">
+                                    <div class="dpad-row">
+                                        <button class="cart-btn" onmousedown="startCartesianJog(0, 1, event)"
+                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                            ontouchstart="startCartesianJog(0, 1, event)"
+                                            ontouchend="stopCartesianJog()">前</button>
+                                    </div>
+                                    <div class="dpad-row">
+                                        <button class="cart-btn" onmousedown="startCartesianJog(1, 1, event)"
+                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                            ontouchstart="startCartesianJog(1, 1, event)"
+                                            ontouchend="stopCartesianJog()">左</button>
+                                        <div class="dpad-center"></div>
+                                        <button class="cart-btn" onmousedown="startCartesianJog(1, -1, event)"
+                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                            ontouchstart="startCartesianJog(1, -1, event)"
+                                            ontouchend="stopCartesianJog()">右</button>
+                                    </div>
+                                    <div class="dpad-row">
+                                        <button class="cart-btn" onmousedown="startCartesianJog(0, -1, event)"
+                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                            ontouchstart="startCartesianJog(0, -1, event)"
+                                            ontouchend="stopCartesianJog()">后</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="control-group-box joints-group">
+                            <div class="group-header-flex">
+                                <div class="group-title">关节独立控制 (Joints)</div>
+                                <div style="display: flex; gap: 8px;">
+                                    <button onclick="captureFaultLeftSequence()"
+                                        class="test-sequence-btn capture-btn-left">📸 破损点左侧拍照</button>
+                                    <button onclick="captureFaultSequence()" class="test-sequence-btn capture-btn">📸
+                                        破损点右侧拍照</button>
+                                    <button onclick="testArmSequence()" class="test-sequence-btn">一键测试</button>
+                                </div>
+                            </div>
+                            <div class="joint-list">
+                                <div class="joint-row">
+                                    <span class="joint-label">J1 基座</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(0, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(0, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(0, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(0, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+
+                                <div class="joint-row">
+                                    <span class="joint-label">J2 大臂</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(1, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(1, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(1, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(1, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+
+                                <div class="joint-row">
+                                    <span class="joint-label">J3 小臂</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(2, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(2, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(2, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(2, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+
+                                <div class="joint-row">
+                                    <span class="joint-label">J4 腕旋</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(3, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(3, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(3, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(3, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+
+                                <div class="joint-row">
+                                    <span class="joint-label">J5 腕折</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(4, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(4, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(4, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(4, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+
+                                <div class="joint-row">
+                                    <span class="joint-label">J6 末端</span>
+                                    <button class="joint-btn minus" onmousedown="startArmJog(5, -1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(5, -1, event)" ontouchend="stopArmJog()">-</button>
+                                    <button class="joint-btn plus" onmousedown="startArmJog(5, 1, event)"
+                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                        ontouchstart="startArmJog(5, 1, event)" ontouchend="stopArmJog()">+</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            <div class="info-item" style="justify-content: space-between; align-items: center;">
-                <span class="info-label">能量积分：</span>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <button class="joint-btn minus" 
-                            onclick="adjustAucParam('AUC', -100)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-                    
-                    <span id="disp_auc_threshold" class="info-value" 
-                          style="min-width: 50px; text-align: center; color: #ffd700;">2500</span>
-                    
-                    <button class="joint-btn plus" 
-                            onclick="adjustAucParam('AUC', 100)"
-                            style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
+                <div id="pathFaultPanel" class="path-fault-panel hidden">
+                    <div class="pf-col pf-side">
+                        <div class="pf-header">信号强度监测 (声波/电磁波)</div>
+                        <div class="pf-body" id="signalDataArea">
+                            <canvas id="signalCanvas"></canvas>
+                            <div id="signalStatus">WAITING...</div>
+                        </div>
+                    </div>
+
+                    <div class="pf-col pf-center">
+                        <!-- Top Part: Map (75%) -->
+                        <div class="pf-map-wrapper">
+                            <div class="pf-header pf-header-flex">
+                                <span>路径规划与定位地图</span>
+
+                                <div class="header-btn-group">
+                                    <button id="btnCaptureFault" class="header-btn-mini"
+                                        style="background: rgba(0, 255, 128, 0.15); color: #00ff80; border: 1px solid #00ff80; font-weight: bold;">
+                                        📸 实景抓拍
+                                    </button>
+
+                                    <button id="btnClearCloud" class="header-btn-mini">
+                                        消除点云
+                                    </button>
+
+                                    <button id="btnClearFaults" class="header-btn-mini">
+                                        消除破损点
+                                    </button>
+
+                                    <button id="btnClearDogPath" class="header-btn-mini">
+                                        消除机器狗路径
+                                    </button>
+
+                                    <button id="btnClearCablePath" class="header-btn-mini">
+                                        消除电缆路径
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="pf-body map-container" id="pathMapArea"
+                                style="position: relative; overflow: hidden; background: #111;">
+
+                                <div id="cableInfoPopup" class="cable-info-popup" style="display: none;">
+                                    <div class="popup-close"
+                                        onclick="document.getElementById('cableInfoPopup').style.display='none'">×</div>
+                                    <div class="popup-title">📌 电缆测点信息</div>
+                                    <div class="popup-item"><strong>距离起点：</strong> <span id="popupDist"
+                                            class="hl-text">--</span> m</div>
+                                    <div class="popup-item"><strong>预估埋深：</strong> <span id="popupDepth"
+                                            class="hl-text">待测</span></div>
+                                    <div class="popup-item"><strong>经纬度：</strong> <span id="popupGps"
+                                            class="hl-text">未知</span></div>
+                                </div>
+
+                                <div class="map-nav-overlay">
+
+                                    <div id="navInfoPanel" class="nav-info-box" style="display: none;">
+                                        <div>目标距离: <span id="navDistVal"
+                                                style="color: #00ff00; font-weight: bold;">0.00</span> m</div>
+                                        <div style="margin-top: 4px; font-size: 11px; color: #aaa;">
+                                            平均误差: <span id="navErrorVal" style="color: #00e5ff;">--</span> m
+                                        </div>
+                                    </div>
+
+                                    <button id="btnSetNavPoint" class="nav-overlay-btn" title="点击后在地图上选点">
+                                        📍 选点
+                                    </button>
+                                    <button id="btnStartNav" class="nav-overlay-btn success" title="开始前往目标点">
+                                        ▶ 导航
+                                    </button>
+                                    <button id="btnClearNav" class="nav-overlay-btn danger" title="清除标记">
+                                        ✖ 清除
+                                    </button>
+                                </div>
+
+                            </div>
+                        </div>
+
+                        <!-- Bottom Part: Videos (25%) -->
+                        <div class="pf-video-wrapper">
+                            <div class="video-box">
+                                <span class="video-label-overlay label-front">
+                                    ● 前视广角
+                                </span>
+                                <img src="http://10.21.31.104:5000/front_feed" class="stream-img" alt="连接中..."
+                                    onerror="this.alt='无法连接视频服务';" />
+                            </div>
+
+                            <div class="video-box">
+                                <span class="video-label-overlay label-rear">
+                                    ● 后视广角
+                                </span>
+                                <img src="http://10.21.31.104:5000/rear_feed" class="stream-img" alt="连接中..."
+                                    onerror="this.alt='无法连接视频服务';" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="pf-col pf-side">
+                        <div class="pf-header">实景抓拍与管线方向指示</div>
+                        <div class="pf-body" id="pipelineDataArea">
+
+                            <div class="pipeline-upper">
+                                <div class="fault-capture-title">📸 破损点实景抓拍</div>
+                                <div class="fault-capture-content">
+                                    <div class="img-wrapper front-wrapper">
+                                        <img id="dispCaptureFront" src="" alt="[ 空白 ] 等待点击破损点..." />
+                                    </div>
+                                    <div class="img-wrapper rear-wrapper">
+                                        <img id="dispCaptureRear" src="" alt="[ 空白 ] 等待点击破损点..." />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="pipeline-lower">
+                                <div class="compass-container">
+
+                                    <div id="arrowRight" class="arrow-icon side-arrow">▶</div>
+
+                                    <div class="cable-assembly">
+                                        <div class="cable-up-arrow">▲</div>
+                                        <div class="cable-thick-line"></div>
+                                    </div>
+
+                                    <div id="arrowLeft" class="arrow-icon side-arrow">◀</div>
+
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
                 </div>
+
+            </main>
+        </div>
+
+        <div class="bottom-actions">
+            <div class="bottom-main-buttons">
+                <button class="action-btn" id="btnRobotNav">机器人控制与导航</button>
+                <button class="action-btn" id="btnPathFault">路径查找及故障定点</button>
+                <button class="action-btn" id="btn3DReconstruct">三维重建</button>
             </div>
-
-            <div class="info-item" style="justify-content: space-between; align-items: center;">
-    <span class="info-label">频显下限：</span>
-    <div style="display: flex; align-items: center; gap: 8px;">
-        <button class="joint-btn minus" onclick="adjustFftParam('MIN', -50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-        <span id="disp_fft_min" class="info-value" style="min-width: 50px; text-align: center; color: #ff99ff;">300</span>
-        <button class="joint-btn plus" onclick="adjustFftParam('MIN', 50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
-    </div>
-</div>
-
-<div class="info-item" style="justify-content: space-between; align-items: center;">
-    <span class="info-label">频显上限：</span>
-    <div style="display: flex; align-items: center; gap: 8px;">
-        <button class="joint-btn minus" onclick="adjustFftParam('MAX', -50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-        <span id="disp_fft_max" class="info-value" style="min-width: 50px; text-align: center; color: #ff3333;">600</span>
-        <button class="joint-btn plus" onclick="adjustFftParam('MAX', 50)" style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
-    </div>
-</div>
-            
+            <button class="emergency-btn">急停按钮</button>
         </div>
     </div>
-</section>
 
-            <section class="panel panel-op">
-                <div class="panel-header">操作栏</div>
-                <div class="panel-body" id="operationArea">
-
-                    <div class="side-control-pad fill-area">
-                        <div class="side-row">
-                            <button class="dir-btn mini-btn" id="btnSideMoveForward">▲</button>
-                        </div>
-
-                        <div class="side-row">
-                            <button class="dir-btn mini-btn" id="btnSideTurnLeft">◀</button>
-                            <button class="stop-btn mini-btn" id="btnSideStop">STOP</button>
-                            <button class="dir-btn mini-btn" id="btnSideTurnRight">▶</button>
-                        </div>
-
-                        <div class="side-row">
-                            <button class="dir-btn mini-btn" id="btnSideMoveBackward">▼</button>
-                        </div>
-
-                        <div class="side-row">
-                            <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeLeft">⇠</button>
-                            <span class="side-label">横移</span>
-                            <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeRight">⇢</button>
-                        </div>
-                    </div>
-
-                    <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 5px 0;"></div>
-
-                    <div class="sidebar-mode-group fill-area">
-                        <button id="btnDogStand" class="tech-mode-btn full-fill">
-                            <span class="btn-icon"></span> 机器狗站立
-                        </button>
-
-                        <button id="btnDogControl" class="tech-mode-btn full-fill">
-                            <span class="btn-icon"></span> 常规模式
-                        </button>
-
-                        <button id="btnAutoTrack" class="tech-mode-btn full-fill">
-                            <span class="btn-icon">📡</span> 启动自动巡线
-                        </button>
-                    </div>
-
-                </div>
-            </section>
-
-
-        </aside>
-
-        <main class="main-area" id="mainArea">
-
-            <div id="gprPanel" class="gpr-panel hidden">
-                <div class="gpr-controls">
-                    <label for="folderPathInput">数据文件夹路径（服务器上）：</label>
-                    <input type="text" id="folderPathInput" placeholder="例如：/mnt/e/Software/IdeaProjects/demo3/data" />
-
-                    <label for="segmentSelect">剖面：</label>
-                    <select id="segmentSelect" disabled>
-                        <option value="">未加载</option>
-                    </select>
-
-                    <button id="btnStartGpr">开始处理</button>
-                    <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
-                    <span id="gprStatus" class="gpr-status"></span>
-                </div>
-
-                <div class="gpr-views">
-                    <div class="gpr-view">
-                        <h3>原始二维剖面</h3>
-                        <canvas id="raw2dCanvas"></canvas>
-                    </div>
-                    <div class="gpr-view">
-                        <h3>偏移后二维剖面</h3>
-                        <canvas id="mig2dCanvas"></canvas>
-                    </div>
-                    <div class="gpr-view gpr-view-3d">
-                        <h3>三维视图（偏移后数据）</h3>
-                        <div id="threeContainer"></div>
-                    </div>
-                </div>
-            </div>
-
-            <div id="robotNavPanel" class="robot-panel hidden">
-                <div class="robot-left-col">
-
-                    <div class="nav-display-area video-container">
-
-                        <div class="video-box">
-                            <span class="video-label-overlay label-front">
-                                ● 前视广角
-                            </span>
-                            <img src="http://10.21.31.104:5000/front_feed"
-                                 class="stream-img"
-                                 alt="连接中..."
-                                 onerror="this.alt='无法连接视频服务';"/>
-                        </div>
-
-                        <div class="video-box">
-                            <span class="video-label-overlay label-rear">
-                                ● 后视广角
-                            </span>
-                            <img src="http://10.21.31.104:5000/rear_feed"
-                                 class="stream-img"
-                                 alt="连接中..."
-                                 onerror="this.alt='无法连接视频服务';"/>
-                        </div>
-
-                    </div>
-
-                    <div class="nav-control-area">
-
-                        <div class="nc-left-speed">
-
-                            <div class="speed-group-fill">
-                                <div class="speed-header">🎮 手动模式 (m/s)</div>
-                                <div class="slider-row">
-                                    <span class="slider-label">前进:</span>
-                                    <input type="range" id="manualSpeedX" class="custom-range"
-                                           min="0" max="3.0" step="0.5" value="0.5"
-                                           oninput="updateSpeedLabel('valManX', this.value)">
-                                    <span id="valManX" class="val-number">0.5</span>
-                                </div>
-                                <div class="slider-row">
-                                    <span class="slider-label">横移:</span>
-                                    <input type="range" id="manualSpeedY" class="custom-range"
-                                           min="0" max="3.0" step="0.5" value="0.5"
-                                           oninput="updateSpeedLabel('valManY', this.value)">
-                                    <span id="valManY" class="val-number">0.5</span>
-                                </div>
-                            </div>
-
-                            <div class="speed-group-fill">
-                                <div class="speed-header">📡 巡线模式 (m/s)</div>
-                                <div class="slider-row">
-                                    <span class="slider-label">前进:</span>
-                                    <input type="range" id="autoSpeedX" class="custom-range"
-                                           min="0" max="3.0" step="0.2" value="0.2"
-                                           onchange="updateAutoSpeed()">
-                                    <span id="valAutoX" class="val-number">0.2</span>
-                                </div>
-                                <div class="slider-row">
-                                    <span class="slider-label">横移:</span>
-                                    <input type="range" id="autoSpeedY" class="custom-range"
-                                           min="0" max="3.0" step="0.2" value="0.2"
-                                           onchange="updateAutoSpeed()">
-                                    <span id="valAutoY" class="val-number">0.2</span>
-                                </div>
-                            </div>
-
-                        </div>
-
-                        <div class="nc-right-arm-video" id="armDataDisplay">
-                            <div class="arm-data-container">
-                                <div class="arm-data-header">
-                                    <span class="pulse-dot">●</span> 机械臂实时姿态 (°)
-                                </div>
-                                <div class="arm-joints-grid">
-                                    <div class="joint-box">
-                                        <span class="j-label">J1 基座</span>
-                                        <span class="j-val" id="disp_j1">--</span>
-                                    </div>
-                                    <div class="joint-box">
-                                        <span class="j-label">J2 大臂</span>
-                                        <span class="j-val" id="disp_j2">--</span>
-                                    </div>
-                                    <div class="joint-box">
-                                        <span class="j-label">J3 小臂</span>
-                                        <span class="j-val" id="disp_j3">--</span>
-                                    </div>
-                                    <div class="joint-box">
-                                        <span class="j-label">J4 腕旋</span>
-                                        <span class="j-val" id="disp_j4">--</span>
-                                    </div>
-                                    <div class="joint-box">
-                                        <span class="j-label">J5 腕折</span>
-                                        <span class="j-val" id="disp_j5">--</span>
-                                    </div>
-                                    <div class="joint-box">
-                                        <span class="j-label">J6 末端</span>
-                                        <span class="j-val" id="disp_j6">--</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-
-                <div class="robot-right-col">
-                    <div class="control-group-box">
-                        <div class="group-title">末端姿态控制 (Cartesian)</div>
-                        <div class="cartesian-grid">
-                            <div class="cart-col">
-                                <button class="cart-btn z-btn" onclick="controlArm(0,0,0.02)">⬆<br>升</button>
-                                <div class="axis-label">Z轴</div>
-                                <button class="cart-btn z-btn" onclick="controlArm(0,0,-0.02)">⬇<br>降</button>
-                            </div>
-
-                            <div class="cart-dpad">
-                                <div class="dpad-row">
-                                    <button class="cart-btn" onclick="controlArm(0.02,0,0)">前</button>
-                                </div>
-                                <div class="dpad-row">
-                                    <button class="cart-btn" onclick="controlArm(0,0.02,0)">左</button>
-                                    <div class="dpad-center"></div>
-                                    <button class="cart-btn" onclick="controlArm(0,-0.02,0)">右</button>
-                                </div>
-                                <div class="dpad-row">
-                                    <button class="cart-btn" onclick="controlArm(-0.02,0,0)">后</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="control-group-box joints-group">
-                        <div class="group-header-flex">
-                            <div class="group-title">关节独立控制 (Joints)</div>
-                            <button onclick="testArmSequence()" class="test-sequence-btn">一键测试</button>
-                        </div>
-                        <div class="joint-list">
-                            <div class="joint-row">
-                                <span class="joint-label">J1 基座</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(0, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(0, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(0, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(0, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-
-                            <div class="joint-row">
-                                <span class="joint-label">J2 大臂</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(1, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(1, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(1, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(1, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-
-                            <div class="joint-row">
-                                <span class="joint-label">J3 小臂</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(2, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(2, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(2, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(2, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-
-                            <div class="joint-row">
-                                <span class="joint-label">J4 腕旋</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(3, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(3, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(3, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(3, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-
-                            <div class="joint-row">
-                                <span class="joint-label">J5 腕折</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(4, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(4, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(4, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(4, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-
-                            <div class="joint-row">
-                                <span class="joint-label">J6 末端</span>
-                                <button class="joint-btn minus"
-                                        onmousedown="startArmJog(5, -1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(5, -1, event)"
-                                        ontouchend="stopArmJog()">-</button>
-                                <button class="joint-btn plus"
-                                        onmousedown="startArmJog(5, 1, event)"
-                                        onmouseup="stopArmJog()"
-                                        onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(5, 1, event)"
-                                        ontouchend="stopArmJog()">+</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div id="pathFaultPanel" class="path-fault-panel hidden">
-                <div class="pf-col pf-side">
-                    <div class="pf-header">信号强度监测 (声波/电磁波)</div>
-                    <div class="pf-body" id="signalDataArea">
-                        <canvas id="signalCanvas"></canvas>
-                        <div id="signalStatus">WAITING...</div>
-                    </div>
-                </div>
-
-<div class="pf-col pf-center">
-                    <!-- Top Part: Map (75%) -->
-                    <div class="pf-map-wrapper">
-                        <div class="pf-header pf-header-flex">
-                            <span>路径规划与定位地图</span>
-
-                            <div class="header-btn-group">
-                                <button id="btnCaptureFault" class="header-btn-mini" style="background: rgba(0, 255, 128, 0.15); color: #00ff80; border: 1px solid #00ff80; font-weight: bold;">
-                                    📸 实景抓拍
-                                </button>
-    
-                                <button id="btnClearCloud" class="header-btn-mini">
-                                    消除点云
-                                </button>
-                                
-                                <button id="btnClearFaults" class="header-btn-mini">
-                                    消除破损点
-                                </button>
-
-                                <button id="btnClearDogPath" class="header-btn-mini">
-                                    消除机器狗路径
-                                </button>
-
-                                <button id="btnClearCablePath" class="header-btn-mini">
-                                    消除电缆路径
-                                </button>
-                            </div>
-                        </div>
-                        <div class="pf-body map-container" id="pathMapArea" style="position: relative; overflow: hidden; background: #111;">
-
-                            <div id="cableInfoPopup" class="cable-info-popup" style="display: none;">
-                                <div class="popup-close" onclick="document.getElementById('cableInfoPopup').style.display='none'">×</div>
-                                <div class="popup-title">📌 电缆测点信息</div>
-                                <div class="popup-item"><strong>距离起点：</strong> <span id="popupDist" class="hl-text">--</span> m</div>
-                                <div class="popup-item"><strong>预估埋深：</strong> <span id="popupDepth" class="hl-text">待测</span></div>
-                                <div class="popup-item"><strong>经纬度：</strong> <span id="popupGps" class="hl-text">未知</span></div>
-                            </div>
-
-                            <div class="map-nav-overlay">
-
-                                <div id="navInfoPanel" class="nav-info-box" style="display: none;">
-                                    <div>目标距离: <span id="navDistVal" style="color: #00ff00; font-weight: bold;">0.00</span> m</div>
-                                    <div style="margin-top: 4px; font-size: 11px; color: #aaa;">
-                                        平均误差: <span id="navErrorVal" style="color: #00e5ff;">--</span> m
-                                    </div>
-                                </div>
-
-                                <button id="btnSetNavPoint" class="nav-overlay-btn" title="点击后在地图上选点">
-                                    📍 选点
-                                </button>
-                                <button id="btnStartNav" class="nav-overlay-btn success" title="开始前往目标点">
-                                    ▶ 导航
-                                </button>
-                                <button id="btnClearNav" class="nav-overlay-btn danger" title="清除标记">
-                                    ✖ 清除
-                                </button>
-                            </div>
-
-                        </div>
-                    </div>
-
-                    <!-- Bottom Part: Videos (25%) -->
-                    <div class="pf-video-wrapper">
-                        <div class="video-box">
-                            <span class="video-label-overlay label-front">
-                                ● 前视广角
-                            </span>
-                            <img src="http://10.21.31.104:5000/front_feed"
-                                 class="stream-img"
-                                 alt="连接中..."
-                                 onerror="this.alt='无法连接视频服务';"/>
-                        </div>
-
-                        <div class="video-box">
-                            <span class="video-label-overlay label-rear">
-                                ● 后视广角
-                            </span>
-                            <img src="http://10.21.31.104:5000/rear_feed"
-                                 class="stream-img"
-                                 alt="连接中..."
-                                 onerror="this.alt='无法连接视频服务';"/>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="pf-col pf-side">
-                    <div class="pf-header">实景抓拍与管线方向指示</div>
-                    <div class="pf-body" id="pipelineDataArea">
-
-                        <div class="pipeline-upper">
-                            <div class="fault-capture-title">📸 破损点实景抓拍</div>
-                            <div class="fault-capture-content">
-                                <div class="img-wrapper front-wrapper">
-                                    <img id="dispCaptureFront" src="" alt="[ 空白 ] 等待点击破损点..." />
-                                </div>
-                                <div class="img-wrapper rear-wrapper">
-                                    <img id="dispCaptureRear" src="" alt="[ 空白 ] 等待点击破损点..." />
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="pipeline-lower">
-                            <div class="compass-container">
-
-                                <div id="arrowRight" class="arrow-icon side-arrow">▶</div>
-
-                                <div class="cable-assembly">
-                                    <div class="cable-up-arrow">▲</div>
-                                    <div class="cable-thick-line"></div>
-                                </div>
-
-                                <div id="arrowLeft" class="arrow-icon side-arrow">◀</div>
-
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-            </div>
-
-        </main>
-    </div>
-
-    <div class="bottom-actions">
-        <div class="bottom-main-buttons">
-            <button class="action-btn" id="btnRobotNav">机器人控制与导航</button>
-            <button class="action-btn" id="btnPathFault">路径查找及故障定点</button>
-            <button class="action-btn" id="btn3DReconstruct">三维重建</button>
-        </div>
-        <button class="emergency-btn">急停按钮</button>
-    </div>
-</div>
-
-<script src="/js/three.min.js"></script>
-<script src="/js/GLTFLoader.js"></script>
-<script src="/js/sockjs.min.js"></script>
-<script src="/js/stomp.min.js"></script>
-<script src="/js/home.js"></script>
+    <script src="/js/three.min.js"></script>
+    <script src="/js/GLTFLoader.js"></script>
+    <script src="/js/sockjs.min.js"></script>
+    <script src="/js/stomp.min.js"></script>
+    <script src="/js/home.js"></script>
 </body>
+
 </html>
