@@ -2026,15 +2026,16 @@
                 .then(data => {
                     if (data.status === "success") {
                         if (!window.faultImagesMap.has(faultId)) {
-                            window.faultImagesMap.set(faultId, { left: "", right: "" });
+                            // 🌟 补全四个方向
+                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                         }
                         // 绑定右侧图片
                         window.faultImagesMap.get(faultId).right = data.image;
                         console.log("✅ 右侧实景绑定成功！");
 
-                        // 立即更新 UI (下图显示右侧)
-                        const rearImg = document.getElementById('dispCaptureRear');
-                        if (rearImg) rearImg.src = data.image;
+                        // 🌟 修复：立即更新右侧 UI
+                        const imgEl = document.getElementById('dispCaptureRight');
+                        if (imgEl) imgEl.src = data.image;
                     }
                 })
                 .catch(err => console.error("右侧抓拍失败:", err));
@@ -2093,15 +2094,16 @@
                 .then(data => {
                     if (data.status === "success") {
                         if (!window.faultImagesMap.has(faultId)) {
-                            window.faultImagesMap.set(faultId, { left: "", right: "" });
+                            // 🌟 补全四个方向
+                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                         }
                         // 绑定左侧图片
                         window.faultImagesMap.get(faultId).left = data.image;
                         console.log("✅ 左侧实景绑定成功！");
 
-                        // 立即更新 UI (上图显示左侧)
-                        const frontImg = document.getElementById('dispCaptureFront');
-                        if (frontImg) frontImg.src = data.image;
+                        // 🌟 修复：立即更新左侧 UI
+                        const imgEl = document.getElementById('dispCaptureLeft');
+                        if (imgEl) imgEl.src = data.image;
                     }
                 })
                 .catch(err => console.error("左侧抓拍失败:", err));
@@ -2123,6 +2125,103 @@
                 const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
                 fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
             }, 800);
+        }, 2000);
+    };
+    // ==========================================
+    // 5.6 ✅ 破损点前方拍照序列
+    // ==========================================
+    window.captureFaultFrontSequence = function () {
+        if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
+            alert("⚠️ 当前没有检测到破损点，无法进行前方抓拍绑定！");
+            return;
+        }
+        const faultId = window.lastFaultMarker.userData.faultId;
+        console.log("📸 开始机械臂破损点【前方】拍照序列...");
+
+        // 前方拍照姿态
+        const targetPose1 = [0, 70, -90, 0, 30, 0];
+        const speed = 50;
+        if (typeof currentAngles !== 'undefined') { currentAngles = [...targetPose1]; }
+        const queryPose1 = targetPose1.map((a, i) => `j${i + 1}=${a}`).join("&");
+        const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
+
+        console.log("🚀 动作1: 前往前方拍照姿态");
+        fetch(urlPose1).then(res => res.text()).then(msg => console.log("到达反馈:", msg));
+
+        // 1.5秒时抓拍
+        setTimeout(() => {
+            console.log("📸 正在提取前方画面...");
+            fetch("http://10.21.31.104:5001/api/capture_arm")
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === "success") {
+                        if (!window.faultImagesMap.has(faultId)) {
+                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
+                        }
+                        window.faultImagesMap.get(faultId).front = data.image;
+                        const imgEl = document.getElementById('dispCaptureFront');
+                        if (imgEl) imgEl.src = data.image;
+                    }
+                }).catch(err => console.error("前方抓拍失败:", err));
+        }, 1500);
+
+        // 2秒时直接回零
+        setTimeout(() => {
+            console.log("🔄 动作2: 拍照完成，顺滑归零");
+            const target0 = [0, 0, 0, 0, 0, 0];
+            if (typeof currentAngles !== 'undefined') { currentAngles = [...target0]; }
+            const query0 = target0.map((a, i) => `j${i + 1}=${a}`).join("&");
+            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
+        }, 2000);
+    };
+
+    // ==========================================
+    // 5.7 ✅ 破损点后方拍照序列
+    // ==========================================
+    window.captureFaultBackSequence = function () {
+        if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
+            alert("⚠️ 当前没有检测到破损点，无法进行后方抓拍绑定！");
+            return;
+        }
+        const faultId = window.lastFaultMarker.userData.faultId;
+        console.log("📸 开始机械臂破损点【后方】拍照序列...");
+
+        // 后方拍照姿态
+        const targetPose1 = [0, 30, -150, 0, -50, 0];
+        const speed = 50;
+        if (typeof currentAngles !== 'undefined') { currentAngles = [...targetPose1]; }
+        const queryPose1 = targetPose1.map((a, i) => `j${i + 1}=${a}`).join("&");
+        const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
+
+        console.log("🚀 动作1: 前往后方拍照姿态");
+        fetch(urlPose1).then(res => res.text()).then(msg => console.log("到达反馈:", msg));
+
+        // 1.5秒时抓拍
+        setTimeout(() => {
+            console.log("📸 正在提取后方画面...");
+            fetch("http://10.21.31.104:5001/api/capture_arm")
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === "success") {
+                        if (!window.faultImagesMap.has(faultId)) {
+                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
+                        }
+                        window.faultImagesMap.get(faultId).back = data.image;
+                        const imgEl = document.getElementById('dispCaptureBack');
+                        if (imgEl) imgEl.src = data.image;
+                    }
+                }).catch(err => console.error("后方抓拍失败:", err));
+        }, 1500);
+
+        // 2秒时直接回零
+        setTimeout(() => {
+            console.log("🔄 动作2: 拍照完成，顺滑归零");
+            const target0 = [0, 0, 0, 0, 0, 0];
+            if (typeof currentAngles !== 'undefined') { currentAngles = [...target0]; }
+            const query0 = target0.map((a, i) => `j${i + 1}=${a}`).join("&");
+            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
         }, 2000);
     };
     // 全局变量，记录状态
@@ -3633,25 +3732,26 @@
 
 
                     // ✅ 核心：更新右上角固定的实景抓拍预留区
-                    const frontImg = document.getElementById('dispCaptureFront');
-                    const rearImg = document.getElementById('dispCaptureRear');
+                    const imgLeft = document.getElementById('dispCaptureLeft');
+                    const imgRight = document.getElementById('dispCaptureRight');
+                    const imgFront = document.getElementById('dispCaptureFront');
+                    const imgBack = document.getElementById('dispCaptureBack');
 
-                    if (frontImg && rearImg) {
+                    if (imgLeft && imgRight && imgFront && imgBack) {
                         if (clickedFaultId && window.faultImagesMap && window.faultImagesMap.has(clickedFaultId)) {
-                            // 1. 点中了破损点，且存在抓拍图片 -> 显示图片
+                            // 存在抓拍图片 -> 读取并显示 4 个方向
                             const imgs = window.faultImagesMap.get(clickedFaultId);
 
-                            // 🌟 修复：将原来的 imgs.front 改为 imgs.left，imgs.rear 改为 imgs.right
-                            // 并且使用 removeAttribute 彻底清除空图片的占位符痕迹
-                            if (imgs.left) frontImg.src = imgs.left;
-                            else frontImg.removeAttribute('src');
-
-                            if (imgs.right) rearImg.src = imgs.right;
-                            else rearImg.removeAttribute('src');
+                            if (imgs.left) imgLeft.src = imgs.left; else imgLeft.removeAttribute('src');
+                            if (imgs.right) imgRight.src = imgs.right; else imgRight.removeAttribute('src');
+                            if (imgs.front) imgFront.src = imgs.front; else imgFront.removeAttribute('src');
+                            if (imgs.back) imgBack.src = imgs.back; else imgBack.removeAttribute('src');
                         } else {
-                            // 2. 点中了普通电缆，或者该破损点尚未抓拍 -> 清空图片，恢复等待状态
-                            frontImg.removeAttribute('src');
-                            rearImg.removeAttribute('src');
+                            // 无抓拍记录 -> 清空图片
+                            imgLeft.removeAttribute('src');
+                            imgRight.removeAttribute('src');
+                            imgFront.removeAttribute('src');
+                            imgBack.removeAttribute('src');
                         }
                     }
                     return;
@@ -4157,14 +4257,15 @@
                 console.log("🧹 清除所有破损点标记...");
                 if (window.faultImagesMap) window.faultImagesMap.clear();
 
-                const frontImg = document.getElementById('dispCaptureFront');
-                const rearImg = document.getElementById('dispCaptureRear');
-
-                // 🌟 修复：清除所有破损点时，直接强制清空图片
-                if (frontImg && rearImg) {
-                    frontImg.removeAttribute('src');
-                    rearImg.removeAttribute('src');
-                }
+                // 🌟 修复：清除所有破损点时，直接强制清空 4 张图片
+                const imgLeft = document.getElementById('dispCaptureLeft');
+                const imgRight = document.getElementById('dispCaptureRight');
+                const imgFront = document.getElementById('dispCaptureFront');
+                const imgBack = document.getElementById('dispCaptureBack');
+                if (imgLeft) imgLeft.removeAttribute('src');
+                if (imgRight) imgRight.removeAttribute('src');
+                if (imgFront) imgFront.removeAttribute('src');
+                if (imgBack) imgBack.removeAttribute('src');
 
                 maxFaultIdx = -1;
                 bsState = 'INACTIVE';
