@@ -150,9 +150,10 @@
 
     // GPR 算法配置
     const CONFIG = {
-        brightnessThreshold: 200,
-        minRadius: 3,
-        radiusPadding: 6
+        brightnessThreshold: 225,  //核心亮度阈值,0-255
+        minRadius: 3,    //噪点过滤阈值
+        maxRadius: 30,       // ✅ 新增：最大半径阈值（如大于 30 像素则认为是地面/连续地层，不予标注）
+        radiusPadding: 6    //会在算出的真实亮斑半径基础上加上这个数值
     };
 
     // 管道连接配置
@@ -288,7 +289,9 @@
                 if (visited[idx]) continue;
                 if (matrix[r][c] > realThreshold) {
                     const blob = floodFill(matrix, r, c, rows, cols, visited, realThreshold);
-                    if (blob.radius > CONFIG.minRadius) {
+
+                    // ✅ 修改：既要大于最小半径滤除噪点，又要小于最大半径滤除地面直达波
+                    if (blob.radius > CONFIG.minRadius && blob.radius < CONFIG.maxRadius) {
                         blobs.push(blob);
                     }
                 }
@@ -503,7 +506,14 @@
                     const idx = parseInt(segmentSelect.value, 10);
                     if (!isNaN(idx)) showSegment(idx);
                 }
+
+                // 控制 3D 管道、红圈连线的显示状态 (ON时显示)
                 annotation3DGroups.forEach(g => g.visible = showAnnotation);
+
+                // ✅ 新增：控制雷达二维剖面的显示状态 (ON时隐藏，OFF时显示)
+                if (window.gprSlicesGroup) {
+                    window.gprSlicesGroup.visible = !showAnnotation;
+                }
             });
         }
         if (segmentSelect) segmentSelect.disabled = true;
@@ -1177,7 +1187,7 @@
         }
 
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xffffff);
+        scene.background = new THREE.Color(0x000000); // ✅ 改为黑色背景
 
         const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
 
@@ -1189,6 +1199,10 @@
         // 所有剖面和路径统一放在 world 组里
         const world = new THREE.Group();
         scene.add(world);
+
+        // ✅ 新增：创建一个专门用于存放雷达二维剖面的分组，方便一键隐藏
+        window.gprSlicesGroup = new THREE.Group();
+        world.add(window.gprSlicesGroup);
 
         // 3. 计算几何包围盒 + 最大深度（单位：m）
         const bounds = {
@@ -1211,7 +1225,8 @@
             }
 
             const mesh = buildSegmentMesh(mat, geo, vMin, vMax, bounds);
-            world.add(mesh);
+            // ✅ 修改：将切片网格添加到我们的专属分组中
+            window.gprSlicesGroup.add(mesh);
 
             // ✅ 3D 标注圆环 + 记录圆心和半径
             if (useMigrated && seg.migratedData) {
@@ -1409,7 +1424,7 @@
                 points.push(new THREE.Vector3(x, y, z));
             }
             const pathGeom = new THREE.BufferGeometry().setFromPoints(points);
-            const pathMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            const pathMat = new THREE.LineBasicMaterial({ color: 0xffffff });
             world.add(new THREE.Line(pathGeom, pathMat));
         }
 
@@ -1529,7 +1544,32 @@
         // ========== 动画循环 ==========
         function animate() {
             requestAnimationFrame(animate);
+
+            // ✅ 新增：动态智能显隐（视角自适应）逻辑
+            // 实时判断你的视角在哪里，自动把挡在眼前的网格藏起来，露出内部数据
+            if (window.boxFaces && window.boxCenter && camera) {
+                const camX = camera.position.x;
+                const camY = camera.position.y;
+                const camZ = camera.position.z;
+
+                // X轴：如果你在右边看，就隐藏右侧网格，把左侧网格当背景
+                window.boxFaces.right.visible = (camX < window.boxCenter.x);
+                window.boxFaces.left.visible = (camX >= window.boxCenter.x);
+
+                // Y轴：如果你在上面看，就隐藏顶部网格，把底部当“地板”
+                window.boxFaces.top.visible = (camY < window.boxCenter.y);
+                window.boxFaces.bottom.visible = (camY >= window.boxCenter.y);
+
+                // Z轴：如果你在前面看，就隐藏前面网格，把后面当背景
+                window.boxFaces.front.visible = (camZ < window.boxCenter.z);
+                window.boxFaces.back.visible = (camZ >= window.boxCenter.z);
+            }
+
             renderer.render(scene, camera);
+
+            if (typeof updatePopupPosition === 'function') {
+                updatePopupPosition();
+            }
         }
         animate();
     }
@@ -1679,124 +1719,171 @@
         return mesh;
     }
 
-    // 在场景中添加一个三维坐标系：
-    // x (m)   : 沿电缆方向
-    // y (m)   : 横向偏移
-    // z (m,down) : 深度，向下为正（从 0 到 maxDepth）
+    // 在场景中添加一个三维包围盒和彩色网格（适配深色主题）
     function addAxes(scene, bounds, maxDepth) {
         if (!isFinite(maxDepth) || maxDepth <= 0) return;
 
         const axisGroup = new THREE.Group();
         scene.add(axisGroup);
 
-        const xLen = bounds.maxX - bounds.minX;   // 沿电缆方向长度（m）
-        const yLen = bounds.maxZ - bounds.minZ;   // 横向宽度（m）
-        const zLen = maxDepth;                    // 最大深度（m）
+        const xLen = Math.max(bounds.maxX - bounds.minX, 0.01);
+        const zLen = Math.max(bounds.maxZ - bounds.minZ, 0.01);
+        const yLen = maxDepth; // 深度，向下为正
 
-        const span = Math.max(xLen, yLen, zLen) || 1.0;
+        const span = Math.max(xLen, zLen, yLen) || 1.0;
         const tickSize = span * 0.03;
         const labelSize = span * 0.06;
         const nTicks = 5;
 
-        // 顶部原点（深度 0）
-        const originTop = new THREE.Vector3(bounds.minX, 0, bounds.minZ);
-        // 底部原点（最大深度）
-        const originBottom = new THREE.Vector3(bounds.minX, -zLen, bounds.minZ);
-
-        function axisLine(start, end) {
+        // 辅助画线函数
+        function axisLine(start, end, colorHex = 0xffffff) {
             const geom = new THREE.BufferGeometry().setFromPoints([start, end]);
-            const mat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            const mat = new THREE.LineBasicMaterial({ color: colorHex });
             return new THREE.Line(geom, mat);
         }
 
-        // ================= Z 轴：深度（0 -> maxDepth，向下为正）=================
-        const zEnd = originBottom.clone();
-        axisGroup.add(axisLine(originTop, zEnd));
+        // ================= 1. 画出外围的整体长方体线框 (白色) =================
+        const cx = (bounds.maxX + bounds.minX) / 2;
+        const cy = -maxDepth / 2;
+        const cz = (bounds.maxZ + bounds.minZ) / 2;
+        const boxGeom = new THREE.BoxGeometry(xLen, yLen, zLen);
+        const edges = new THREE.EdgesGeometry(boxGeom);
+        const boxMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+        const boxMesh = new THREE.LineSegments(edges, boxMat);
+        boxMesh.position.set(cx, cy, cz);
+        axisGroup.add(boxMesh);
 
-        for (let i = 0; i <= nTicks; i++) {
-            const d = (zLen / nTicks) * i; // 深度值
-            const pos = originTop.clone().add(new THREE.Vector3(0, -d, 0));
+        // ================= 2. 绘制 6 个面彩色网格 (动态分组版) =================
 
-            const tickStart = pos.clone().add(new THREE.Vector3(-tickSize * 0.5, 0, 0));
-            const tickEnd = pos.clone().add(new THREE.Vector3(tickSize * 0.5, 0, 0));
-            axisGroup.add(axisLine(tickStart, tickEnd));
+        // 创建全局对象保存 6 个面的网格组，方便外部调用
+        window.boxFaces = {
+            bottom: new THREE.Group(),
+            top: new THREE.Group(),
+            back: new THREE.Group(),
+            front: new THREE.Group(),
+            left: new THREE.Group(),
+            right: new THREE.Group()
+        };
 
-            const label = makeTextSprite(d.toFixed(1));
-            label.scale.set(labelSize, labelSize, 1);
-            label.position.copy(pos).add(new THREE.Vector3(0, 0, -tickSize * 2.0));
-            axisGroup.add(label);
+        // 将它们统一添加到主坐标轴组中
+        Object.values(window.boxFaces).forEach(g => axisGroup.add(g));
+
+        // 记录长方体的几何中心，用于后续判断相机视角
+        window.boxCenter = new THREE.Vector3(
+            (bounds.minX + bounds.maxX) / 2,
+            -maxDepth / 2,
+            (bounds.minZ + bounds.maxZ) / 2
+        );
+
+        // 底面 (y = -maxDepth) & 顶面 (y = 0) 网格 (青色 Cyan)
+        for (let i = 1; i < nTicks; i++) {
+            let tX = (xLen / nTicks) * i;
+            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.minZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.maxZ), 0x00ffff));
+            window.boxFaces.top.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.minZ), new THREE.Vector3(bounds.minX + tX, 0, bounds.maxZ), 0x00ffff));
+        }
+        for (let i = 1; i < nTicks; i++) {
+            let tZ = (zLen / nTicks) * i;
+            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0x00ffff));
+            window.boxFaces.top.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), 0x00ffff));
         }
 
-        const zLabel = makeTextSprite("z (m, down)");
-        zLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
-        zLabel.position.copy(zEnd).add(new THREE.Vector3(0, 0, -tickSize * 3.0));
-        axisGroup.add(zLabel);
-
-        // ================= Y 轴：横向偏移，从 Z 轴终点（底部）开始 =================
-        const yEnd = originBottom.clone().add(new THREE.Vector3(0, 0, yLen));
-        axisGroup.add(axisLine(originBottom, yEnd));
-
-        for (let i = 0; i <= nTicks; i++) {
-            const t = (yLen / nTicks) * i;
-            const val = bounds.minZ + t;  // 实际偏移（m）
-            const pos = originBottom.clone().add(new THREE.Vector3(0, 0, t));
-
-            const tickStart = pos.clone().add(new THREE.Vector3(-tickSize * 0.5, 0, 0));
-            const tickEnd = pos.clone().add(new THREE.Vector3(tickSize * 0.5, 0, 0));
-            axisGroup.add(axisLine(tickStart, tickEnd));
-
-            const label = makeTextSprite(val.toFixed(1));
-            label.scale.set(labelSize, labelSize, 1);
-            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
-            axisGroup.add(label);
+        // 后面 (z = bounds.minZ) & 前面 (z = bounds.maxZ) 网格 (红色 Red)
+        for (let i = 1; i < nTicks; i++) {
+            let tY = (yLen / nTicks) * i;
+            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.minZ), new THREE.Vector3(bounds.maxX, -tY, bounds.minZ), 0xff0000));
+            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.maxZ), new THREE.Vector3(bounds.maxX, -tY, bounds.maxZ), 0xff0000));
+        }
+        for (let i = 1; i < nTicks; i++) {
+            let tX = (xLen / nTicks) * i;
+            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.minZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.minZ), 0xff0000));
+            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.maxZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.maxZ), 0xff0000));
         }
 
-        const yLabel = makeTextSprite("y (m)");
-        yLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
-        yLabel.position.copy(yEnd).add(new THREE.Vector3(0, -tickSize * 2.0, labelSize * 0.8));
-        axisGroup.add(yLabel);
+        // 左侧面 (x = bounds.minX) & 右侧面 (x = bounds.maxX) 网格 (黄色 Yellow)
+        for (let i = 1; i < nTicks; i++) {
+            let tY = (yLen / nTicks) * i;
+            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.minZ), new THREE.Vector3(bounds.minX, -tY, bounds.maxZ), 0xffff00));
+            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, -tY, bounds.minZ), new THREE.Vector3(bounds.maxX, -tY, bounds.maxZ), 0xffff00));
+        }
+        for (let i = 1; i < nTicks; i++) {
+            let tZ = (zLen / nTicks) * i;
+            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), 0xffff00));
+            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0xffff00));
+        }
 
-        // ================= X 轴：以 “Y 轴终点” 作为起点 =================
-        const originX = yEnd.clone();  // ★ 这里：X 轴起点 = Y 轴终点
-        const xEnd = originX.clone().add(new THREE.Vector3(xLen, 0, 0));
-        axisGroup.add(axisLine(originX, xEnd));
+        // ================= 3. 添加坐标轴刻度与文字 (白色) =================
+        // 选择前端左下角为原点基准
+        const originFrontBottomLeft = new THREE.Vector3(bounds.minX, -maxDepth, bounds.maxZ);
+        const originTopLeft = new THREE.Vector3(bounds.minX, 0, bounds.maxZ);
 
+        // X轴刻度 (Distance)
         for (let i = 0; i <= nTicks; i++) {
             const t = (xLen / nTicks) * i;
-            const pos = originX.clone().add(new THREE.Vector3(t, 0, 0));
-
-            const tickStart = pos.clone().add(new THREE.Vector3(0, 0, -tickSize * 0.5));
-            const tickEnd = pos.clone().add(new THREE.Vector3(0, 0, tickSize * 0.5));
-            axisGroup.add(axisLine(tickStart, tickEnd));
-
-            const label = makeTextSprite(t.toFixed(1));
+            const pos = originFrontBottomLeft.clone().add(new THREE.Vector3(t, 0, 0));
+            axisGroup.add(axisLine(pos, pos.clone().add(new THREE.Vector3(0, -tickSize, 0))));
+            const val = bounds.minX + t;
+            const label = makeTextSprite(val.toFixed(2), "#ffffff"); // 传递白色
             label.scale.set(labelSize, labelSize, 1);
             label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
             axisGroup.add(label);
         }
-
-        const xLabel = makeTextSprite("x (m)");
-        xLabel.scale.set(labelSize * 1.2, labelSize * 1.2, 1);
-        xLabel.position.copy(xEnd).add(new THREE.Vector3(labelSize * 0.8, -tickSize * 2.0, 0));
+        const xLabel = makeTextSprite("Distance(m)", "#ffffff");
+        xLabel.scale.set(labelSize * 1.5, labelSize * 1.5, 1);
+        xLabel.position.copy(originFrontBottomLeft).add(new THREE.Vector3(xLen / 2, -tickSize * 3.5, 0));
         axisGroup.add(xLabel);
+
+        // Y轴刻度 (Time/Depth)
+        for (let i = 0; i <= nTicks; i++) {
+            const d = (yLen / nTicks) * i;
+            const pos = originTopLeft.clone().add(new THREE.Vector3(0, -d, 0));
+            axisGroup.add(axisLine(pos, pos.clone().add(new THREE.Vector3(-tickSize, 0, 0))));
+            const label = makeTextSprite(d.toFixed(1), "#ffffff");
+            label.scale.set(labelSize, labelSize, 1);
+            label.position.copy(pos).add(new THREE.Vector3(-tickSize * 1.5, 0, 0));
+            axisGroup.add(label);
+        }
+        const yLabel = makeTextSprite("Depth(m)", "#ffffff");
+        yLabel.scale.set(labelSize * 1.5, labelSize * 1.5, 1);
+        // 为了显示类似 Time(ns) 的效果可以旋转标签，这里直接放左边
+        yLabel.position.copy(originTopLeft).add(new THREE.Vector3(-tickSize * 4, -yLen / 2, 0));
+        axisGroup.add(yLabel);
+
+        // Z轴横向刻度
+        for (let i = 0; i <= nTicks; i++) {
+            const t = (zLen / nTicks) * i;
+            const pos = originFrontBottomLeft.clone().add(new THREE.Vector3(xLen, 0, -t));
+            axisGroup.add(axisLine(pos, pos.clone().add(new THREE.Vector3(0, -tickSize, 0))));
+            const val = bounds.maxZ - t;
+            const label = makeTextSprite(val.toFixed(2), "#ffffff");
+            label.scale.set(labelSize, labelSize, 1);
+            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
+            axisGroup.add(label);
+        }
     }
 
-    // 用 Canvas 生成一个简单的文字 Sprite
-    function makeTextSprite(text) {
+    // 用 Canvas 生成一个动态宽度的文字 Sprite
+    function makeTextSprite(text, fontColor = "#ffffff") {
         const canvas = document.createElement("canvas");
-        const size = 256;
-        canvas.width = size;
-        canvas.height = size;
         const ctx = canvas.getContext("2d");
 
-        ctx.clearRect(0, 0, size, size);
+        // 1. 设置字体并测量文字真实宽度
+        const fontSize = 60;
+        ctx.font = "bold " + fontSize + "px Arial";
+        const textWidth = ctx.measureText(text).width;
+
+        // 2. 动态设置 Canvas 宽高（宽度留出 40px 边距防裁剪，高度固定保持原有缩放基准）
+        canvas.width = Math.max(256, textWidth + 40);
+        canvas.height = 256;
+
+        // 3. Canvas 尺寸改变后需重置 ctx 属性
+        ctx.font = "bold " + fontSize + "px Arial";
         ctx.fillStyle = "rgba(255,255,255,0)"; // 透明背景
-        ctx.fillRect(0, 0, size, size);
-        ctx.font = "72px Arial";
-        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = fontColor;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(text, size / 2, size / 2);
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
 
         const texture = new THREE.CanvasTexture(canvas);
         texture.needsUpdate = true;
@@ -1807,6 +1894,10 @@
         });
 
         const sprite = new THREE.Sprite(material);
+
+        // 4. ✅ 核心：将长宽比存起来，防止长文本被强行压缩成正方形
+        sprite.userData.aspectRatio = canvas.width / canvas.height;
+
         return sprite;
     }
 
