@@ -2314,3 +2314,16 @@ input[type="range"]::-webkit-slider-thumb {
 .capture-btn-left:hover {
     box-shadow: 0 0 8px rgba(0, 206, 209, 0.8);
 }
+
+/* ==========================================
+   新增：二维剖面动态显隐布局控制
+   ========================================== */
+/* 当包含 hide-2d 类时，将原本的三列网格(1fr 1fr 2fr)改为单列(1fr)，让 3D 视图铺满 */
+.gpr-views.hide-2d {
+    grid-template-columns: 1fr;
+}
+
+/* 隐藏带有 gpr-view-2d 类的区域 */
+.gpr-views.hide-2d .gpr-view-2d {
+    display: none;
+}

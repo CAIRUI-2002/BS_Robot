@@ -159,7 +159,7 @@
 
                 <div id="gprPanel" class="gpr-panel hidden">
                     <div class="gpr-controls">
-                        <label for="folderPathInput">数据文件夹路径（服务器上）：</label>
+                        <label for="folderPathInput">数据路径：</label>
                         <input type="text" id="folderPathInput"
                             placeholder="例如：/mnt/e/Software/IdeaProjects/demo3/data" />
 
@@ -170,15 +170,17 @@
 
                         <button id="btnStartGpr">开始处理</button>
                         <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
+                        <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
+
                         <span id="gprStatus" class="gpr-status"></span>
                     </div>
 
-                    <div class="gpr-views">
-                        <div class="gpr-view">
+                    <div class="gpr-views hide-2d">
+                        <div class="gpr-view gpr-view-2d">
                             <h3>原始二维剖面</h3>
                             <canvas id="raw2dCanvas"></canvas>
                         </div>
-                        <div class="gpr-view">
+                        <div class="gpr-view gpr-view-2d">
                             <h3>偏移后二维剖面</h3>
                             <canvas id="mig2dCanvas"></canvas>
                         </div>

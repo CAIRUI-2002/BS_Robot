@@ -403,6 +403,10 @@
         const btnStart = $("btnStartGpr");
         const segmentSelect = $("segmentSelect");
         const btnAnno = $("btnToggleAnnotation");
+        // 👇 新增：获取新按钮和视图容器
+        const btnSlices = $("btnToggleSlices");
+        const gprViewsContainer = document.querySelector('.gpr-views');
+        let showSlices = false; // 初始状态为隐藏
 
         const btnDogStand = $("btnDogStand");  // 机器狗站立
         const btnDogWalk = $("btnDogControl"); // 运动控制
@@ -513,6 +517,30 @@
                 // ✅ 新增：控制雷达二维剖面的显示状态 (ON时隐藏，OFF时显示)
                 if (window.gprSlicesGroup) {
                     window.gprSlicesGroup.visible = !showAnnotation;
+                }
+            });
+        }
+        // 👇 新增：二维剖面显隐按钮绑定逻辑
+        if (btnSlices) {
+            btnSlices.addEventListener("click", function () {
+                showSlices = !showSlices;
+
+                // 更新按钮 UI (文字与点亮状态)
+                this.textContent = "二维剖面: " + (showSlices ? "ON" : "OFF");
+                this.classList.toggle("active", showSlices);
+
+                if (gprViewsContainer) {
+                    if (showSlices) {
+                        gprViewsContainer.classList.remove("hide-2d"); // 恢复三列布局
+                    } else {
+                        gprViewsContainer.classList.add("hide-2d");    // 单列铺满
+                    }
+
+                    // 🌟 核心点：因为容器大小瞬间发生了改变，必须通知 Three.js 更新渲染画布的尺寸，
+                    // 否则 Three.js 画布会被拉伸变形或者出现大黑边。
+                    setTimeout(() => {
+                        window.dispatchEvent(new Event('resize'));
+                    }, 50); // 延迟 50ms 等待 CSS Grid 渲染完成再触发重绘
                 }
             });
         }
@@ -1810,6 +1838,57 @@
             window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), 0xffff00));
             window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0xffff00));
         }
+        // ================= 新增：为 6 个面添加半透明玻璃材质包裹 =================
+        // 定义玻璃材质 (CAD 磨砂玻璃风格)
+        const glassMaterial = new THREE.MeshBasicMaterial({
+            color: 0xcccccc,         // ✅ 改为浅灰色/灰白色
+            transparent: true,       // 开启透明
+            opacity: 0.2,           // ✅ 提高不透明度 (0.3~0.4左右)，增加实体感
+            side: THREE.DoubleSide,  // 双面渲染
+            depthWrite: false        // 保持 false，防止遮挡内部的三维电缆和管线
+            // ✅ 注意：这里去掉了 blending: THREE.AdditiveBlending，恢复为普通透明遮挡关系
+        });
+
+        // 定义三个方向的几何平面
+        const planeX = new THREE.PlaneGeometry(zLen, yLen); // 左右面的大小
+        const planeY = new THREE.PlaneGeometry(xLen, zLen); // 上下面大小
+        const planeZ = new THREE.PlaneGeometry(xLen, yLen); // 前后面大小
+
+        // 1. 顶面玻璃 (Top)
+        const topGlass = new THREE.Mesh(planeY, glassMaterial);
+        topGlass.position.set(cx, 0, cz);
+        topGlass.rotation.x = -Math.PI / 2;
+        axisGroup.add(topGlass); // ✅ 修改：直接添加到 axisGroup，不受视角自适应控制
+
+        // 2. 底面玻璃 (Bottom)
+        const bottomGlass = new THREE.Mesh(planeY, glassMaterial);
+        bottomGlass.position.set(cx, -maxDepth, cz);
+        bottomGlass.rotation.x = Math.PI / 2;
+        axisGroup.add(bottomGlass); // ✅ 修改
+
+        // 3. 左侧玻璃 (Left)
+        const leftGlass = new THREE.Mesh(planeX, glassMaterial);
+        leftGlass.position.set(bounds.minX, cy, cz);
+        leftGlass.rotation.y = -Math.PI / 2;
+        axisGroup.add(leftGlass); // ✅ 修改
+
+        // 4. 右侧玻璃 (Right)
+        const rightGlass = new THREE.Mesh(planeX, glassMaterial);
+        rightGlass.position.set(bounds.maxX, cy, cz);
+        rightGlass.rotation.y = Math.PI / 2;
+        axisGroup.add(rightGlass); // ✅ 修改
+
+        // 5. 前面玻璃 (Front)
+        const frontGlass = new THREE.Mesh(planeZ, glassMaterial);
+        frontGlass.position.set(cx, cy, bounds.maxZ);
+        axisGroup.add(frontGlass); // ✅ 修改
+
+        // 6. 后面玻璃 (Back)
+        const backGlass = new THREE.Mesh(planeZ, glassMaterial);
+        backGlass.position.set(cx, cy, bounds.minZ);
+        backGlass.rotation.y = Math.PI;
+        axisGroup.add(backGlass); // ✅ 修改
+        // =====================================================================
 
         // ================= 3. 添加坐标轴刻度与文字 (白色) =================
         // 选择前端左下角为原点基准

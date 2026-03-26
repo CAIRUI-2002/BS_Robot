@@ -42,7 +42,7 @@ public class GprConfig {
     private boolean autoVSearch = true; // 是否自动搜索最优偏移速度
     private double vSearchMin = 0.06;  // 最小搜索速度
     private double vSearchMax = 0.08;  // 最大搜索速度
-            private int fibIters = 12;         // 斐波那契迭代次数
+            private int fibIters = 8;         // 斐波那契迭代次数
             private int entropyBins = 256;     // 熵计算bins数
     
     // ==================== 预处理参数 ====================
