@@ -2349,3 +2349,84 @@ input[type="range"]::-webkit-slider-thumb {
 .gpr-views.hide-2d .gpr-view-2d {
     display: none;
 }
+
+/* ==========================================
+   新增：悬浮履带小车摇杆 UI
+   ========================================== */
+/* 修改 1：在最外层容器中增加禁用选中和拖拽的属性 */
+.floating-joystick {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    width: 130px;
+    background: rgba(10, 30, 50, 0.7);
+    border: 1px solid rgba(0, 204, 255, 0.4);
+    border-radius: 12px;
+    padding: 15px 10px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+    transition: background 0.3s, border-color 0.3s;
+
+    /* 👇 新增：彻底屏蔽浏览器的默认文本选中和拖拽行为 */
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -webkit-user-drag: none;
+}
+
+.floating-joystick:hover {
+    background: rgba(10, 30, 50, 0.9);
+    border-color: rgba(0, 204, 255, 0.8);
+}
+
+.joystick-title {
+    color: #00ccff;
+    font-size: 13px;
+    margin-bottom: 12px;
+    font-weight: bold;
+    user-select: none;
+}
+
+.joystick-base {
+    width: 100px;
+    height: 100px;
+    background: rgba(0, 0, 0, 0.6);
+    border: 2px solid rgba(135, 200, 255, 0.2);
+    border-radius: 50%;
+    position: relative;
+    touch-action: none;
+    /* 防止手机端触摸时触发页面滚动 */
+    box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.8);
+}
+
+/* 修改 2：去掉摇杆自带的 transition，改为纯净版 */
+.joystick-stick {
+    width: 40px;
+    height: 40px;
+    background: radial-gradient(circle, #00ccff, #005588);
+    border-radius: 50%;
+    position: absolute;
+    top: 30px;
+    left: 30px;
+    box-shadow: 0 0 12px rgba(0, 204, 255, 0.6);
+    pointer-events: none;
+    /* ⚠️ 删除了这里的 transition 属性，解决拖动卡顿 */
+}
+
+/* 👇 修改 3：新增一个专门用于松手回弹的动画类 */
+.joystick-stick.returning {
+    transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    /* 加入轻微的弹性回弹效果 */
+}
+
+.joystick-status {
+    color: #00ff00;
+    font-size: 13px;
+    margin-top: 12px;
+    font-family: 'Consolas', monospace;
+    user-select: none;
+}

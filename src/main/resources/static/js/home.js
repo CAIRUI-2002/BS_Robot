@@ -5324,5 +5324,124 @@
             if (w && h) { renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
         }).observe(container);
     })();
+    // ==========================================
+    // 新增：履带小车悬浮虚拟摇杆控制逻辑 (终极优化版)
+    // ==========================================
+    (function initCarJoystick() {
+        const base = document.getElementById('carJoystickBase');
+        const stick = document.getElementById('carJoystickStick');
+        const status = document.getElementById('carJoystickStatus');
+        if (!base || !stick) return;
+
+        const maxRadius = 50;
+        let isDragging = false;
+
+        // 记录当前的坐标值
+        let currentX = 0;
+        let currentY = 0;
+
+        // 心跳定时器：负责连续不断地向后端发指令
+        let sendTimer = null;
+
+        // 1. 计算摇杆位置与数值
+        function updateStick(clientX, clientY) {
+            const rect = base.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            let dx = clientX - centerX;
+            let dy = clientY - centerY;
+            const distance = Math.hypot(dx, dy);
+
+            if (distance > maxRadius) {
+                dx = (dx / distance) * maxRadius;
+                dy = (dy / distance) * maxRadius;
+            }
+
+            stick.style.transform = `translate(${dx}px, ${dy}px)`;
+
+            currentX = Math.round((dx / maxRadius) * 100);
+            currentY = Math.round((-dy / maxRadius) * 100);
+
+            status.textContent = `X:${currentX}  Y:${currentY}`;
+            status.style.color = "#00e5ff";
+        }
+
+        // 2. 摇杆松手归零
+        function resetStick() {
+            currentX = 0;
+            currentY = 0;
+            stick.classList.add('returning'); // 添加 CSS 类，触发平滑回弹动画
+            stick.style.transform = `translate(0px, 0px)`;
+            status.textContent = "停止";
+            status.style.color = "#00ff00";
+
+            // 松手时发送一次 0,0 让小车立刻刹车
+            fetch(`/api/car/move?x=0&y=0`).catch(() => { });
+        }
+
+        // 3. 开启心跳发送 (重点解决“小车走一段就停”的问题)
+        function startSending() {
+            if (sendTimer) return;
+            // 只要按住不放，每隔 100ms (10Hz) 就把当前的坐标发给后端
+            // 既能保持小车不超时，又不会因为发得太快把浏览器/网络卡死
+            sendTimer = setInterval(() => {
+                fetch(`/api/car/move?x=${currentX}&y=${currentY}`)
+                    .catch(err => console.error("⚠️ 履带车指令发送失败:", err));
+            }, 100);
+        }
+
+        // 4. 停止心跳发送
+        function stopSending() {
+            if (sendTimer) {
+                clearInterval(sendTimer);
+                sendTimer = null;
+            }
+        }
+
+        // --- 绑定 PC 鼠标事件 ---
+        base.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            stick.classList.remove('returning'); // 拖动时立刻移除动画类，彻底消除卡顿
+            updateStick(e.clientX, e.clientY);
+            startSending(); // 按下鼠标立刻启动心跳发送
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            e.preventDefault(); // 拦截浏览器默认的拖拽文本行为
+            updateStick(e.clientX, e.clientY);
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                stopSending(); // 停掉心跳
+                resetStick();  // 归零并急刹
+            }
+        });
+
+        // --- 绑定移动端/平板触屏事件 ---
+        base.addEventListener('touchstart', (e) => {
+            isDragging = true;
+            stick.classList.remove('returning');
+            updateStick(e.touches[0].clientX, e.touches[0].clientY);
+            startSending();
+        });
+
+        document.addEventListener('touchmove', (e) => {
+            if (!isDragging) return;
+            e.preventDefault(); // 拦截页面随手指滑动的默认行为
+            updateStick(e.touches[0].clientX, e.touches[0].clientY);
+        }, { passive: false });
+
+        document.addEventListener('touchend', () => {
+            if (isDragging) {
+                isDragging = false;
+                stopSending();
+                resetStick();
+            }
+        });
+    })();
 
 })(); 
