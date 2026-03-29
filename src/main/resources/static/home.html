@@ -172,6 +172,9 @@
                         <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
                         <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
 
+                        <label for="pcdPathInput" class="pcd-label">点云路径：</label>
+                        <input type="text" id="pcdPathInput" placeholder="例如：/mnt/e/data/map.pcd" />
+                        <button id="btnLoadPcd" class="action-btn-small btn-pcd">加载点云</button>
                         <span id="gprStatus" class="gpr-status"></span>
                     </div>
 
@@ -582,6 +585,7 @@
 
     <script src="/js/three.min.js"></script>
     <script src="/js/GLTFLoader.js"></script>
+    <script src="/js/PCDLoader.js"></script>
     <script src="/js/sockjs.min.js"></script>
     <script src="/js/stomp.min.js"></script>
     <script src="/js/home.js"></script>

@@ -1,6 +1,14 @@
 package com.example.demo1.controller;
 
+import java.io.File;
+
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -47,5 +55,23 @@ public class GprController {
             config = new GprConfig(); // 使用默认参数
         }
         return gprProcessingService.processFolder(folderPath, config);
+    }
+    /**
+     * 读取绝对路径的点云文件并返回流给 Three.js PCDLoader
+     * 用法示例： GET /api/gpr/pcd?filePath=/mnt/e/data/map.pcd
+     */
+    @GetMapping("/pcd")
+    public ResponseEntity<Resource> getPcdFile(@RequestParam("filePath") String filePath) {
+        File file = new File(filePath);
+        if (!file.exists() || !file.isFile()) {
+            return ResponseEntity.notFound().build();
+        }
+        
+        Resource resource = new FileSystemResource(file);
+        return ResponseEntity.ok()
+                // 告诉浏览器这是一个附件流
+                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getName() + "\"")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(resource);
     }
 }

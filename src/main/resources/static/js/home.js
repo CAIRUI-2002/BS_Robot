@@ -401,6 +401,81 @@
         const pathFaultPanel = $("pathFaultPanel");
 
         const btnStart = $("btnStartGpr");
+        const btnLoadPcd = $("btnLoadPcd"); // 新增获取点云按钮
+
+        if (btnStart) btnStart.addEventListener("click", startGprProcessing);
+
+        // 👇========= 新增：点云加载事件绑定 =========👇
+        if (btnLoadPcd) {
+            btnLoadPcd.addEventListener("click", function () {
+                const pcdInput = $("pcdPathInput");
+                if (!pcdInput) return;
+                const pcdPath = pcdInput.value.trim();
+
+                if (!pcdPath) {
+                    alert("请先输入点云文件所在路径！");
+                    return;
+                }
+                if (!window.gprScene) {
+                    alert("请先点击'开始处理'加载地下雷达数据，再叠加地上点云！");
+                    return;
+                }
+
+                setStatus("正在加载地上点云，请稍候...", "warning");
+
+                // 拼接 Java 后端接口的 URL
+                const url = "/api/gpr/pcd?filePath=" + encodeURIComponent(pcdPath);
+
+                const loader = new THREE.PCDLoader();
+                loader.load(url, function (points) {
+                    // 如果之前已经加载过点云，先清除旧的
+                    if (window.currentPcdMesh) {
+                        window.gprScene.remove(window.currentPcdMesh);
+                        window.currentPcdMesh.geometry.dispose();
+                        window.currentPcdMesh.material.dispose();
+                    }
+
+                    // 1. 点云材质与颜色设置
+                    points.material.size = 0.05; // 根据视觉效果调节大小
+                    // points.material.color.setHex(0x00ffff); // 如果你想给点云统一染色，可以取消注释
+
+                    // 2. 几何体居中，方便后续做对齐
+                    points.geometry.center();
+                    points.geometry.computeBoundingBox();
+                    const bbox = points.geometry.boundingBox;
+
+                    // 3. 姿态调整：机器人 SLAM 点云一般是 Z 轴朝上，而 Three.js 是 Y 轴朝上
+                    points.rotation.x = -Math.PI / 2;
+
+                    // 4. 高度拼接：原本探地雷达长方体的顶面是 Y=0，我们需要让点云的底部恰好贴在 Y=0
+                    // 旋转 -90度 后，原点云的 Z 轴方向就变成了现三维场景的 Y 轴方向
+                    const zHeight = bbox.max.z - bbox.min.z;
+                    points.position.y = zHeight / 2;
+
+                    // 如果地上和地下坐标系在 X、Z 平面上存在平移偏差，可以通过以下调整：
+                    // points.position.x = 0; 
+                    // points.position.z = 0;
+
+                    window.gprScene.add(points);
+                    window.currentPcdMesh = points;
+
+                    setStatus("点云加载并拼接完成！", "success");
+                },
+                    // 加载进度回调
+                    function (xhr) {
+                        const percent = Math.round((xhr.loaded / xhr.total) * 100);
+                        if (percent > 0 && percent <= 100) {
+                            setStatus(`点云加载中: ${percent}%`, "warning");
+                        }
+                    },
+                    // 错误回调
+                    function (error) {
+                        console.error("点云加载报错:", error);
+                        setStatus("点云加载失败，请检查路径及文件格式！", "error");
+                    });
+            });
+        }
+        // 👆=============================================👆
         const segmentSelect = $("segmentSelect");
         const btnAnno = $("btnToggleAnnotation");
         // 👇 新增：获取新按钮和视图容器
@@ -1216,6 +1291,9 @@
 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x000000); // ✅ 改为黑色背景
+
+        // 👇 新增这一行，把 scene 暴露到全局，让外部的点云加载函数能够获取到它
+        window.gprScene = scene;
 
         const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
 

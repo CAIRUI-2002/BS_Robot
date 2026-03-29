@@ -297,11 +297,33 @@ body {
     display: none;
 }
 
+/* 修改原有的 .gpr-controls，增加 flex-wrap 防止控件过多挤出屏幕 */
 .gpr-controls {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    /* 允许控件换行 */
     gap: 8px;
     font-size: 14px;
+}
+
+/* 新增：为点云输入框的 label 增加一点左侧间距，使其与前面的按钮隔开 */
+.pcd-label {
+    margin-left: 10px;
+}
+
+/* 新增：点云加载按钮的专属样式（采用偏橙黄色，与 GPR 的蓝色系区分开） */
+.btn-pcd {
+    background: rgba(230, 162, 60, 0.8) !important;
+    border: 1px solid #e6a23c !important;
+    color: #ffffff !important;
+}
+
+/* 点云加载按钮的悬停高亮特效 */
+.btn-pcd:hover {
+    background: rgba(230, 162, 60, 1) !important;
+    box-shadow: 0 0 8px rgba(230, 162, 60, 0.8) !important;
+    border-color: #ffffff !important;
 }
 
 #gprStatus.gpr-status {
@@ -321,7 +343,7 @@ body {
 .gpr-controls input[type="text"],
 .gpr-controls select {
     flex: 0 0 auto;
-    min-width: 200px;
+    min-width: 100px;
     padding: 4px 8px;
     border-radius: 4px;
     border: 1px solid rgba(120, 200, 255, 0.6);
@@ -331,7 +353,7 @@ body {
 
 
 .gpr-controls button {
-    padding: 6px 14px;
+    padding: 4px 8px;
     border-radius: 4px;
     border: 1px solid rgba(120, 200, 255, 0.8);
     background: linear-gradient(90deg, #0b4a7c, #3d79ad);
@@ -450,7 +472,7 @@ screen and (max-height: 800px) {
 
 /* ✅ [新增] 标注按钮的小型样式 */
 .action-btn-small {
-    padding: 6px 12px;
+    padding: 4px 10px;
     font-size: 13px;
     background: rgba(10, 60, 90, 0.8);
     border: 1px solid rgba(120, 200, 255, 0.6);
