@@ -2414,7 +2414,8 @@ input[type="range"]::-webkit-slider-thumb {
     left: 30px;
     box-shadow: 0 0 12px rgba(0, 204, 255, 0.6);
     pointer-events: none;
-    /* ⚠️ 删除了这里的 transition 属性，解决拖动卡顿 */
+    /* 👇 新增这一行：强制浏览器为摇杆开启 GPU 硬件加速层 */
+    will-change: transform;
 }
 
 /* 👇 修改 3：新增一个专门用于松手回弹的动画类 */
