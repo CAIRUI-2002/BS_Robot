@@ -3535,21 +3535,22 @@
 
         // B1. 实时雷达层
         const scanGeom = new THREE.BufferGeometry();
-        const scanPositions = new Float32Array(5000 * 3);
-        const scanColors = new Float32Array(5000 * 3);
+        // 👇 修改后：扩大为 50000 个点，尺寸调为 0.05
+        const scanPositions = new Float32Array(50000 * 3);
+        const scanColors = new Float32Array(50000 * 3);
         scanGeom.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3));
         scanGeom.setAttribute('color', new THREE.BufferAttribute(scanColors, 3));
 
         const scanMesh = new THREE.Points(scanGeom, new THREE.PointsMaterial({
             vertexColors: true,
-            size: 0.03,
+            size: 0.03, // 稍微调大一点，更容易看清
             sizeAttenuation: true
         }));
         scanMesh.frustumCulled = false;
         scene.add(scanMesh);
 
         // B2. 历史地图层
-        const mapMaxPoints = 1000000;
+        const mapMaxPoints = 3000000;
         const mapGeom = new THREE.BufferGeometry();
         const mapPositions = new Float32Array(mapMaxPoints * 3);
         const mapColors = new Float32Array(mapMaxPoints * 3);
@@ -5243,7 +5244,7 @@
 
                 if (isFlat) {
                     for (let i = 0; i < scan.length; i += 4) {
-                        if (c >= 5000 * 3) break;
+                        if (c >= 50000 * 3) break;
 
                         scanPos[c++] = scan[i] * scaleFactor;
                         scanPos[c++] = scan[i + 1] * scaleFactor;
@@ -5262,7 +5263,7 @@
                     }
                 }
 
-                for (let i = c; i < 5000 * 3; i++) scanPos[i] = 99999;
+                for (let i = c; i < 50000 * 3; i++) scanPos[i] = 99999;
                 scanMesh.geometry.attributes.position.needsUpdate = true;
                 scanMesh.geometry.attributes.color.needsUpdate = true;
 
@@ -5270,20 +5271,20 @@
                     const poseX = pose.x * scaleFactor;
                     const poseY = pose.y * scaleFactor;
                     const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
-                    if (dist > 0.2) {
-                        const mapPos = mapMesh.geometry.attributes.position.array;
-                        const mapCol = mapMesh.geometry.attributes.color.array;
 
-                        for (let k = 0; k < c; k++) {
-                            if (mapCursor >= mapMaxPoints * 3) mapCursor = 0;
-                            mapPos[mapCursor] = scanPos[k];
-                            mapCol[mapCursor] = scanCol[k];
-                            mapCursor++;
-                        }
-                        mapMesh.geometry.attributes.position.needsUpdate = true;
-                        mapMesh.geometry.attributes.color.needsUpdate = true;
-                        lastKeyframePose = { x: poseX, y: poseY };
+                    const mapPos = mapMesh.geometry.attributes.position.array;
+                    const mapCol = mapMesh.geometry.attributes.color.array;
+
+                    for (let k = 0; k < c; k++) {
+                        if (mapCursor >= mapMaxPoints * 3) mapCursor = 0;
+                        mapPos[mapCursor] = scanPos[k];
+                        mapCol[mapCursor] = scanCol[k];
+                        mapCursor++;
                     }
+                    mapMesh.geometry.attributes.position.needsUpdate = true;
+                    mapMesh.geometry.attributes.color.needsUpdate = true;
+                    lastKeyframePose = { x: poseX, y: poseY };
+
                 }
             }
         }
