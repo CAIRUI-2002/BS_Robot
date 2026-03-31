@@ -5243,7 +5243,8 @@
                 const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
 
                 if (isFlat) {
-                    for (let i = 0; i < scan.length; i += 4) {
+                    // 🚀 核心修改 1：将步长从 4 改为 6，因为现在每个点包含 [x, y, z, r, g, b] 6个数据
+                    for (let i = 0; i < scan.length; i += 6) {
                         if (c >= 50000 * 3) break;
 
                         scanPos[c++] = scan[i] * scaleFactor;
@@ -5251,15 +5252,15 @@
                         let valZ = (i + 2 < scan.length) ? scan[i + 2] : 0.1;
                         scanPos[c++] = valZ * scaleFactor;
 
-                        const intensity = (i + 3 < scan.length) ? scan[i + 3] : 0;
-                        const maxVal = 10.0;
-                        let val = Math.min(Math.max(intensity, 0), maxVal) / maxVal;
-                        const color = new THREE.Color();
-                        color.setHSL((1.0 - val) * 0.66, 1.0, 0.5);
+                        // 🚀 核心修改 2：去除 HSL 赋色，直接读取 RGB 真实颜色
+                        // 注意：Three.js 要求的颜色范围是 0.0 ~ 1.0，所以需要除以 255
+                        let r = (i + 3 < scan.length) ? scan[i + 3] / 255.0 : 1.0;
+                        let g = (i + 4 < scan.length) ? scan[i + 4] / 255.0 : 1.0;
+                        let b = (i + 5 < scan.length) ? scan[i + 5] / 255.0 : 1.0;
 
-                        scanCol[d++] = color.r;
-                        scanCol[d++] = color.g;
-                        scanCol[d++] = color.b;
+                        scanCol[d++] = r;
+                        scanCol[d++] = g;
+                        scanCol[d++] = b;
                     }
                 }
 
