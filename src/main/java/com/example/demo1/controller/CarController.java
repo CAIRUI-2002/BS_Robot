@@ -51,8 +51,7 @@ public class CarController {
     }
 
     /**
-     * 接收前端摇杆发送的 x 和 y 坐标 (-100 到 100)
-     * API 路径: /api/car/move?x=50&y=-20
+     * 修改现有的 /move 接口，加入 "type": "move" 标识
      */
     @GetMapping("/move")
     public String moveCar(@RequestParam int x, @RequestParam int y) {
@@ -61,17 +60,42 @@ public class CarController {
         }
 
         try {
-            // 将坐标组装成 Python 端需要解析的 JSON 字符串
-            String jsonCmd = String.format("{\"x\": %d, \"y\": %d}", x, y);
+            // 加入 type 字段
+            String jsonCmd = String.format("{\"type\": \"move\", \"x\": %d, \"y\": %d}", x, y);
             byte[] sendData = jsonCmd.getBytes("UTF-8");
 
-            // 打包并发送 UDP 报文
             DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, carAddress, carPort);
             udpSocket.send(sendPacket);
             
             return "success";
         } catch (Exception e) {
             System.err.println("⚠️ UDP 指令下发小车失败: " + e.getMessage());
+            return "error";
+        }
+    }
+
+    /**
+     * 新增：接收前端的破损点坐标并下发给履带小车
+     * API 路径: /api/car/target?lat=xxx&lon=xxx&yaw=xxx
+     */
+    @GetMapping("/target")
+    public String sendTarget(@RequestParam double lat, @RequestParam double lon, @RequestParam double yaw) {
+        if (udpSocket == null || carAddress == null) {
+            return "error: udp socket not initialized";
+        }
+
+        try {
+            // 组装目标点 JSON，标识类型为 "target"
+            String jsonCmd = String.format("{\"type\": \"target\", \"lat\": %f, \"lon\": %f, \"yaw\": %f}", lat, lon, yaw);
+            byte[] sendData = jsonCmd.getBytes("UTF-8");
+
+            DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, carAddress, carPort);
+            udpSocket.send(sendPacket);
+            
+            System.out.println("📍 已转发破损点坐标至履带车");
+            return "success";
+        } catch (Exception e) {
+            System.err.println("⚠️ UDP 目标下发失败: " + e.getMessage());
             return "error";
         }
     }

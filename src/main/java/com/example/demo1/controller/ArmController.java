@@ -148,4 +148,40 @@ public class ArmController {
             return "Jog End Error: " + e.getMessage();
         }
     }
+
+    /**
+     * 4. ✅ 夹爪控制相关接口
+     */
+    @GetMapping("/gripper")
+    public String setGripper(@RequestParam double value) {
+        try {
+            String url = String.format(Locale.US, "http://%s:%s/gripper?value=%f", ARM_IP, ARM_PORT, value);
+            restTemplate.getForObject(url, String.class);
+            return "Gripper Set";
+        } catch (Exception e) {
+            return "Gripper Error: " + e.getMessage();
+        }
+    }
+
+    @GetMapping("/gripper_jog")
+    public String jogGripper(@RequestParam int dir) {
+        try {
+            String url = String.format("http://%s:%s/gripper_jog?dir=%d", ARM_IP, ARM_PORT, dir);
+            restTemplate.getForObject(url, String.class);
+            return "Gripper Jog Start";
+        } catch (Exception e) {
+            return "Gripper Jog Error";
+        }
+    }
+
+    @GetMapping("/gripper_stop")
+    public String stopGripper() {
+        try {
+            String url = String.format("http://%s:%s/gripper_stop", ARM_IP, ARM_PORT);
+            restTemplate.getForObject(url, String.class);
+            return "Gripper Stopped";
+        } catch (Exception e) {
+            return "Gripper Stop Error";
+        }
+    }
 }

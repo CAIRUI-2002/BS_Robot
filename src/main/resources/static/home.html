@@ -192,6 +192,10 @@
                             <div id="threeContainer"></div>
 
                             <div id="carJoystickPanel" class="floating-joystick">
+                                <button id="btnSendFaultToCar" class="action-btn-small"
+                                    style="width: 100%; margin-bottom: 8px; background: linear-gradient(180deg, #e6a23c, #d35400); border-color: #d35400;">
+                                    📍 发送破损点坐标
+                                </button>
                                 <div class="joystick-title">🚀 履带车控制</div>
                                 <div class="joystick-base" id="carJoystickBase">
                                     <div class="joystick-stick" id="carJoystickStick"></div>
@@ -342,77 +346,121 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="control-group-box joints-group">
+                        <div class="control-group-box joints-group" style="display: flex; flex-direction: column;">
                             <div class="group-header-flex">
-                                <div class="group-title">关节独立控制 (Joints)</div>
+                                <div class="group-title">关节与夹爪控制</div>
                                 <div style="display: flex; gap: 8px;">
                                     <button onclick="captureFaultLeftSequence()"
-                                        class="test-sequence-btn capture-btn-left">📸
-                                        破损点左侧拍照</button>
+                                        class="test-sequence-btn capture-btn-left">📸 破损点左侧拍照</button>
                                     <button onclick="captureFaultSequence()" class="test-sequence-btn capture-btn">📸
                                         破损点右侧拍照</button>
                                     <button onclick="testArmSequence()" class="test-sequence-btn">一键测试</button>
                                 </div>
                             </div>
-                            <div class="joint-list">
-                                <div class="joint-row">
-                                    <span class="joint-label">J1 基座</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(0, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(0, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(0, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(0, 1, event)" ontouchend="stopArmJog()">+</button>
+
+                            <div style="display: flex; flex-direction: column; flex: 1;">
+
+                                <div
+                                    style="flex: 2; display: flex; flex-direction: row; gap: 10px; border-bottom: 1px dashed rgba(135,200,255,0.2); padding-bottom: 5px; margin-bottom: 5px;">
+                                    <div class="joint-list"
+                                        style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <div class="joint-row">
+                                            <span class="joint-label">J1 基座</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(0, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(0, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(0, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(0, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                        <div class="joint-row">
+                                            <span class="joint-label">J2 大臂</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(1, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(1, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(1, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(1, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                        <div class="joint-row">
+                                            <span class="joint-label">J3 小臂</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(2, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(2, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(2, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(2, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                    </div>
+
+                                    <div class="joint-list"
+                                        style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
+                                        <div class="joint-row">
+                                            <span class="joint-label">J4 腕旋</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(3, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(3, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(3, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(3, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                        <div class="joint-row">
+                                            <span class="joint-label">J5 腕折</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(4, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(4, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(4, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(4, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                        <div class="joint-row">
+                                            <span class="joint-label">J6 末端</span>
+                                            <button class="joint-btn minus" onmousedown="startArmJog(5, -1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(5, -1, event)"
+                                                ontouchend="stopArmJog()">-</button>
+                                            <button class="joint-btn plus" onmousedown="startArmJog(5, 1, event)"
+                                                onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                                ontouchstart="startArmJog(5, 1, event)"
+                                                ontouchend="stopArmJog()">+</button>
+                                        </div>
+                                    </div>
                                 </div>
 
-                                <div class="joint-row">
-                                    <span class="joint-label">J2 大臂</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(1, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(1, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(1, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(1, 1, event)" ontouchend="stopArmJog()">+</button>
-                                </div>
+                                <div
+                                    style="flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 5px;">
+                                    <div
+                                        style="display: flex; justify-content: space-between; align-items: center; padding: 0 5px;">
+                                        <span class="joint-label" style="font-weight: bold;">夹爪控制 (0-100mm)</span>
+                                        <span class="j-val" id="disp_gripper"
+                                            style="color: #00ff00; font-family: monospace; font-size: 14px;">0.0
+                                            mm</span>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <button class="joint-btn minus" onmousedown="startGripperJog(-1)"
+                                            onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                            ontouchstart="startGripperJog(-1)" ontouchend="stopGripperJog()"
+                                            style="flex: 1; height: 32px; margin: 0;">闭合</button>
 
-                                <div class="joint-row">
-                                    <span class="joint-label">J3 小臂</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(2, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(2, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(2, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(2, 1, event)" ontouchend="stopArmJog()">+</button>
-                                </div>
+                                        <input type="range" id="gripperSlider" class="custom-range" min="0" max="100"
+                                            step="1" value="0" oninput="updateGripperLabel(this.value)"
+                                            onchange="setGripperValue(this.value)" style="flex: 3;">
 
-                                <div class="joint-row">
-                                    <span class="joint-label">J4 腕旋</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(3, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(3, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(3, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(3, 1, event)" ontouchend="stopArmJog()">+</button>
-                                </div>
-
-                                <div class="joint-row">
-                                    <span class="joint-label">J5 腕折</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(4, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(4, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(4, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(4, 1, event)" ontouchend="stopArmJog()">+</button>
-                                </div>
-
-                                <div class="joint-row">
-                                    <span class="joint-label">J6 末端</span>
-                                    <button class="joint-btn minus" onmousedown="startArmJog(5, -1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(5, -1, event)" ontouchend="stopArmJog()">-</button>
-                                    <button class="joint-btn plus" onmousedown="startArmJog(5, 1, event)"
-                                        onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
-                                        ontouchstart="startArmJog(5, 1, event)" ontouchend="stopArmJog()">+</button>
+                                        <button class="joint-btn plus" onmousedown="startGripperJog(1)"
+                                            onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                            ontouchstart="startGripperJog(1)" ontouchend="stopGripperJog()"
+                                            style="flex: 1; height: 32px; margin: 0;">张开</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -458,7 +506,8 @@
 
                                 <div id="cableInfoPopup" class="cable-info-popup" style="display: none;">
                                     <div class="popup-close"
-                                        onclick="document.getElementById('cableInfoPopup').style.display='none'">×</div>
+                                        onclick="document.getElementById('cableInfoPopup').style.display='none'">×
+                                    </div>
                                     <div class="popup-title">📌 电缆测点信息</div>
                                     <div class="popup-item"><strong>距离起点：</strong> <span id="popupDist"
                                             class="hl-text">--</span> m</div>

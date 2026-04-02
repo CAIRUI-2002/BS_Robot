@@ -734,13 +734,16 @@
             const timeoutId = setTimeout(() => controller.abort(), 2000);
 
             // ✅ 使用 Promise.all 同时拉取角度和位姿
+            // ✅ 修改：加入对夹爪状态 /gripper_status 的请求
             Promise.all([
                 fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal })
                     .then(res => res.ok ? res.json() : Promise.reject("Angles Error")),
                 fetch(ARM_API_BASE + "/get_end_pose", { signal: controller.signal })
-                    .then(res => res.ok ? res.json() : Promise.reject("Pose Error"))
+                    .then(res => res.ok ? res.json() : Promise.reject("Pose Error")),
+                fetch(ARM_API_BASE + "/gripper_status", { signal: controller.signal }) // 新增夹爪轮询
+                    .then(res => res.ok ? res.text() : Promise.reject("Gripper Error"))
             ])
-                .then(([anglesData, poseData]) => {
+                .then(([anglesData, poseData, gripperData]) => {
                     clearTimeout(timeoutId);
 
                     // --- 处理关节角度 ---
@@ -771,6 +774,18 @@
                     if (Array.isArray(poseData) && poseData.length === 6) {
                         currentEndPose = [...poseData];
                         isEndPoseSynced = true;
+                    }
+
+                    // --- 处理夹爪状态 ---
+                    if (gripperData) {
+                        const currentGripper = parseFloat(gripperData);
+                        const el = document.getElementById('disp_gripper');
+                        const slider = document.getElementById('gripperSlider');
+                        if (el) el.textContent = currentGripper.toFixed(1) + ' mm';
+                        // 当用户没有在拖动且没有在长按点动时，同步滑条，防止跳变
+                        if (slider && !isGripperJogging) {
+                            slider.value = currentGripper;
+                        }
                     }
                 })
                 .catch(err => {
@@ -2471,6 +2486,38 @@
             const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
             fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
         }, 2000);
+    };
+
+    // ==========================================
+    // ✅ [新增] 夹爪控制与状态轮询逻辑
+    // ==========================================
+    let isGripperJogging = false;
+    let gripperTarget = 0;
+
+    window.updateGripperLabel = function (val) {
+        const el = document.getElementById('disp_gripper');
+        if (el) el.textContent = parseFloat(val).toFixed(1) + ' mm';
+    };
+
+    window.setGripperValue = function (val) {
+        gripperTarget = parseFloat(val);
+        window.updateGripperLabel(gripperTarget);
+        const url = `${ARM_BACKEND_URL}/arm/gripper?value=${gripperTarget}`;
+        fetch(url).catch(err => console.error("夹爪数值设定失败:", err));
+    };
+
+    window.startGripperJog = function (dir) {
+        if (isGripperJogging) return;
+        isGripperJogging = true;
+        const url = `${ARM_BACKEND_URL}/arm/gripper_jog?dir=${dir}`;
+        fetch(url).catch(err => { isGripperJogging = false; console.error("夹爪点动失败:", err); });
+    };
+
+    window.stopGripperJog = function () {
+        if (!isGripperJogging) return;
+        isGripperJogging = false;
+        const url = `${ARM_BACKEND_URL}/arm/gripper_stop`;
+        fetch(url).catch(err => console.error("夹爪停止失败:", err));
     };
     // 全局变量，记录状态
     let isStopping = false; // 是否正在停止中
@@ -5449,6 +5496,88 @@
 
         base.addEventListener('pointerup', handlePointerUp);
         base.addEventListener('pointercancel', handlePointerUp);
+        // ==========================================
+        // 新增：发送破损点数据给小车
+        // ==========================================
+        const btnSendFault = document.getElementById('btnSendFaultToCar');
+        if (btnSendFault) {
+            btnSendFault.addEventListener('click', function () {
+                // 1. 状态校验
+                if (!window.lastFaultCablePos) {
+                    alert("⚠️ 尚未检测到有效破损点，无法发送！");
+                    return;
+                }
+                if (!window.isGpsCalibrated || !window.gpsAnchor) {
+                    alert("⚠️ GPS 尚未标定完成，无法计算真实经纬度！\n(可按 Shift+C 触发室内虚拟标定)");
+                    return;
+                }
+
+                // 2. 坐标转换 (SLAM -> GPS)
+                const faultGps = window.slamToGps(window.lastFaultCablePos.x, window.lastFaultCablePos.y);
+                if (!faultGps) return;
+
+                // 3. 计算电缆在破损点处的切线朝向 (Yaw)
+                let globalYaw = 0.0;
+                if (window.savedCablePath && window.savedCablePath.length > 1) {
+                    // 寻找距离破损点最近的路径节点
+                    let minD = Infinity;
+                    let closestIdx = 0;
+                    for (let i = 0; i < window.savedCablePath.length; i++) {
+                        const d = window.lastFaultCablePos.distanceTo(window.savedCablePath[i]);
+                        if (d < minD) {
+                            minD = d;
+                            closestIdx = i;
+                        }
+                    }
+
+                    // 取相邻点计算切线向量
+                    let p1, p2;
+                    if (closestIdx < window.savedCablePath.length - 1) {
+                        p1 = window.savedCablePath[closestIdx];
+                        p2 = window.savedCablePath[closestIdx + 1];
+                    } else {
+                        p1 = window.savedCablePath[closestIdx - 1];
+                        p2 = window.savedCablePath[closestIdx];
+                    }
+
+                    // 计算 SLAM 坐标系下的偏航角
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const slamYaw = Math.atan2(dy, dx);
+
+                    // 加上 GPS 标定时的偏角，得到真实的全局航向角
+                    globalYaw = slamYaw + window.headingOffset;
+                }
+
+                // 4. 发送给 Java 后端
+                // 为了防止精度丢失，保留较多的小数位
+                const url = `/api/car/target?lat=${faultGps.lat.toFixed(7)}&lon=${faultGps.lon.toFixed(7)}&yaw=${globalYaw.toFixed(4)}`;
+
+                // 按钮加上加载动画防止重复点击
+                const originText = btnSendFault.innerText;
+                btnSendFault.innerText = "⏳ 发送中...";
+                btnSendFault.disabled = true;
+
+                fetch(url)
+                    .then(res => res.text())
+                    .then(msg => {
+                        console.log(`📍 破损点下发成功: Lat=${faultGps.lat.toFixed(6)}, Lon=${faultGps.lon.toFixed(6)}, Yaw=${globalYaw.toFixed(2)}`);
+                        btnSendFault.innerText = "✅ 发送成功";
+                        setTimeout(() => {
+                            btnSendFault.innerText = originText;
+                            btnSendFault.disabled = false;
+                        }, 2000);
+                    })
+                    .catch(err => {
+                        console.error("⚠️ 目标发送失败:", err);
+                        btnSendFault.innerText = "❌ 发送失败";
+                        setTimeout(() => {
+                            btnSendFault.innerText = originText;
+                            btnSendFault.disabled = false;
+                        }, 2000);
+                    });
+            });
+        }
     })();
 
 })(); 
