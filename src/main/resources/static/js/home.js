@@ -529,6 +529,8 @@
         // --- C. 面板切换逻辑 (升级版) ---
         function switchMainPanel(target) {
             console.log("切换面板模式至:", target);
+            // 👇 1. 新增这一行：记录当前激活的面板
+            window.currentActivePanel = target;
 
             // 1. 隐藏所有面板
             if (gprPanel) { gprPanel.classList.add("hidden"); gprPanel.style.display = 'none'; }
@@ -728,20 +730,16 @@
                 return;
             }
 
-            let nextDelay = 100;
+            // 👇 核心优化：如果没有连上或者不在对应面板，直接把延迟拉长到 3 秒
+            let nextDelay = (window.currentActivePanel === 'arm' || window.currentActivePanel === 'robot') ? 200 : 3000;
+
             const controller = new AbortController();
-            // 建议将超时时间放宽到 2000ms，防止网络波动导致两个请求互相掐断
             const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-            // ✅ 使用 Promise.all 同时拉取角度和位姿
-            // ✅ 修改：加入对夹爪状态 /gripper_status 的请求
             Promise.all([
-                fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal })
-                    .then(res => res.ok ? res.json() : Promise.reject("Angles Error")),
-                fetch(ARM_API_BASE + "/get_end_pose", { signal: controller.signal })
-                    .then(res => res.ok ? res.json() : Promise.reject("Pose Error")),
-                fetch(ARM_API_BASE + "/gripper_status", { signal: controller.signal }) // 新增夹爪轮询
-                    .then(res => res.ok ? res.text() : Promise.reject("Gripper Error"))
+                fetch(ARM_API_BASE + "/get_angles", { signal: controller.signal }).then(res => res.ok ? res.json() : Promise.reject("Angles Error")),
+                fetch(ARM_API_BASE + "/get_end_pose", { signal: controller.signal }).then(res => res.ok ? res.json() : Promise.reject("Pose Error")),
+                fetch(ARM_API_BASE + "/gripper_status", { signal: controller.signal }).then(res => res.ok ? res.text() : Promise.reject("Gripper Error"))
             ])
                 .then(([anglesData, poseData, gripperData]) => {
                     clearTimeout(timeoutId);
@@ -787,19 +785,19 @@
                             slider.value = currentGripper;
                         }
                     }
+                    // 数据正常获取，可以恢复 100ms 刷新
+                    nextDelay = 100;
                 })
                 .catch(err => {
                     clearTimeout(timeoutId);
                     if (!hasLoggedArmError) {
-                        console.warn("⚠️ 机械臂未连接，转为低速模式以防刷屏。");
+                        console.warn("⚠️ 机械臂未连接，转为低速模式防卡顿。");
                         hasLoggedArmError = true;
-                        const container = document.getElementById('armDataDisplay');
-                        if (container) container.style.opacity = "0.5";
                     }
-                    nextDelay = 2000;
+                    // 👇 网络报错时，强制降速到 3000ms，绝不允许它狂刷
+                    nextDelay = 3000;
                 })
                 .finally(() => {
-                    // 🔥 整个函数只能在这里出现一次 setTimeout！
                     setTimeout(fetchArmAngles, nextDelay);
                 });
         }
@@ -1253,7 +1251,7 @@
 
     // ====================== Z 字型三维拼接 ======================
 
-    // 渲染所有剖面，按 Z 字路径拼接到一个三维坐标系（带交互 + 轴）
+    // Z 字型三维拼接
     function render3DZigzagAll(result, useMigrated) {
         const container = $("threeContainer");
         if (!container) return;
@@ -1266,6 +1264,19 @@
 
         const segments = result.segments || [];
         if (!segments.length) return;
+
+        // 👇 1. 新增：彻底销毁旧的 WebGL 上下文和动画循环
+        if (window.gprAnimId) {
+            cancelAnimationFrame(window.gprAnimId);
+            window.gprAnimId = null;
+        }
+        if (window.gprRenderer) {
+            window.gprRenderer.dispose();
+            window.gprRenderer.forceContextLoss();
+            window.gprRenderer.domElement = null;
+            window.gprRenderer = null;
+        }
+        // 👆 结束新增
 
         // 清空旧内容
         container.innerHTML = "";
@@ -1316,6 +1327,8 @@
         renderer.setSize(width, height);
         renderer.toneMapping = THREE.NoToneMapping;
         container.appendChild(renderer.domElement);
+        // 👇 新增这一行：保存渲染器引用，方便下次销毁
+        window.gprRenderer = renderer;
 
         // 所有剖面和路径统一放在 world 组里
         const world = new THREE.Group();
@@ -1664,7 +1677,11 @@
 
         // ========== 动画循环 ==========
         function animate() {
-            requestAnimationFrame(animate);
+            // 👇 1. 修改：将动画循环 ID 挂载到 window 上，方便前面步骤 1 中进行 cancelAnimationFrame 销毁
+            window.gprAnimId = requestAnimationFrame(animate);
+
+            // 👇 2. 核心拦截：如果当前用户切换到了“机器人导航”或“履带车”等其他面板，直接退出，跳过极其耗费 GPU 的场景渲染
+            if (window.currentActivePanel !== 'gpr') return;
 
             // ✅ 新增：动态智能显隐（视角自适应）逻辑
             // 实时判断你的视角在哪里，自动把挡在眼前的网格藏起来，露出内部数据
@@ -2779,6 +2796,12 @@
         // 🎨 绘图逻辑 (保留原有双通道绘制)
         // ============================================================
         function drawSignal() {
+            // 🚀 核心拦截：如果你没在看“故障定点(pathFault)”面板，直接跳过波形清屏和绘制！
+            if (window.currentActivePanel !== 'pathFault') {
+                requestAnimationFrame(drawSignal);
+                return;
+            }
+
             const w = canvas.width;
             const h = canvas.height;
             if (h === 0 || w === 0) return;
@@ -4939,6 +4962,9 @@
         let hasLoggedSlamSuccess = false;
         let isFirstFrame = true;
 
+        // 👇 1. 新增：记录点云渲染时间戳，用于节流
+        let lastPointCloudRenderTime = 0;
+
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
@@ -5311,9 +5337,15 @@
                     }
                 }
 
-                for (let i = c; i < 50000 * 3; i++) scanPos[i] = 99999;
-                scanMesh.geometry.attributes.position.needsUpdate = true;
-                scanMesh.geometry.attributes.color.needsUpdate = true;
+                // 👇 2. 新增：计算距离上次推入显存过了多少毫秒 (>60ms 即最高约 16 帧/秒)
+                const now = performance.now();
+                const shouldRender3D = (now - lastPointCloudRenderTime > 60);
+
+                if (shouldRender3D) {
+                    for (let i = c; i < 50000 * 3; i++) scanPos[i] = 99999;
+                    scanMesh.geometry.attributes.position.needsUpdate = true;
+                    scanMesh.geometry.attributes.color.needsUpdate = true;
+                }
 
                 if (pose) {
                     const poseX = pose.x * scaleFactor;
@@ -5329,10 +5361,15 @@
                         mapCol[mapCursor] = scanCol[k];
                         mapCursor++;
                     }
-                    mapMesh.geometry.attributes.position.needsUpdate = true;
-                    mapMesh.geometry.attributes.color.needsUpdate = true;
-                    lastKeyframePose = { x: poseX, y: poseY };
 
+                    // 👇 3. 只有当判定需要刷新时，才将历史地图数据推入 GPU
+                    if (shouldRender3D) {
+                        mapMesh.geometry.attributes.position.needsUpdate = true;
+                        mapMesh.geometry.attributes.color.needsUpdate = true;
+                        lastPointCloudRenderTime = now; // 刷新时间戳
+                    }
+
+                    lastKeyframePose = { x: poseX, y: poseY };
                 }
             }
         }
@@ -5363,6 +5400,12 @@
         // 修改：将原来的 animate 函数展开，并加入 updatePopupPosition()
         function animate() {
             requestAnimationFrame(animate);
+
+            // 🚀 核心拦截：如果当前用户没在看“路径查找”面板，也没在看“常规导航”面板，直接跳过 3D 渲染计算！
+            if (window.currentActivePanel !== 'pathFault' && window.currentActivePanel !== 'robot') {
+                return;
+            }
+
             renderer.render(scene, camera);
             updatePopupPosition(); // ✅ 每一帧实时刷新弹窗位置，使其跟随地图拖拽
         }

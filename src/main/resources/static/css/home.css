@@ -166,8 +166,6 @@ body {
     /* 边框颜色 */
     background: rgba(4, 20, 40, 0.5);
     /* 半透明深蓝背景 */
-    backdrop-filter: blur(3px);
-    /* 背景模糊一点点，玻璃感（某些浏览器才支持） */
 }
 
 /* 底部功能按钮条 */
@@ -2162,7 +2160,7 @@ input[type="range"]::-webkit-slider-thumb {
     cursor: pointer;
     font-size: 12px;
     transition: all 0.2s;
-    backdrop-filter: blur(2px);
+
 }
 
 .nav-overlay-btn:hover {
@@ -2205,7 +2203,6 @@ input[type="range"]::-webkit-slider-thumb {
     /* 改为左对齐 */
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
     margin-bottom: 5px;
-    backdrop-filter: blur(2px);
     white-space: nowrap;
     line-height: 1.4;
     /* 增加行高 */
@@ -2266,7 +2263,6 @@ input[type="range"]::-webkit-slider-thumb {
     font-size: 13px;
     z-index: 200;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
     min-width: 160px;
     pointer-events: auto;
     /* 允许点击内部的关闭按钮 */
@@ -2368,7 +2364,6 @@ input[type="range"]::-webkit-slider-thumb {
     flex-direction: column;
     align-items: center;
     z-index: 100;
-    backdrop-filter: blur(4px);
     transition: background 0.3s, border-color 0.3s;
 
     /* 👇 新增：彻底屏蔽浏览器的默认文本选中和拖拽行为 */
