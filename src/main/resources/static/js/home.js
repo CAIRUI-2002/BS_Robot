@@ -3538,6 +3538,8 @@
             1.0,
             0x00ff00
         );
+        const arrowZOffset = -0.9;
+        arrowHelper.position.set(0, 0, arrowZOffset);
         dogGroup.add(arrowHelper);
         scene.add(dogGroup);
 
@@ -3573,7 +3575,7 @@
                 // 3. 🚩【核心修改】位置偏移调整：把狗拎起来
                 // 参数分别是：x(前后), y(左右), z(上下)
                 // 这里的 0.6 是假设狗站高 60cm，你可以根据实际视觉效果微调这个数字
-                m20Model.position.set(0, 0, 0.35);
+                m20Model.position.set(0, 0, -0.55);
 
                 // 遍历模型并开启阴影/调整材质（可选）
                 m20Model.traverse((child) => {
@@ -3603,6 +3605,10 @@
             dogGroup.add(bodyMesh);
         }
 
+        // 临时联调参数：当前观察到 SLAM 场景整体低于 grid 约 0.8m，
+        // 先只对点云/机器狗/轨迹做统一高度补偿，不动 grid。
+        const SLAM_Z_OFFSET = 0.8;
+
         // B1. 实时雷达层
         const scanGeom = new THREE.BufferGeometry();
         // 👇 修改后：扩大为 50000 个点，尺寸调为 0.05
@@ -3617,6 +3623,7 @@
             sizeAttenuation: true
         }));
         scanMesh.frustumCulled = false;
+        scanMesh.position.z = SLAM_Z_OFFSET;
         scene.add(scanMesh);
 
         // B2. 历史地图层
@@ -3636,14 +3643,17 @@
             sizeAttenuation: true
         }));
         mapMesh.frustumCulled = false;
+        mapMesh.position.z = SLAM_Z_OFFSET;
         scene.add(mapMesh);
 
 
 
         // C. 机器狗轨迹
         const trailGroup = new THREE.Group();
+        trailGroup.position.z = SLAM_Z_OFFSET;
         scene.add(trailGroup);
         const faultMarkerGroup = new THREE.Group();
+        faultMarkerGroup.position.z = SLAM_Z_OFFSET;
         scene.add(faultMarkerGroup);
 
         let lastFaultPos = new THREE.Vector3(-999, -999, -999);
@@ -4968,9 +4978,10 @@
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                if (data.type === 'slam_data') {
+                // ✅ 加上对 'pose_data' 的支持
+                if (data.type === 'slam_data' || data.type === 'pose_data') {
                     if (!hasLoggedSlamSuccess) {
-                        console.log("%c🚀 SLAM 数据传输成功！...", "color: #00e5ff; font-weight: bold;");
+                        console.log("%c🚀 位置数据传输成功！...", "color: #00e5ff; font-weight: bold;");
                         hasLoggedSlamSuccess = true;
                     }
                     updateVis(data);
@@ -4985,7 +4996,7 @@
                 const px = pose.x * scaleFactor;
                 const py = pose.y * scaleFactor;
                 // ✅ 新增逻辑：提取真实的 Z 轴高度，减去 0.3m 的补偿值
-                const pz = ((pose.z !== undefined ? pose.z : 0.05) - 0.25) * scaleFactor;
+                const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
 
                 const isRTK = data.is_rtk === true;
                 if (typeof lastRTKStatus === 'undefined') {
@@ -5016,17 +5027,20 @@
                     }
                 }
 
-                dogGroup.position.set(px, py, pz);
+                dogGroup.position.set(px, py, pz + SLAM_Z_OFFSET);
                 // ✅ 新增提取 pitch 角度，如果没有则默认为 0
                 const pitch = pose.pitch !== undefined ? pose.pitch : 0.0;
 
                 // ✅ 核心修改：同时设置 pitch(绕Y轴) 和 yaw(绕Z轴)
                 // 'ZYX' 是旋转顺序，必须指定，否则在同时有偏航和俯仰时模型会发生万向节死锁导致倾斜
-                dogGroup.rotation.set(0, pitch, pose.yaw, 'ZYX');
+                dogGroup.rotation.set(0, 0, pose.yaw, 'ZYX');
 
+                // 临时禁用旧链路遗留的“grid 跟随机器人平移”逻辑。
+                // 当前点云、机器人、轨迹都已在统一世界坐标中，继续移动 grid/clickPlane
+                // 会导致它们整体相对 grid 看起来发生偏移。
                 if (typeof gridHelper !== 'undefined') {
-                    gridHelper.position.set(px, py, 0);
-                    if (clickPlane) clickPlane.position.set(px, py, 0);
+                    gridHelper.position.set(0, 0, 0);
+                    if (clickPlane) clickPlane.position.set(0, 0, 0);
                 }
 
                 if (isFirstFrame) {
@@ -5035,7 +5049,8 @@
                     isFirstFrame = false;
                 }
 
-                const currentPos = new THREE.Vector3(px, py, pz);
+                const trailZOffset = -0.9;
+                const currentPos = new THREE.Vector3(px, py, pz + trailZOffset);
                 const isFault = window.g_isFaultDetected === true;
 
                 // =========================================================
