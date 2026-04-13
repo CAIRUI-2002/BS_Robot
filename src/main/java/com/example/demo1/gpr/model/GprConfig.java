@@ -32,13 +32,13 @@ public class GprConfig {
     private double vMigMPerNs = 0.07;  // 偏移聚焦速度 - 仅用于F-K算法
     private boolean autoVSearch = true; // 是否自动搜索最优偏移速度
     private double vSearchMin = 0.05;  // 最小搜索速度
-    private double vSearchMax = 0.15;  // 最大搜索速度
+    private double vSearchMax = 0.1;  // 最大搜索速度
             private int fibIters = 12;         // 斐波那契迭代次数
             private int entropyBins = 256;     // 熵计算bins数
     
     // ==================== 预处理参数 ====================
     private double scaleFactor = 1.0;  // 数据缩放因子 (uint16通常不需要缩放)
-    private boolean depthGainOn = true;
+    private boolean depthGainOn = false; // 改为 false，不使用物理增益放大深层噪点
     private double depthGainStrength = 0.2;
     
     // ==================== Z 字几何参数 ====================

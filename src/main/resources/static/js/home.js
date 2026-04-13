@@ -1203,23 +1203,34 @@
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
 
-        let min = Infinity, max = -Infinity;
+        // === 替换为这部分新代码 ===
+        let maxAbs = 0;
         for (let r = 0; r < rows; r += stepY) {
             for (let c = 0; c < cols; c += stepX) {
-                const v = matrix[r][c];
-                if (v < min) min = v;
-                if (v > max) max = v;
+                const absV = Math.abs(matrix[r][c]);
+                if (absV > maxAbs) maxAbs = absV;
             }
         }
-        if (max === min) max = min + 1e-9;
+        if (maxAbs === 0) maxAbs = 1e-9;
+
+        // 核心：取最大绝对值的 60% 作为显示边界 (复刻 caxis)
+        const cLimit = maxAbs * 0.6;
+        const minLim = -cLimit;
+        const maxLim = cLimit;
 
         let idx = 0;
         for (let y = 0, r = 0; r < rows; r += stepY, y++) {
             for (let x = 0, c = 0; c < cols; c += stepX, x++) {
                 const v = matrix[r][c];
-                let norm = (v - min) / (max - min);
-                norm = Math.pow(norm, 0.7);
-                const gray = Math.max(0, Math.min(255, Math.round(norm * 255)));
+
+                // 线性映射到 [0, 1] 范围
+                let norm = (v - minLim) / (maxLim - minLim);
+                // 强制截断上下限 (超出范围的强波直接变纯黑/纯白)
+                norm = Math.max(0, Math.min(1, norm));
+
+                // 去掉之前的 Math.pow() 伽马校正，保持纯线性灰度
+                const gray = Math.round(norm * 255);
+
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
@@ -1287,9 +1298,9 @@
         const allCenters = [];
         let globalCenterId = 0;
 
-        // 1. 统计所有剖面的幅值范围（统一色标）
-        let vMin = Infinity;
-        let vMax = -Infinity;
+        // === 替换为这部分新代码 ===
+        // 1. 统计所有剖面的绝对最大幅值（统一色标）
+        let globalMaxAbs = 0;
         segments.forEach(seg => {
             const mat = useMigrated ? seg.migratedData : seg.rawData;
             if (!mat) return;
@@ -1297,13 +1308,17 @@
             const cols = mat[0].length;
             for (let r = 0; r < rows; r++) {
                 for (let c = 0; c < cols; c++) {
-                    const v = mat[r][c];
-                    if (v < vMin) vMin = v;
-                    if (v > vMax) vMax = v;
+                    const absV = Math.abs(mat[r][c]);
+                    if (absV > globalMaxAbs) globalMaxAbs = absV;
                 }
             }
         });
-        if (vMax === vMin) vMax = vMin + 1e-9;
+        if (globalMaxAbs === 0) globalMaxAbs = 1e-9;
+
+        // 计算统一的上下限 (60% 截断)
+        const cLimit = globalMaxAbs * 0.6;
+        let vMin = -cLimit;  // 注意这里是用 let，因为后面在 buildSegmentMesh 会作为参数传入
+        let vMax = cLimit;
 
         // 2. three.js 基本场景（不使用任何灯光）
         let width = container.clientWidth;
@@ -1804,10 +1819,11 @@
                 // 顶点灰度颜色（和 2D 剖面保持一致的风格）
                 const v = matrix[r][c];
 
+                // === 替换为这部分新代码 ===
                 let norm = (v - vMin) / (vMax - vMin); // [0,1]
-                norm = Math.max(0, Math.min(1, norm));
-                norm = Math.pow(norm, 1.2);
+                norm = Math.max(0, Math.min(1, norm)); // 严格截断
 
+                // 去掉 Math.pow(norm, 1.2)，使用纯线性映射
                 const gray = norm;
 
                 colors[idxC++] = gray;

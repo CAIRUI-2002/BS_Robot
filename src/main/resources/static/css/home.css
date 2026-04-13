@@ -395,6 +395,10 @@ body {
     height: 100%;
     background: black;
     display: block;
+
+    /* 👇 加上这两行代码就能解决波形被横向拉伸变形的问题 */
+    object-fit: contain;
+    image-rendering: pixelated;
 }
 
 .gpr-view-3d #threeContainer {
