@@ -43,24 +43,13 @@ public class GprProcessingService {
                 .sorted(Comparator.comparing(p -> p.getFileName().toString()))
                 .collect(Collectors.toList());
 
-        // === 新增：定义要截取的多段区间 ===
-        // 注意：这里假设你在 GprConfig.java 中添加了 getTraceRanges() 方法。
-        // 如果没有，你可以直接在这里写死这 5 段，例如：
-        List<int[]> ranges = Arrays.asList(
-            new int[]{4340, 4630},
-            new int[]{4970, 5260},
-            new int[]{22090, 22380},
-            new int[]{22730, 23020},
-            new int[]{23130, 23420}
-        );
-
-        // N 现在代表“总段数”，而不是“文件数”
-        int N = dztFiles.size() * ranges.size();
+        // === 修改：N 现在代表“文件总数”，每个文件就是一段 ===
+        int N = dztFiles.size();
         if (N == 0) {
-            throw new IllegalArgumentException("该目录下没有 .dzt 文件或未指定截取段");
+            throw new IllegalArgumentException("该目录下没有 .dzt 文件");
         }
 
-        // 方向 & 翻转标记 (依据总段数生成，确保 5 段能自动 Z 字形排布)
+        // 方向 & 翻转标记 (依据文件总数生成)
         int[] dirs = buildDirs(N, cfg);
         boolean[] flipLR = buildFlipFlags(N, cfg);
 
@@ -78,110 +67,115 @@ public class GprProcessingService {
 
         double[] vOptList = new double[N];
 
-        System.out.println("共发现 " + dztFiles.size() + " 个 .dzt 文件，计划切分为 " + N + " 段处理……");
+        System.out.println("共发现 " + N + " 个 .dzt 文件，开始顺序处理……");
 
-        // === 核心修改：改为双重循环 ===
-        int globalIndex = 0; // 全局索引，用于对应 dirs 和 flipLR 数组
+        // === 核心修改：改为单重循环，逐个读取完整文件 ===
+        int globalIndex = 0;
 
         for (Path file : dztFiles) {
-            for (int[] range : ranges) {
-                int startTrace = range[0];
-                int endTrace = range[1];
+            // 动态推算当前文件的总道数，以便读取整个文件
+            long fileSize = Files.size(file);
+            int dataBytes = (int) (fileSize - cfg.getHeaderBytes());
+            int totalTraces = dataBytes / (cfg.getNs() * cfg.getBytesPerSample());
 
-                // === 1. 读取 DZT 局部数据 ===
-                DztReadResult read = readDztUint16(file, cfg, startTrace, endTrace);
-                double[][] data = read.data; // [ns x nr]
-                int nz = data.length;
-                int nu = data[0].length;
-
-                // 水平翻转 (使用全局索引)
-                if (flipLR[globalIndex]) {
-                    data = flipLeftRight(data);
-                }
-
-                // === 2. 去直流 ===
-                removeDcPerTrace(data);
-
-                // === 3. 深度增益 ===
-                if (cfg.isDepthGainOn()) {
-                    applyDepthGain(data, cfg.getDepthGainStrength());
-                }
-
-                // === 4. 斐波那契搜索，最小化偏移图像熵 ===
-                FibResult fib = fibonacciMinEntropy(
-                        data,
-                        cfg.getDtNs(),
-                        cfg.getDxM(),
-                        cfg.getVSearchMin(),
-                        cfg.getVSearchMax(),
-                        cfg.getFibIters(),
-                        cfg.getEntropyBins()
-                );
-                double vBest = fib.vBest;
-                double hBest = fib.hBest;
-                vOptList[globalIndex] = vBest;
-
-                // === 5. 在最优速度处做一次 Stolt F-K 偏移 ===
-                double[][] migrated = stoltFkMigration(
-                        data,
-                        cfg.getDtNs(),
-                        cfg.getDxM(),
-                        vBest
-                );
-
-                // === 6. Z 字几何计算 ===
-                double phi = phiCable + dirs[globalIndex] * theta;
-                segPhi[globalIndex] = phi;
-                double length = (nu - 1) * cfg.getDxM();
-                segLen[globalIndex] = length;
-
-                if (globalIndex < N) {
-                    double dxSeg = length * Math.cos(phi);
-                    double dySeg = length * Math.sin(phi);
-                    segStartXY[globalIndex + 1][0] = segStartXY[globalIndex][0] + dxSeg;
-                    segStartXY[globalIndex + 1][1] = segStartXY[globalIndex][1] + dySeg;
-                }
-
-                // === 7. 计算该段 u / z 轴 ===
-                double[] uAxis = new double[nu];
-                for (int c = 0; c < nu; c++) {
-                    uAxis[c] = c * cfg.getDxM();
-                }
-                double[] zAxis = new double[nz];
-                for (int r = 0; r < nz; r++) {
-                    double tNs = r * cfg.getDtNs();
-                    zAxis[r] = 0.5 * vDepth * tNs;
-                }
-
-                SegmentGeometry geo = new SegmentGeometry();
-                geo.setPhiRad(phi);
-                geo.setLength(length);
-                geo.setStartX(segStartXY[globalIndex][0]);
-                geo.setStartY(segStartXY[globalIndex][1]);
-                geo.setUAxis(uAxis);
-                geo.setZAxis(zAxis);
-
-                BScanResult segResult = new BScanResult();
-                // 给文件名加上范围后缀，方便前端区分是哪一段
-                segResult.setFileName(file.getFileName().toString() + "_" + startTrace + "-" + endTrace);
-                segResult.setNz(nz);
-                segResult.setNu(nu);
-                segResult.setRawData(data);
-                segResult.setMigratedData(migrated);
-                segResult.setVBest(vBest);
-                segResult.setHBest(hBest);
-                segResult.setGeometry(geo);
-
-                results.add(segResult);
-
-                System.out.printf(
-                        "  [%2d/%2d] %s (道号:%d-%d) | traces=%d dir=%+d flip=%b | v* = %.5f m/ns%n",
-                        globalIndex + 1, N, file.getFileName(), startTrace, endTrace, nu, 
-                        dirs[globalIndex], flipLR[globalIndex], vBest
-                );
-
-                globalIndex++; // 全局索引递增
+            if (totalTraces <= 0) {
+                System.err.println("推算不到合理的道数，跳过文件: " + file.getFileName());
+                continue;
             }
+
+            // === 1. 读取 DZT 完整数据 (1 到 totalTraces) ===
+            DztReadResult read = readDztUint16(file, cfg, 1, totalTraces);
+            double[][] data = read.data; // [ns x nr]
+            int nz = data.length;
+            int nu = data[0].length;
+
+            // 水平翻转 (使用全局索引)
+            if (flipLR[globalIndex]) {
+                data = flipLeftRight(data);
+            }
+
+            // === 2. 去直流 ===
+            removeDcPerTrace(data);
+
+            // === 3. 深度增益 ===
+            if (cfg.isDepthGainOn()) {
+                applyDepthGain(data, cfg.getDepthGainStrength());
+            }
+
+            // === 4. 斐波那契搜索，最小化偏移图像熵 ===
+            FibResult fib = fibonacciMinEntropy(
+                    data,
+                    cfg.getDtNs(),
+                    cfg.getDxM(),
+                    cfg.getVSearchMin(),
+                    cfg.getVSearchMax(),
+                    cfg.getFibIters(),
+                    cfg.getEntropyBins()
+            );
+            double vBest = fib.vBest;
+            double hBest = fib.hBest;
+            vOptList[globalIndex] = vBest;
+
+            // === 5. 在最优速度处做一次 Stolt F-K 偏移 ===
+            double[][] migrated = stoltFkMigration(
+                    data,
+                    cfg.getDtNs(),
+                    cfg.getDxM(),
+                    vBest
+            );
+
+            // === 6. Z 字几何计算 ===
+            double phi = phiCable + dirs[globalIndex] * theta;
+            segPhi[globalIndex] = phi;
+            double length = (nu - 1) * cfg.getDxM();
+            segLen[globalIndex] = length;
+
+            if (globalIndex < N) {
+                double dxSeg = length * Math.cos(phi);
+                double dySeg = length * Math.sin(phi);
+                segStartXY[globalIndex + 1][0] = segStartXY[globalIndex][0] + dxSeg;
+                segStartXY[globalIndex + 1][1] = segStartXY[globalIndex][1] + dySeg;
+            }
+
+            // === 7. 计算该段 u / z 轴 ===
+            double[] uAxis = new double[nu];
+            for (int c = 0; c < nu; c++) {
+                uAxis[c] = c * cfg.getDxM();
+            }
+            double[] zAxis = new double[nz];
+            for (int r = 0; r < nz; r++) {
+                double tNs = r * cfg.getDtNs();
+                zAxis[r] = 0.5 * vDepth * tNs;
+            }
+
+            SegmentGeometry geo = new SegmentGeometry();
+            geo.setPhiRad(phi);
+            geo.setLength(length);
+            geo.setStartX(segStartXY[globalIndex][0]);
+            geo.setStartY(segStartXY[globalIndex][1]);
+            geo.setUAxis(uAxis);
+            geo.setZAxis(zAxis);
+
+            BScanResult segResult = new BScanResult();
+            // 修改：直接使用文件名作为标识，不再附加道号后缀
+            segResult.setFileName(file.getFileName().toString());
+            segResult.setNz(nz);
+            segResult.setNu(nu);
+            segResult.setRawData(data);
+            segResult.setMigratedData(migrated);
+            segResult.setVBest(vBest);
+            segResult.setHBest(hBest);
+            segResult.setGeometry(geo);
+
+            results.add(segResult);
+
+            System.out.printf(
+                    "  [%2d/%2d] %s | traces=%d dir=%+d flip=%b | v* = %.5f m/ns%n",
+                    globalIndex + 1, N, file.getFileName(), nu, 
+                    dirs[globalIndex], flipLR[globalIndex], vBest
+            );
+
+            globalIndex++; // 全局索引递增
         }
 
         // === 8. 折线路径（Z 字路径） ===

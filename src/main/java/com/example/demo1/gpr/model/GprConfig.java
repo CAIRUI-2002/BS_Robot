@@ -23,36 +23,27 @@ public class GprConfig {
     private int bytesPerSample = 2;    // 每个采样点的字节数 (uint16 = 2, int32 = 4)
     private double timeWindow = 50.0;  // 测量时窗
     
-    // 新增多段配置，默认使用你指定的 5 段
-    private List<int[]> traceRanges = java.util.Arrays.asList(
-            new int[]{4340, 4630},
-            new int[]{4970, 5260},
-            new int[]{22090, 22380},
-            new int[]{22730, 23020},
-            new int[]{23130, 23420}
-    );
-    
     // ==================== 物理参数 ====================
     private double dxM = 0.010;        // 道间距 - 新设备默认1cm
-    private double epsilonR = 6.0;     // 介电常数 (ε_r) - 新增
+    private double epsilonR = 8.0;     // 介电常数 (ε_r) - 新增
     private final double cLight = 0.3; // 光速 (m/ns)
     
     // ==================== 速度参数（分离偏移速度和深度换算速度）====================
     private double vMigMPerNs = 0.07;  // 偏移聚焦速度 - 仅用于F-K算法
     private boolean autoVSearch = true; // 是否自动搜索最优偏移速度
-    private double vSearchMin = 0.06;  // 最小搜索速度
-    private double vSearchMax = 0.08;  // 最大搜索速度
-            private int fibIters = 8;         // 斐波那契迭代次数
+    private double vSearchMin = 0.05;  // 最小搜索速度
+    private double vSearchMax = 0.15;  // 最大搜索速度
+            private int fibIters = 12;         // 斐波那契迭代次数
             private int entropyBins = 256;     // 熵计算bins数
     
     // ==================== 预处理参数 ====================
     private double scaleFactor = 1.0;  // 数据缩放因子 (uint16通常不需要缩放)
     private boolean depthGainOn = true;
-    private double depthGainStrength = 1.0;
+    private double depthGainStrength = 0.2;
     
     // ==================== Z 字几何参数 ====================
     private double phiCableDeg = 0.0;  // 电缆初始角度 (度)
-    private double thetaDeg = 45.0;    // Z字转角 (度)
+    private double thetaDeg = 30.0;    // Z字转角 (度)
     private double startX = 0.0;       // 起点X坐标
     private double startY = 0.0;       // 起点Y坐标
     
