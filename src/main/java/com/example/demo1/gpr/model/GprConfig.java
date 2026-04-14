@@ -24,7 +24,7 @@ public class GprConfig {
     private double timeWindow = 50.0;  // 测量时窗
     
     // ==================== 物理参数 ====================
-    private double dxM = 0.010;        // 道间距 - 新设备默认1cm
+    private double dxM = 0.020;        // 道间距 - 新设备默认1cm
     private double epsilonR = 8.0;     // 介电常数 (ε_r) - 新增
     private final double cLight = 0.3; // 光速 (m/ns)
     
@@ -38,8 +38,8 @@ public class GprConfig {
     
     // ==================== 预处理参数 ====================
     private double scaleFactor = 1.0;  // 数据缩放因子 (uint16通常不需要缩放)
-    private boolean depthGainOn = false; // 改为 false，不使用物理增益放大深层噪点
-    private double depthGainStrength = 0.2;
+    private boolean depthGainOn = true; // 改为 false，不使用物理增益放大深层噪点
+    private double depthGainStrength = 0.1;
     
     // ==================== Z 字几何参数 ====================
     private double phiCableDeg = 0.0;  // 电缆初始角度 (度)

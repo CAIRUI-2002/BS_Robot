@@ -150,16 +150,16 @@
 
     // GPR 算法配置
     const CONFIG = {
-        brightnessThreshold: 225,  //核心亮度阈值,0-255
+        brightnessThreshold: 175,  //核心亮度阈值,0-255
         minRadius: 3,    //噪点过滤阈值
-        maxRadius: 30,       // ✅ 新增：最大半径阈值（如大于 30 像素则认为是地面/连续地层，不予标注）
+        maxRadius: 15,       // ✅ 新增：最大半径阈值（如大于 30 像素则认为是地面/连续地层，不予标注）
         radiusPadding: 6    //会在算出的真实亮斑半径基础上加上这个数值
     };
 
     // 管道连接配置
     const LINK_CONFIG = {
         maxZDiff: 0.1,
-        maxYDiff: 0.1
+        maxYDiff: 0.2
     };
 
     // ==========================================
@@ -263,7 +263,7 @@
         return mag;
     }
 
-    // 连通域检测算法 (GPR)
+    // 连通域检测算法 (GPR) - 视觉对齐版
     function detectBlobs(matrix) {
         if (!matrix || !matrix.length) return [];
         const rows = matrix.length;
@@ -271,27 +271,48 @@
         const visited = new Uint8Array(rows * cols);
         const blobs = [];
 
-        let min = Infinity, max = -Infinity;
+        // 1. 找到最大绝对值 (与 render2DCanvas/3D 渲染时的 60% 截断逻辑完全保持一致)
+        let maxAbs = 0;
         for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
-                const v = matrix[r][c];
-                if (v < min) min = v;
-                if (v > max) max = v;
+                const absV = Math.abs(matrix[r][c]);
+                if (absV > maxAbs) maxAbs = absV;
             }
         }
+        if (maxAbs === 0) maxAbs = 1e-9;
 
-        const range = max - min + 1e-9;
-        const realThreshold = min + (CONFIG.brightnessThreshold / 255.0) * range;
+        // 计算 60% 截断的上下限
+        const cLimit = maxAbs * 0.85;
+        const minLim = -cLimit;
+        const maxLim = cLimit;
+
+        // 提取亮度阈值 (0-255)，通常为 225
+        const thresholdGray = CONFIG.brightnessThreshold;
 
         for (let r = 0; r < rows; r++) {
             for (let c = 0; c < cols; c++) {
                 const idx = r * cols + c;
                 if (visited[idx]) continue;
-                if (matrix[r][c] > realThreshold) {
-                    const blob = floodFill(matrix, r, c, rows, cols, visited, realThreshold);
 
-                    // ✅ 修改：既要大于最小半径滤除噪点，又要小于最大半径滤除地面直达波
-                    if (blob.radius > CONFIG.minRadius && blob.radius < CONFIG.maxRadius) {
+                // 2. 实时将当前数值映射为视觉灰度 (0~255)
+                let norm = (matrix[r][c] - minLim) / (maxLim - minLim);
+                norm = Math.max(0, Math.min(1, norm)); // 强制截断
+                const gray = Math.round(norm * 255);
+
+                // 3. 如果灰度达到了亮度阈值，触发漫水填充
+                if (gray >= thresholdGray) {
+                    const blob = floodFill(matrix, r, c, rows, cols, visited, minLim, maxLim, thresholdGray);
+
+                    // 4. 计算宽高比，滤除水平连续地层 (宽远大于高)
+                    const width = blob.width || 1;
+                    const height = blob.height || 1;
+                    const aspectRatio = width / height;
+
+                    // ✅ 核心过滤逻辑：
+                    // 1. 大于最小半径 (去噪)
+                    // 2. 小于最大半径 (滤除超大面积背景)
+                    // 3. 宽高比不能太大 (比如 < 3.5)，滤除被 60% 截断强行提亮的水平地层长条
+                    if (blob.radius > CONFIG.minRadius && blob.radius < CONFIG.maxRadius && aspectRatio < 5.0) {
                         blobs.push(blob);
                     }
                 }
@@ -300,35 +321,52 @@
         return blobs;
     }
 
-    function floodFill(matrix, startR, startC, rows, cols, visited, threshold) {
+    // 漫水填充算法 - 视觉对齐版
+    function floodFill(matrix, startR, startC, rows, cols, visited, minLim, maxLim, thresholdGray) {
         const queue = [{ r: startR, c: startC }];
         visited[startR * cols + startC] = 1;
         let minR = startR, maxR = startR;
         let minC = startC, maxC = startC;
+
         while (queue.length > 0) {
             const curr = queue.shift();
             if (curr.r < minR) minR = curr.r;
             if (curr.r > maxR) maxR = curr.r;
             if (curr.c < minC) minC = curr.c;
             if (curr.c > maxC) maxC = curr.c;
+
             const neighbors = [
                 { r: curr.r - 1, c: curr.c }, { r: curr.r + 1, c: curr.c },
                 { r: curr.r, c: curr.c - 1 }, { r: curr.r, c: curr.c + 1 }
             ];
+
             for (let n of neighbors) {
                 if (n.r >= 0 && n.r < rows && n.c >= 0 && n.c < cols) {
                     const nIdx = n.r * cols + n.c;
-                    if (!visited[nIdx] && matrix[n.r][n.c] > threshold) {
-                        visited[nIdx] = 1;
-                        queue.push(n);
+                    if (!visited[nIdx]) {
+                        // 换算邻居点的视觉灰度
+                        let norm = (matrix[n.r][n.c] - minLim) / (maxLim - minLim);
+                        norm = Math.max(0, Math.min(1, norm));
+                        const gray = Math.round(norm * 255);
+
+                        // 只有达到同样亮度才连通
+                        if (gray >= thresholdGray) {
+                            visited[nIdx] = 1;
+                            queue.push(n);
+                        }
                     }
                 }
             }
         }
+
         const centerR = (minR + maxR) / 2;
         const centerC = (minC + maxC) / 2;
-        const radius = Math.max((maxR - minR), (maxC - minC)) / 2;
-        return { row: centerR, col: centerC, radius: radius };
+        const width = maxC - minC;
+        const height = maxR - minR;
+        const radius = Math.max(width, height) / 2;
+
+        // 返回宽和高供上层计算宽高比
+        return { row: centerR, col: centerC, radius: radius, width: width, height: height };
     }
 
     // SLAM 本地坐标 (x,y) 转 全局 GPS 经纬度 (lat,lon)
@@ -1203,34 +1241,23 @@
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
 
-        // === 替换为这部分新代码 ===
-        let maxAbs = 0;
+        let min = Infinity, max = -Infinity;
         for (let r = 0; r < rows; r += stepY) {
             for (let c = 0; c < cols; c += stepX) {
-                const absV = Math.abs(matrix[r][c]);
-                if (absV > maxAbs) maxAbs = absV;
+                const v = matrix[r][c];
+                if (v < min) min = v;
+                if (v > max) max = v;
             }
         }
-        if (maxAbs === 0) maxAbs = 1e-9;
-
-        // 核心：取最大绝对值的 60% 作为显示边界 (复刻 caxis)
-        const cLimit = maxAbs * 0.6;
-        const minLim = -cLimit;
-        const maxLim = cLimit;
+        if (max === min) max = min + 1e-9;
 
         let idx = 0;
         for (let y = 0, r = 0; r < rows; r += stepY, y++) {
             for (let x = 0, c = 0; c < cols; c += stepX, x++) {
                 const v = matrix[r][c];
-
-                // 线性映射到 [0, 1] 范围
-                let norm = (v - minLim) / (maxLim - minLim);
-                // 强制截断上下限 (超出范围的强波直接变纯黑/纯白)
-                norm = Math.max(0, Math.min(1, norm));
-
-                // 去掉之前的 Math.pow() 伽马校正，保持纯线性灰度
-                const gray = Math.round(norm * 255);
-
+                let norm = (v - min) / (max - min);
+                norm = Math.pow(norm, 0.7);
+                const gray = Math.max(0, Math.min(255, Math.round(norm * 255)));
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
@@ -1819,11 +1846,10 @@
                 // 顶点灰度颜色（和 2D 剖面保持一致的风格）
                 const v = matrix[r][c];
 
-                // === 替换为这部分新代码 ===
                 let norm = (v - vMin) / (vMax - vMin); // [0,1]
-                norm = Math.max(0, Math.min(1, norm)); // 严格截断
+                norm = Math.max(0, Math.min(1, norm));
+                norm = Math.pow(norm, 1.2);
 
-                // 去掉 Math.pow(norm, 1.2)，使用纯线性映射
                 const gray = norm;
 
                 colors[idxC++] = gray;

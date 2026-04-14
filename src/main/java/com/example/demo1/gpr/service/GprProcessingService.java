@@ -611,18 +611,18 @@ public class GprProcessingService {
 
         // 负频（共轭对称）
         if (Nt % 2 == 0) {
-            // Nt 偶数：idx_neg = (Nw-1):-1:2
+            // Nt 偶数：MATLAB 的 (Nw-1):-1:2 对应 Java 的 (Nw-2) 递减到 1
             int outRow = Nw;
-            for (int iw = Nw - 1; iw >= 2 && outRow < Nt; iw--) {
+            for (int iw = Nw - 2; iw >= 1 && outRow < Nt; iw--) {
                 for (int ix = 0; ix < Nx; ix++) {
                     Qfull[outRow][ix] = Qpos[iw][ix].conj();
                 }
                 outRow++;
             }
         } else {
-            // Nt 奇数：idx_neg = Nw:-1:2
+            // Nt 奇数：MATLAB 的 Nw:-1:2 对应 Java 的 (Nw-1) 递减到 1
             int outRow = Nw;
-            for (int iw = Nw; iw >= 2 && outRow < Nt; iw--) {
+            for (int iw = Nw - 1; iw >= 1 && outRow < Nt; iw--) {
                 for (int ix = 0; ix < Nx; ix++) {
                     Qfull[outRow][ix] = Qpos[iw][ix].conj();
                 }
