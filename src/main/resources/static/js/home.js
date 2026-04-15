@@ -150,7 +150,8 @@
 
     // GPR 算法配置
     const CONFIG = {
-        brightnessThreshold: 175,  //核心亮度阈值,0-255
+        brightnessThreshold: 160,  //核心亮度阈值,0-255
+        darknessThreshold: 60,     // ⚡ 新增：核心暗度阈值 (寻找黑斑，越小越黑，推荐 60-90)
         minRadius: 3,    //噪点过滤阈值
         maxRadius: 15,       // ✅ 新增：最大半径阈值（如大于 30 像素则认为是地面/连续地层，不予标注）
         radiusPadding: 6    //会在算出的真实亮斑半径基础上加上这个数值
@@ -158,8 +159,8 @@
 
     // 管道连接配置
     const LINK_CONFIG = {
-        maxZDiff: 0.1,
-        maxYDiff: 0.2
+        maxZDiff: 0.15,
+        maxYDiff: 0.4
     };
 
     // ==========================================
@@ -263,6 +264,57 @@
         return mag;
     }
 
+    // ⚡ 新增：雷达子波特征验证算法 (白斑上下黑斑检测)
+    function verifyWaveletPattern(matrix, blob, minLim, maxLim, rows, cols) {
+        let hasDarkAbove = false;
+        let hasDarkBelow = false;
+
+        // 搜索范围：以白斑的高度为基准，向上/向下最多搜索 1.5 倍高度的区域
+        const searchRange = Math.max(5, Math.floor(blob.height * 1.5));
+
+        // 限制在白斑的水平中心区域搜索，防止扫到旁边的斜向干扰
+        const colStart = Math.max(0, Math.floor(blob.col - blob.width / 4));
+        const colEnd = Math.min(cols - 1, Math.floor(blob.col + blob.width / 4));
+
+        // 1. 向上搜索黑斑
+        const topEdge = Math.floor(blob.row - blob.height / 2);
+        for (let r = topEdge - searchRange; r < topEdge; r++) {
+            if (r < 0) continue;
+            for (let c = colStart; c <= colEnd; c++) {
+                let norm = (matrix[r][c] - minLim) / (maxLim - minLim);
+                norm = Math.max(0, Math.min(1, norm)); // 强制截断
+                const gray = Math.round(norm * 255);
+
+                // 如果发现极暗的像素，说明存在负波谷
+                if (gray <= CONFIG.darknessThreshold) {
+                    hasDarkAbove = true;
+                    break;
+                }
+            }
+            if (hasDarkAbove) break;
+        }
+
+        // 2. 向下搜索黑斑
+        const bottomEdge = Math.floor(blob.row + blob.height / 2);
+        for (let r = bottomEdge; r <= bottomEdge + searchRange; r++) {
+            if (r >= rows) continue;
+            for (let c = colStart; c <= colEnd; c++) {
+                let norm = (matrix[r][c] - minLim) / (maxLim - minLim);
+                norm = Math.max(0, Math.min(1, norm));
+                const gray = Math.round(norm * 255);
+
+                if (gray <= CONFIG.darknessThreshold) {
+                    hasDarkBelow = true;
+                    break;
+                }
+            }
+            if (hasDarkBelow) break;
+        }
+
+        // 按照观察逻辑：上面或下面或者上下都有黑斑，就算做有效管线目标
+        return hasDarkAbove || hasDarkBelow;
+    }
+
     // 连通域检测算法 (GPR) - 视觉对齐版
     function detectBlobs(matrix) {
         if (!matrix || !matrix.length) return [];
@@ -308,12 +360,12 @@
                     const height = blob.height || 1;
                     const aspectRatio = width / height;
 
-                    // ✅ 核心过滤逻辑：
-                    // 1. 大于最小半径 (去噪)
-                    // 2. 小于最大半径 (滤除超大面积背景)
-                    // 3. 宽高比不能太大 (比如 < 3.5)，滤除被 60% 截断强行提亮的水平地层长条
+                    // ✅ 核心形态学过滤
                     if (blob.radius > CONFIG.minRadius && blob.radius < CONFIG.maxRadius && aspectRatio < 5.0) {
-                        blobs.push(blob);
+                        // ⚡ 引入雷达子波特征验证：确认白斑上下是否存在黑斑
+                        if (verifyWaveletPattern(matrix, blob, minLim, maxLim, rows, cols)) {
+                            blobs.push(blob);
+                        }
                     }
                 }
             }
@@ -855,21 +907,46 @@
                 // 确保机器狗已经上线并且有 SLAM 坐标
                 if (window.currentRobotPose && window.currentRobotPose.x !== -999 && window.currentRobotPose.x !== undefined) {
 
-                    // 1. 设置一个虚拟的基准 GPS 锚点 (这里以武汉某地为例，你可以随便改)
+                    // 1. 设置一个虚拟的基准 GPS 锚点
                     window.gpsAnchor = { lat: 30.522222, lon: 114.354444 };
 
                     // 2. 将机器狗当前的 SLAM 坐标与虚拟 GPS 强行绑定
                     window.slamAnchor = { x: window.currentRobotPose.x, y: window.currentRobotPose.y };
 
-                    // 3. 假设 SLAM 坐标系的 X 轴正好指向正东方向 (偏角设为0)
-                    window.headingOffset = 0;
+                    // 3. [修改核心] 获取并计算双天线 RTK 偏航角 (基于 0度=正北, 90度=正东)
+                    // 弹窗让用户输入当前的真实物理偏航角（角度）
+                    let userInput = prompt("📍 室内虚拟 GPS 标定\n\n请输入双天线 RTK 给出的真实偏航角 (单位: 度)\n参考：0=正北, 90=正东, 180=正南, 270(或-90)=正西", "0");
+
+                    // 如果用户点击了“取消”，则中断本次标定操作
+                    if (userInput === null) {
+                        console.log("❌ 用户取消了虚拟 GPS 标定");
+                        return;
+                    }
+
+                    // 解析输入的角度值，如果输入非数字则兜底设为 0 (正北)
+                    let inputDeg = parseFloat(userInput);
+                    if (isNaN(inputDeg)) inputDeg = 0.0;
+
+                    // --- 核心数学转换 ---
+                    // RTK地理角度(0北/90东) 转为 数学极坐标系角度(0东/90北)
+                    let mathDeg = 90 - inputDeg;
+
+                    // 将角度转换为弧度 (SLAM 系统和 JS Math 函数都需要弧度)
+                    let rtkYawRad = mathDeg * (Math.PI / 180);
+
+                    // 核心算法：坐标系偏角 = 真实物理航向(数学弧度) - SLAM 局部航向(弧度)
+                    window.headingOffset = rtkYawRad - window.currentRobotPose.yaw;
 
                     // 4. 强制修改状态锁
                     window.isGpsCalibrated = true;
                     window.currentGps = window.gpsAnchor; // 伪造当前信号，防止 UI 显示“标定中”
 
-                    console.log("✅ [室内测试] 虚拟 GPS 标定已强制完成！");
-                    alert("📍 虚拟 GPS 标定成功！现在可以点击地图上的电缆测试经纬度换算了。");
+                    console.log(`✅ [室内测试] 虚拟 GPS 标定已强制完成！`);
+                    console.log(`🧭 输入 RTK 航向: ${inputDeg}° (转为内部数学弧度: ${rtkYawRad.toFixed(4)} rad)`);
+                    console.log(`🧭 当前 SLAM 航向: ${window.currentRobotPose.yaw.toFixed(4)} rad`);
+                    console.log(`📐 计算得出坐标系偏角 (headingOffset): ${window.headingOffset.toFixed(4)} rad`);
+
+                    alert(`📍 虚拟 GPS 标定成功！\n\n输入航向: ${inputDeg}° (0=北, 90=东)\n内部坐标偏角已设为: ${window.headingOffset.toFixed(4)} rad\n\n现在可以点击地图上的电缆测试经纬度换算了。`);
                 } else {
                     console.warn("⚠️ 尚未获取到机器狗的 SLAM 坐标，请先让机器狗连上并稍微动一下。");
                     alert("⚠️ 尚未获取到机器狗坐标，请先遥控机器狗走一步再标定。");
@@ -1241,23 +1318,34 @@
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
 
-        let min = Infinity, max = -Infinity;
+        // === 替换为这部分新代码 ===
+        let maxAbs = 0;
         for (let r = 0; r < rows; r += stepY) {
             for (let c = 0; c < cols; c += stepX) {
-                const v = matrix[r][c];
-                if (v < min) min = v;
-                if (v > max) max = v;
+                const absV = Math.abs(matrix[r][c]);
+                if (absV > maxAbs) maxAbs = absV;
             }
         }
-        if (max === min) max = min + 1e-9;
+        if (maxAbs === 0) maxAbs = 1e-9;
+
+        // 核心：取最大绝对值的 60% 作为显示边界 (复刻 caxis)
+        const cLimit = maxAbs * 0.6;
+        const minLim = -cLimit;
+        const maxLim = cLimit;
 
         let idx = 0;
         for (let y = 0, r = 0; r < rows; r += stepY, y++) {
             for (let x = 0, c = 0; c < cols; c += stepX, x++) {
                 const v = matrix[r][c];
-                let norm = (v - min) / (max - min);
-                norm = Math.pow(norm, 0.7);
-                const gray = Math.max(0, Math.min(255, Math.round(norm * 255)));
+
+                // 线性映射到 [0, 1] 范围
+                let norm = (v - minLim) / (maxLim - minLim);
+                // 强制截断上下限 (超出范围的强波直接变纯黑/纯白)
+                norm = Math.max(0, Math.min(1, norm));
+
+                // 去掉之前的 Math.pow() 伽马校正，保持纯线性灰度
+                const gray = Math.round(norm * 255);
+
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
                 imgData.data[idx++] = gray;
@@ -1265,6 +1353,8 @@
             }
         }
         ctx.putImageData(imgData, 0, 0);
+
+
 
         // ✅ 绘制标注红圈 (仅针对偏移后剖面 mig2dCanvas)
         if (canvasId === "mig2dCanvas" && showAnnotation) {
@@ -1489,13 +1579,15 @@
         });
 
         // ================= 3.2 剖面之间的圆柱连接（按管道分组、不同颜色） =================
-        if (segmentAnnoCenters.length >= 2) {
+        if (segmentAnnoCenters.length >= 3) { // ✅ 修改：至少需要 3 个剖面才可能形成三层跨越
             const edges = [];
+            const potentialLinks = []; // 用于暂存两两相邻剖面之间的候选连线
 
-            // 1) 构建“相邻剖面”的连接边
+            // 1) 第一阶段：找出所有相邻两层的潜在连线
             for (let i = 0; i < segmentAnnoCenters.length - 1; i++) {
                 const listA = segmentAnnoCenters[i];
                 const listB = segmentAnnoCenters[i + 1];
+                const currentLayerLinks = [];
 
                 listA.forEach(a => {
                     listB.forEach(b => {
@@ -1506,26 +1598,60 @@
 
                         if (zDiff <= LINK_CONFIG.maxZDiff &&
                             yDiff <= LINK_CONFIG.maxYDiff) {
-
-                            const radius = (a.radius + b.radius) / 2;
-                            const cylinder = createHollowCylinderBetween(
-                                a.center,
-                                b.center,
-                                radius
-                            );
-                            if (cylinder) {
-                                edges.push({
-                                    aId: a.id,
-                                    bId: b.id,
-                                    mesh: cylinder
-                                });
-                            }
+                            currentLayerLinks.push({ a: a, b: b });
                         }
                     });
                 });
+                potentialLinks.push(currentLayerLinks);
             }
 
-            // 2) 用并查集根据 edges 做“管道分组”（连通分量）
+            // 2) 第二阶段：核心验证过滤
+            // 规则：一条边 (a->b) 必须有前驱 (x->a) 或 后继 (b->y) 才能说明它至少横跨了3个剖面
+            const validLinks = [];
+            for (let i = 0; i < potentialLinks.length; i++) {
+                const currentLayerLinks = potentialLinks[i];
+
+                currentLayerLinks.forEach(link => {
+                    let hasPredecessor = false;
+                    let hasSuccessor = false;
+
+                    // 检查前驱 (在上一层找有没有边以当前起点的 id 为终点)
+                    if (i > 0) {
+                        hasPredecessor = potentialLinks[i - 1].some(prevLink => prevLink.b.id === link.a.id);
+                    }
+
+                    // 检查后继 (在下一层找有没有边以当前终点的 id 为起点)
+                    if (i < potentialLinks.length - 1) {
+                        hasSuccessor = potentialLinks[i + 1].some(nextLink => nextLink.a.id === link.b.id);
+                    }
+
+                    // 只有具备前驱或者后继，才属于>=3个剖面的连续管道
+                    if (hasPredecessor || hasSuccessor) {
+                        validLinks.push(link);
+                    }
+                });
+            }
+
+            // 3) 根据验证通过的连线生成 3D 圆柱体
+            validLinks.forEach(link => {
+                const a = link.a;
+                const b = link.b;
+                const radius = (a.radius + b.radius) / 2;
+                const cylinder = createHollowCylinderBetween(
+                    a.center,
+                    b.center,
+                    radius
+                );
+                if (cylinder) {
+                    edges.push({
+                        aId: a.id,
+                        bId: b.id,
+                        mesh: cylinder
+                    });
+                }
+            });
+
+            // 4) 用并查集根据 edges 做“管道分组”（连通分量） - 原有逻辑保持不变
             if (edges.length > 0 && allCenters.length > 0) {
                 const parent = new Array(allCenters.length);
                 for (let i = 0; i < allCenters.length; i++) parent[i] = i;
@@ -1555,7 +1681,7 @@
                     arr.push(e.mesh);
                 });
 
-                // 3) 给每条管道分配不同颜色，并单独建组
+                // 给每条管道分配不同颜色，并单独建组
                 const connPipelinesGroup = new THREE.Group();
                 let pipelineIndex = 0;
                 const pipelineCount = pipelinesMap.size;
@@ -1846,10 +1972,11 @@
                 // 顶点灰度颜色（和 2D 剖面保持一致的风格）
                 const v = matrix[r][c];
 
+                // === 替换为这部分新代码 ===
                 let norm = (v - vMin) / (vMax - vMin); // [0,1]
-                norm = Math.max(0, Math.min(1, norm));
-                norm = Math.pow(norm, 1.2);
+                norm = Math.max(0, Math.min(1, norm)); // 严格截断
 
+                // 去掉 Math.pow(norm, 1.2)，使用纯线性映射
                 const gray = norm;
 
                 colors[idxC++] = gray;

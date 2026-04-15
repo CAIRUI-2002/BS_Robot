@@ -38,8 +38,8 @@ public class GprConfig {
     
     // ==================== 预处理参数 ====================
     private double scaleFactor = 1.0;  // 数据缩放因子 (uint16通常不需要缩放)
-    private boolean depthGainOn = true; // 改为 false，不使用物理增益放大深层噪点
-    private double depthGainStrength = 0.1;
+    private boolean depthGainOn = false; // 改为 false，不使用物理增益放大深层噪点
+    private double depthGainStrength = 0.8;
     
     // ==================== Z 字几何参数 ====================
     private double phiCableDeg = 0.0;  // 电缆初始角度 (度)
