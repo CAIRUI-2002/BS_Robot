@@ -908,7 +908,7 @@
                 if (window.currentRobotPose && window.currentRobotPose.x !== -999 && window.currentRobotPose.x !== undefined) {
 
                     // 1. 设置一个虚拟的基准 GPS 锚点
-                    window.gpsAnchor = { lat: 30.522222, lon: 114.354444 };
+                    window.gpsAnchor = { lat: 22.60992236, lon: 113.05173574 };
 
                     // 2. 将机器狗当前的 SLAM 坐标与虚拟 GPS 强行绑定
                     window.slamAnchor = { x: window.currentRobotPose.x, y: window.currentRobotPose.y };
@@ -3822,7 +3822,6 @@
         trailGroup.position.z = SLAM_Z_OFFSET;
         scene.add(trailGroup);
         const faultMarkerGroup = new THREE.Group();
-        faultMarkerGroup.position.z = SLAM_Z_OFFSET;
         scene.add(faultMarkerGroup);
 
         let lastFaultPos = new THREE.Vector3(-999, -999, -999);
@@ -4449,7 +4448,7 @@
                     // 1. 初始化步进阶段
                     if (bsState === 'INACTIVE') {
                         bsState = 'STEP_FORWARD';
-                        bsTargetDist = currentDist + 2.0; // 设定 2m 后的目标距离
+                        bsTargetDist = currentDist + 0.8; // 设定 2m 后的目标距离
                         bsGoodDist = currentDist;         // 默认当前起点为有信号区域
                         console.log(`🚀 [破损点步进] 开始步进，目标距离: ${bsTargetDist.toFixed(2)}m`);
                     }
@@ -4461,7 +4460,7 @@
                         if (window.g_faultTriggeredInBS) {
                             console.log(`⚡ [破损点步进] 运动中 (${currentDist.toFixed(2)}m处) 检测到信号！重新以此点推算 2m 目标...`);
                             bsGoodDist = currentDist;         // 刷新有信号边界为当前位置
-                            bsTargetDist = currentDist + 2.0; // 目标直接顺延，从当前点再往后推 2m
+                            bsTargetDist = currentDist + 0.8; // 目标直接顺延，从当前点再往后推 2m
                             window.g_faultTriggeredInBS = false; // 消费掉这个信号
                             // 这里我们不 return，让代码继续往下走，这样机器狗就不会有任何停顿，直接平滑继续走
                         }
@@ -4486,7 +4485,7 @@
                         if (window.g_faultTriggeredInBS) {
                             console.log(`✅ [破损点步进] 收到破损点信号！立即继续前进 2m...`);
                             bsGoodDist = currentDist;         // 更新有信号边界
-                            bsTargetDist = currentDist + 2.0; // 目标再推 2m
+                            bsTargetDist = currentDist + 0.8; // 目标再推 2m
                             bsState = 'STEP_FORWARD';
                             window.g_faultTriggeredInBS = false;
                             return;
@@ -4748,6 +4747,62 @@
                 lastKeyframePose = { x: -999, y: -999 };
             };
         }
+
+        // ====== 👇 新增: 保存 PCD 点云按钮逻辑 👇 ======
+        const btnSavePcd = document.getElementById("btnSavePcd");
+        if (btnSavePcd) {
+            btnSavePcd.onclick = function () {
+                console.log("💾 请求后端保存并下载 PCD 文件...");
+
+                // 改变按钮状态，防止重复点击
+                const originalText = this.innerText;
+                this.innerText = "⏳ 正在生成...";
+                this.disabled = true;
+
+                // 假设你的 Spring Boot 运行在相对路径下，或者你可以改成具体的 ARM_BACKEND_URL
+                const saveUrl = "/api/slam/save_pcd";
+
+                fetch(saveUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                })
+                    .then(response => {
+                        if (!response.ok) throw new Error("后端生成 PCD 失败");
+                        // 接收后端传回的二进制文件流
+                        return response.blob();
+                    })
+                    .then(blob => {
+                        // 1. 生成浏览器本地的临时下载链接
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+
+                        // 2. 动态命名文件 (例如: slam_map_20260416_1530.pcd)
+                        const dateStr = new Date().toISOString().replace(/T/, '_').replace(/:/g, '').split('.')[0];
+                        a.download = `slam_map_${dateStr}.pcd`;
+
+                        // 3. 模拟点击下载并清理内存
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+
+                        setStatus("✅ PCD 文件保存并下载成功！", "success");
+                    })
+                    .catch(err => {
+                        console.error("保存 PCD 报错:", err);
+                        alert("保存失败，请检查后端服务是否正常！");
+                        setStatus("❌ PCD 保存失败", "error");
+                    })
+                    .finally(() => {
+                        // 恢复按钮状态
+                        this.innerText = originalText;
+                        this.disabled = false;
+                    });
+            };
+        }
+        // ====== 👆 新增逻辑结束 👆 ======
         // ✅ [新增] 清除破损点按钮逻辑
         const btnClearFaults = document.getElementById("btnClearFaults");
         if (btnClearFaults) {
@@ -4775,6 +4830,7 @@
                 // 1. 重置连续追踪的状态变量 (防止红线乱连)
                 if (typeof lastFaultMarker !== 'undefined') lastFaultMarker = null;
                 if (typeof lastFaultCablePos !== 'undefined') lastFaultCablePos = null;
+                window.lastFaultCablePos = null; // 👈 新增这一行：同步清空全局的破损点坐标
                 maxFaultIdx = -1;  // 🌟 新增：重置最远探测进度
 
                 // 2. 清除红色球体组 (faultMarkerGroup)
@@ -5044,9 +5100,9 @@
 
                 // 计算 2D 叉积
                 const cross = dirX * ry - dirY * rx;
-                let offsetDist = 1.5; // 默认向左偏移 1.5m
+                let offsetDist = 0.5; // 默认向左偏移 1.5m
                 if (cross < 0) {
-                    offsetDist = -1.5; // 如果叉积小于0，说明在右侧，向右偏移 1.5m
+                    offsetDist = -0.5; // 如果叉积小于0，说明在右侧，向右偏移 1.5m
                     console.log("👉 机器狗位于电缆右侧，生成右侧 1.5m 平行路径");
                 } else {
                     console.log("👈 机器狗位于电缆左侧，生成左侧 1.5m 平行路径");
@@ -5344,6 +5400,7 @@
 
                                     // --- D. 更新状态 ---
                                     lastFaultCablePos = closestPoint.clone();
+                                    window.lastFaultCablePos = lastFaultCablePos; // 👈 新增这一行：将坐标暴露给全局 window
 
                                     // 🌟 关键锁死：将当前的最远进度记录下来。下次只要没超过这个进度，坚决不更新！
                                     maxFaultIdx = closestIdx;
