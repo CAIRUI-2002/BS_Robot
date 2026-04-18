@@ -34,7 +34,7 @@
 
         // --- 核心判定参数 ---
         NOISE_THRESHOLD: 3.5,   // Z-score 阈值 (由滑条控制)
-        BURST_THRESHOLD: 6,     // 异常点数量阈值
+        BURST_THRESHOLD: 1,     // 异常点数量阈值
         AUC_THRESHOLD: 2500.0,  // 能量积分阈值 (幅度 * 数量)
 
         // --- 窗口设置 ---
@@ -4724,19 +4724,37 @@
             if (bsState === 'MOVING') {
                 const distError = bsTargetDist - currentDist;
 
-                // 如果误差小于 0.1m，视为到达目标
-                if (Math.abs(distError) < 0.1) {
+                // 🌟 新增防穿透逻辑：如果设置了初始运动方向，但当前 distError 符号反转了，说明冲过头了，强制当作到达处理
+                if (typeof this.initialMoveDir === 'undefined') {
+                    this.initialMoveDir = Math.sign(distError); // 记录刚开始移动时的相对方向
+                }
+                const currentDir = Math.sign(distError);
+                const isOvershot = (this.initialMoveDir !== 0 && currentDir !== 0 && currentDir !== this.initialMoveDir);
+
+                // 如果误差小于 0.1m，或者发生穿透，视为到达目标
+                if (Math.abs(distError) < 0.1 || isOvershot) {
                     sendMoveCommand(0, 0, 0, 0, true); // 停车
                     bsState = 'EVAL_WAIT';
-                    // ❌ 删除下面这行！不要在刚停下来的时候清空移动中好不容易抓到的信号！
-                    // window.g_faultTriggeredInBS = false; 
                     bsWaitEndTime = Date.now() + 20000; // 等待 20秒
-                    console.log("⏱️ [二分定位] 到达目标点，原地等待 20 秒检测信号...");
+                    this.initialMoveDir = undefined; // 重置方向锁
+                    console.log("⏱️ [二分定位] 到达(或穿透)目标点，原地等待 20 秒检测信号...");
                     return;
                 }
 
-                // 获取目标坐标
-                const targetPose = getPoseAtDist(bsTargetDist, window.offsetCablePath);
+                // 🌟 核心修复：动态前瞻点 (Lookahead Point)
+                // 绝对不能直接把远处的终点作为纯追踪的 targetPose，必须沿着路径每次只看眼前 0.4 米
+                const LOOKAHEAD_DIST = 0.4;
+                let steeringDist = currentDist;
+                if (distError < 0) {
+                    // 倒车：在前瞻距离和目标点之间取最大值（防止前瞻点超出目标点）
+                    steeringDist = Math.max(bsTargetDist, currentDist - LOOKAHEAD_DIST);
+                } else {
+                    // 前进：在前瞻距离和目标点之间取最小值
+                    steeringDist = Math.min(bsTargetDist, currentDist + LOOKAHEAD_DIST);
+                }
+
+                // 获取眼前的引导坐标，而不是遥远的终点坐标
+                const targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
                 const dx = targetPose.x - currentRobotPose.x;
                 const dy = targetPose.y - currentRobotPose.y;
 
@@ -5407,19 +5425,19 @@
                         }
 
                         if (closestPoint) {
-                            // 🌟 核心修正：严格执行“单向向前推进”逻辑
-                            // 判断规则：只有当新探测到的点（closestIdx）大于上一次记录的最远点（maxFaultIdx）时，才允许向前方更新！
-                            // 这样即使机器狗后退到变红的区域内探测到信号，也会被这里拦截，标志保持在最前端不动。
-                            if (maxFaultIdx === -1 || closestIdx > maxFaultIdx) {
+                            // 1. 判定当前是否处于“二分法精确回退/寻找”阶段
+                            const isBinaryRefining = (bsState === 'EVAL_WAIT' || bsState === 'MOVING');
 
-                                // ✅ 只有在步进前行或等待模式下，才记录最新信号的距离
+                            // 2. 如果是向前开荒，或者正在二分法精确定位，都允许画红点
+                            if (maxFaultIdx === -1 || closestIdx > maxFaultIdx || isBinaryRefining) {
+
                                 if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
                                     if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
                                     if (window.offsetCablePath) lastFaultRobotDist = getDistOnPath(currentPos, window.offsetCablePath);
                                 }
 
                                 // 距离去重，防止原地微小抖动频繁重绘
-                                if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.02) {
+                                if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.01) {
 
                                     // --- A. 删除上一个临时点 ---
                                     if (window.lastFaultMarker) { // 🌟 改为 window.
@@ -5478,8 +5496,10 @@
                                     lastFaultCablePos = closestPoint.clone();
                                     window.lastFaultCablePos = lastFaultCablePos; // 👈 新增这一行：将坐标暴露给全局 window
 
-                                    // 🌟 关键锁死：将当前的最远进度记录下来。下次只要没超过这个进度，坚决不更新！
-                                    maxFaultIdx = closestIdx;
+                                    // 🌟 核心修改：如果是二分定位阶段，千万不要更新 maxFaultIdx，防止把向后的索引锁死
+                                    if (!isBinaryRefining) {
+                                        maxFaultIdx = closestIdx;
+                                    }
 
                                     if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
                                         console.log(`🔴 [追踪] 发现更前端的破损点，标志向前推进至:`, closestPoint);
