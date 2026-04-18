@@ -2653,7 +2653,7 @@
         }, 2000);
     };
     // ==========================================
-    // 5.6 ✅ 破损点前方拍照序列
+    // 5.6 ✅ 破损点前方拍照序列 (直接截取机器狗前摄)
     // ==========================================
     window.captureFaultFrontSequence = function () {
         if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
@@ -2661,48 +2661,31 @@
             return;
         }
         const faultId = window.lastFaultMarker.userData.faultId;
-        console.log("📸 开始机械臂破损点【前方】拍照序列...");
+        console.log("📸 开始截取机器狗【前方】摄像头画面...");
 
-        // 前方拍照姿态
-        const targetPose1 = [0, 70, -90, 0, 30, 0];
-        const speed = 50;
-        if (typeof currentAngles !== 'undefined') { currentAngles = [...targetPose1]; }
-        const queryPose1 = targetPose1.map((a, i) => `j${i + 1}=${a}`).join("&");
-        const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
-
-        console.log("🚀 动作1: 前往前方拍照姿态");
-        fetch(urlPose1).then(res => res.text()).then(msg => console.log("到达反馈:", msg));
-
-        // 1.5秒时抓拍
-        setTimeout(() => {
-            console.log("📸 正在提取前方画面...");
-            fetch("http://10.21.31.104:5001/api/capture_arm")
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === "success") {
-                        if (!window.faultImagesMap.has(faultId)) {
-                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
-                        }
-                        window.faultImagesMap.get(faultId).front = data.image;
-                        const imgEl = document.getElementById('dispCaptureFront');
-                        if (imgEl) imgEl.src = data.image;
+        // 直接请求 video_server.py 提供的 5000 端口抓拍接口
+        fetch("http://10.21.31.104:5000/api/capture")
+            .then(res => res.json())
+            .then(data => {
+                // 读取后端返回的 data.front
+                if (data.status === "success" && data.front) {
+                    if (!window.faultImagesMap.has(faultId)) {
+                        window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                     }
-                }).catch(err => console.error("前方抓拍失败:", err));
-        }, 1500);
+                    window.faultImagesMap.get(faultId).front = data.front;
 
-        // 2秒时直接回零
-        setTimeout(() => {
-            console.log("🔄 动作2: 拍照完成，顺滑归零");
-            const target0 = [0, 0, 0, 0, 0, 0];
-            if (typeof currentAngles !== 'undefined') { currentAngles = [...target0]; }
-            const query0 = target0.map((a, i) => `j${i + 1}=${a}`).join("&");
-            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
-            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
-        }, 2000);
+                    const imgEl = document.getElementById('dispCaptureFront');
+                    if (imgEl) imgEl.src = data.front;
+                    console.log("✅ 前方实景绑定成功！");
+                } else {
+                    console.error("前方抓拍失败，未获取到图像数据");
+                }
+            })
+            .catch(err => console.error("前方抓拍请求失败:", err));
     };
 
     // ==========================================
-    // 5.7 ✅ 破损点后方拍照序列
+    // 5.7 ✅ 破损点后方拍照序列 (直接截取机器狗后摄)
     // ==========================================
     window.captureFaultBackSequence = function () {
         if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
@@ -2710,44 +2693,27 @@
             return;
         }
         const faultId = window.lastFaultMarker.userData.faultId;
-        console.log("📸 开始机械臂破损点【后方】拍照序列...");
+        console.log("📸 开始截取机器狗【后方】摄像头画面...");
 
-        // 后方拍照姿态
-        const targetPose1 = [0, 30, -150, 0, -50, 0];
-        const speed = 50;
-        if (typeof currentAngles !== 'undefined') { currentAngles = [...targetPose1]; }
-        const queryPose1 = targetPose1.map((a, i) => `j${i + 1}=${a}`).join("&");
-        const urlPose1 = `${ARM_BACKEND_URL}/arm/move?${queryPose1}&speed=${speed}`;
-
-        console.log("🚀 动作1: 前往后方拍照姿态");
-        fetch(urlPose1).then(res => res.text()).then(msg => console.log("到达反馈:", msg));
-
-        // 1.5秒时抓拍
-        setTimeout(() => {
-            console.log("📸 正在提取后方画面...");
-            fetch("http://10.21.31.104:5001/api/capture_arm")
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === "success") {
-                        if (!window.faultImagesMap.has(faultId)) {
-                            window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
-                        }
-                        window.faultImagesMap.get(faultId).back = data.image;
-                        const imgEl = document.getElementById('dispCaptureBack');
-                        if (imgEl) imgEl.src = data.image;
+        // 直接请求 video_server.py 提供的 5000 端口抓拍接口
+        fetch("http://10.21.31.104:5000/api/capture")
+            .then(res => res.json())
+            .then(data => {
+                // 读取后端返回的 data.rear
+                if (data.status === "success" && data.rear) {
+                    if (!window.faultImagesMap.has(faultId)) {
+                        window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                     }
-                }).catch(err => console.error("后方抓拍失败:", err));
-        }, 1500);
+                    window.faultImagesMap.get(faultId).back = data.rear;
 
-        // 2秒时直接回零
-        setTimeout(() => {
-            console.log("🔄 动作2: 拍照完成，顺滑归零");
-            const target0 = [0, 0, 0, 0, 0, 0];
-            if (typeof currentAngles !== 'undefined') { currentAngles = [...target0]; }
-            const query0 = target0.map((a, i) => `j${i + 1}=${a}`).join("&");
-            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
-            fetch(url0).then(res => res.text()).then(msg => console.log("归零指令已发送"));
-        }, 2000);
+                    const imgEl = document.getElementById('dispCaptureBack');
+                    if (imgEl) imgEl.src = data.rear;
+                    console.log("✅ 后方实景绑定成功！");
+                } else {
+                    console.error("后方抓拍失败，未获取到图像数据");
+                }
+            })
+            .catch(err => console.error("后方抓拍请求失败:", err));
     };
 
     // ==========================================
