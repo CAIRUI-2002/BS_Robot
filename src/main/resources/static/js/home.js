@@ -546,10 +546,34 @@
                     // points.position.x = 0; 
                     // points.position.z = 0;
 
-                    window.gprScene.add(points);
-                    window.currentPcdMesh = points;
 
-                    setStatus("点云加载并拼接完成！", "success");
+
+                    // 🌟🌟🌟 新增：创建外层 Group 容器，专门用于控制水平方向的角度 🌟🌟🌟
+                    const pcdGroup = new THREE.Group();
+                    pcdGroup.add(points); // 把点云装进容器
+                    // ==========================================
+                    // 🌟 在这里硬编码你记录下来的对齐参数
+                    // ==========================================
+
+                    // 填入你在调试控制台记录下的 X 数值
+                    pcdGroup.position.x = 5.25; // 示例：向右偏移 0.15 米
+
+                    // 填入你在调试控制台记录下的 Z 数值
+                    pcdGroup.position.z = 5.40; // 示例：向前偏移 0.05 米
+
+                    // 填入你在调试控制台记录下的角度（弧度制）
+                    // 如果你记录的是角度(°)，需要转换：角度 * Math.PI / 180
+                    pcdGroup.rotation.y = 1.8401; // 示例：旋转 90 度 (π/2)
+
+                    // ==========================================
+
+                    window.gprScene.add(pcdGroup);
+
+                    // 保存引用
+                    window.currentPcdMesh = points;     // 保留网格引用用于清理内存
+                    window.currentPcdGroup = pcdGroup;  // 保留容器引用用于键盘旋转控制
+
+                    setStatus("点云加载完成！", "success");
                 },
                     // 加载进度回调
                     function (xhr) {
@@ -951,6 +975,58 @@
                     console.warn("⚠️ 尚未获取到机器狗的 SLAM 坐标，请先让机器狗连上并稍微动一下。");
                     alert("⚠️ 尚未获取到机器狗坐标，请先遥控机器狗走一步再标定。");
                 }
+            }
+        });
+        // ==========================================
+        // 🌟 [新增] 点云水平位置与角度综合微调
+        // ==========================================
+        document.addEventListener('keydown', function (event) {
+            // 如果还没加载点云，直接忽略
+            if (!window.currentPcdGroup) return;
+
+            // 忽略输入框内的按键，防止打字时触发
+            if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+
+            const rotateStep = 0.02; // 每次按下按键旋转的弧度 (约 1.14 度)
+            const moveStep = 0.05;   // 每次平移的距离 (0.05米 = 5厘米)
+            let updated = false;
+
+            // --- A. 旋转控制 ---
+            if (event.key === '[') {
+                window.currentPcdGroup.rotation.y += rotateStep;
+                updated = true;
+            } else if (event.key === ']') {
+                window.currentPcdGroup.rotation.y -= rotateStep;
+                updated = true;
+            }
+            // --- B. 平移控制 (使用键盘方向键) ---
+            else if (event.key === 'ArrowUp') {
+                event.preventDefault(); // 阻止浏览器滚动条跟着页面移动
+                window.currentPcdGroup.position.z -= moveStep; // 前移
+                updated = true;
+            } else if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                window.currentPcdGroup.position.z += moveStep; // 后移
+                updated = true;
+            } else if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                window.currentPcdGroup.position.x -= moveStep; // 左移
+                updated = true;
+            } else if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                window.currentPcdGroup.position.x += moveStep; // 右移
+                updated = true;
+            }
+
+            // --- C. 实时打印调试信息 ---
+            if (updated) {
+                const pos = window.currentPcdGroup.position;
+                const deg = (window.currentPcdGroup.rotation.y * 180 / Math.PI).toFixed(2);
+
+                console.log(`📍 正在微调: 位置 X=${pos.x.toFixed(2)}, Z=${pos.z.toFixed(2)} | 角度 Yaw=${deg}°`);
+
+                // 实时更新状态栏，方便你记录数值
+                setStatus(`📍 偏移: X=${pos.x.toFixed(2)}m, Z=${pos.z.toFixed(2)}m | 角度: ${deg}°`, "warning");
             }
         });
     });
