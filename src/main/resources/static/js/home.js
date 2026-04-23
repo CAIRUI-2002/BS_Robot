@@ -13,7 +13,7 @@
     // 这样无论你是用 localhost、127.0.0.1 还是 172.x.x.x 访问，
     // 它都会自动去连同一个 IP 的 8000 端口。
     const ARM_BACKEND_URL = "http://" + window.location.hostname + ":8080";
-    const ARM_API_BASE = "http://10.21.31.104:5000";
+    const ARM_API_BASE = "http://10.21.31.104:5005";
 
     // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
     window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
@@ -834,7 +834,7 @@
         // ==========================================
 
         // 1. 确保端口正确 (你的 Python 代码是 5000)
-        const ARM_API = "http://10.21.31.104:5000";
+        const ARM_API = "http://10.21.31.104:5005";
         // 🔴 状态标志位：是否已记录过错误（防止日志重复打印）
         let hasLoggedArmError = false;
 
@@ -932,7 +932,7 @@
                 if (window.currentRobotPose && window.currentRobotPose.x !== -999 && window.currentRobotPose.x !== undefined) {
 
                     // 1. 设置一个虚拟的基准 GPS 锚点
-                    window.gpsAnchor = { lat: 22.60992236, lon: 113.05173574 };
+                    window.gpsAnchor = { lat: 22.60991285, lon: 113.05173552 };
 
                     // 2. 将机器狗当前的 SLAM 坐标与虚拟 GPS 强行绑定
                     window.slamAnchor = { x: window.currentRobotPose.x, y: window.currentRobotPose.y };
@@ -2893,9 +2893,9 @@
             }
         }
 
-        // 执行 AUC 积分分析
+        // 执行 AUC 积分分析 (已简化为纯脉冲阈值判定)
         function performAUCAnalysis() {
-            // 提取窗口数据: [Trigger - BEFORE, Trigger + AFTER]
+            // 提取窗口数据: [Trigger - BEFORE, Trigger + AFTER] (保留此段，为了下方提取峰值使用)
             const startAbs = triggerIndex - AUC_CONFIG.WINDOW_BEFORE;
             const len = AUC_CONFIG.WINDOW_BEFORE + AUC_CONFIG.WINDOW_AFTER;
             const segment = new Float32Array(len);
@@ -2907,52 +2907,22 @@
                 segment[i] = ringBuffer[idx];
             }
 
-            // 1. 计算 Mean & Std
-            let sumAbs = 0;
-            const absSeg = new Float32Array(len);
-            for (let i = 0; i < len; i++) {
-                absSeg[i] = Math.abs(segment[i]);
-                sumAbs += absSeg[i];
-            }
-            const mean = sumAbs / len;
-
-            let sumSqDiff = 0;
-            for (let i = 0; i < len; i++) {
-                sumSqDiff += (absSeg[i] - mean) ** 2;
-            }
-            const std = Math.sqrt(sumSqDiff / len);
-
-            if (std <= 0) return;
-
-            // 2. Z-score 积分
-            let noisePointsCount = 0;
-            let aucSum = 0;
-            // 🔥 这里使用了全局配置中的 NOISE_THRESHOLD (由滑条控制)
-            const threshold = AUC_CONFIG.NOISE_THRESHOLD;
-
-            for (let i = 0; i < len; i++) {
-                const zScore = (absSeg[i] - mean) / std;
-                if (zScore > threshold) {
-                    noisePointsCount++;
-                    aucSum += absSeg[i];
-                }
-            }
-
-            // 3. 最终判定
-            const isDischarge = (noisePointsCount >= AUC_CONFIG.BURST_THRESHOLD) &&
-                (aucSum >= AUC_CONFIG.AUC_THRESHOLD);
+            // ==========================================
+            // 🗑️ 删除了计算均值、方差、Z-score和AUC能量积分的代码
+            // ✅ 改为直接判定：因为能进入此函数，说明在 processSignals 已突破脉冲阈值
+            // ==========================================
+            const isDischarge = true;
 
             // 4. 结果输出
             if (isDischarge) {
-                console.log(`🔴 [故障判定] AUC:${aucSum.toFixed(0)}...`);
+                console.log(`🔴 [故障判定] 突破脉冲阈值，触发破损点记录...`);
                 window.g_isFaultDetected = true;
                 window.g_faultTriggeredInBS = true;
 
-                // ======== ⚡ 新增：触发声波 FFT 处理 ========
-                // 提取前 0.5s 到后 0.5s（共 1s，10000个点）
+                // ======== ⚡ 保留原有的：触发声波 FFT 处理 ========
                 const WINDOW_POINTS = 10000;
                 const HALF_WINDOW = 5000; // 0.5秒
-                const N_FFT = 16384;      // 下一个 2 的幂次方用于高效 FFT
+                const N_FFT = 16384;
 
                 const sndFftInput = new Float32Array(N_FFT);
                 const startIdx = triggerIndex - HALF_WINDOW;
@@ -2960,20 +2930,15 @@
                 for (let i = 0; i < WINDOW_POINTS; i++) {
                     let idx = (startIdx + i) % BUFFER_SIZE;
                     if (idx < 0) idx += BUFFER_SIZE;
-
-                    // 施加 Hanning 窗，减少 FFT 频谱泄露
                     const multiplier = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (WINDOW_POINTS - 1)));
                     sndFftInput[i] = sndRingBuffer[idx] * multiplier;
                 }
 
-                // 计算幅频响应
                 const magSpectrum = computeMagnitudeFFT(sndFftInput);
-
-                // 存储给渲染引擎使用
                 window.latestAcousticFFT = {
                     spectrum: magSpectrum,
-                    sampleRate: AUC_CONFIG.SAMPLING_RATE, // 10000 Hz
-                    fftSize: N_FFT // 16384
+                    sampleRate: AUC_CONFIG.SAMPLING_RATE,
+                    fftSize: N_FFT
                 };
                 // ============================================
 
@@ -2984,21 +2949,14 @@
                 if (elMag) elMag.style.color = "#ff4444";
 
                 setTimeout(() => { window.g_isFaultDetected = false; }, 500);
-                // ============================================
-                // 🌟🌟🌟 新增：自动切回实时波形模式的定时器 🌟🌟🌟
-                // ============================================
-                // 1. 如果之前已经有一个倒计时在跑，先清除它（防止连续触发时画面闪烁过快）
+
                 if (window.fftTimeoutId) {
                     clearTimeout(window.fftTimeoutId);
                 }
-
-                // 2. 设定 5000 毫秒（5秒）后自动清空 FFT 数据
-                // 你可以根据实际巡检观察的需要，把 5000 改成 8000(8秒) 或 3000(3秒)
                 window.fftTimeoutId = setTimeout(() => {
                     window.latestAcousticFFT = null;
                     console.log("⏱️ FFT 画面展示完毕，已自动切回实时声信号波形");
                 }, 2000);
-                // ============================================
             }
         }
 
@@ -3031,6 +2989,45 @@
             // ✅ 绘制 Ch1 (磁信号)
             if (channel1Data && channel1Data.length > 0) {
                 drawChannel(channel1Data, 0, halfH, "#00ccff");
+
+                // 👇 新增：绘制脉冲阈值上下限虚线刻度 (高亮增强版)
+                try {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.setLineDash([5, 5]); // 虚线样式，间隔变大一点更清晰
+                    ctx.lineWidth = 1.5;     // 线条稍微加粗
+                    ctx.strokeStyle = "rgba(255, 165, 0, 0.9)"; // 亮橙色半透明边框
+
+                    const Y_MAX = 4096;
+                    const baseline = 2048; // 信号基线
+                    const threshold = AUC_CONFIG.PULSE_THRESHOLD;
+
+                    // 计算 Y 坐标
+                    const yTop = Math.round(halfH - ((baseline + threshold) / Y_MAX) * halfH);
+                    const yBottom = Math.round(halfH - ((baseline - threshold) / Y_MAX) * halfH);
+
+                    // 画上阈值线 (+界限)
+                    ctx.moveTo(0, yTop);
+                    ctx.lineTo(w, yTop);
+                    // 画下阈值线 (-界限)
+                    ctx.moveTo(0, yBottom);
+                    ctx.lineTo(w, yBottom);
+                    ctx.stroke();
+
+                    // 绘制数值文本
+                    ctx.fillStyle = "#FFA500";   // 纯橙色文字，更加醒目
+                    ctx.font = "bold 12px Consolas, monospace"; // 加粗等宽字体
+                    ctx.textAlign = "right";
+
+                    // 文字稍微偏移一点防止被虚线直接穿过，影响阅读
+                    ctx.fillText(`+${threshold}`, w - 10, yTop - 6);
+                    ctx.fillText(`-${threshold}`, w - 10, yBottom + 14);
+
+                    ctx.restore();
+                } catch (e) {
+                    console.error("阈值刻度绘制失败:", e);
+                }
+                // 👆 新增结束
             }
 
             // ✅ 绘制 Ch2 (声信号 - 保持不变)
@@ -3487,6 +3484,7 @@
         let bsWaitEndTime = 0;    // 5秒等待结束的时间戳
         let lastFaultRobotDist = -1; // 上一次正常测到信号时，机器狗在偏移路径上的行驶距离
         let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
+        let bsFootprints = [];       // ✅ 新增：用于记录机器狗前进时的真实历史脚印
 
         // 1. 计算整条路径的距离积分
         function computePathDists(path) {
@@ -4251,7 +4249,8 @@
 
                     let gpsText = "未就绪 (等待标定)";
                     const calculatedGps = window.slamToGps(hitPoint.x, hitPoint.y);
-                    if (calculatedGps) gpsText = `${calculatedGps.lat.toFixed(6)}, ${calculatedGps.lon.toFixed(6)}`;
+                    // ✅ 修改：将弹窗的经纬度显示精度提升至小数点后 8 位
+                    if (calculatedGps) gpsText = `${calculatedGps.lat.toFixed(8)}, ${calculatedGps.lon.toFixed(8)}`;
                     else if (window.currentGps) gpsText = "标定中...请移动机器狗>1米";
 
                     document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
@@ -4647,12 +4646,16 @@
                 return;
             }
 
-            // 阶段 2: 到达某个测试点后，等待 20秒 评估是否有信号 (支持信号立即打断)
+            // 阶段 2: 到达某个测试点后，等待 20秒 评估是否有信号
             if (bsState === 'EVAL_WAIT') {
-                const signalDetectedNow = window.g_faultTriggeredInBS; // 是否已经抓到了信号
-                const timeIsUp = (now >= bsWaitEndTime);               // 是否已经等够了 20 秒
+                // ✅ 修复 1：补充停车心跳包，防止单次指令丢失或物理惯性导致的持续滑行（倒退过头）
+                if (typeof sendMoveCommand === 'function') {
+                    sendMoveCommand(0, 0, 0, 0, false);
+                }
 
-                // 【核心修改】如果既没收到信号，时间也没到，就继续原地等
+                const signalDetectedNow = window.g_faultTriggeredInBS;
+                const timeIsUp = (now >= bsWaitEndTime);
+
                 if (!signalDetectedNow && !timeIsUp) {
                     return;
                 }
@@ -4690,37 +4693,51 @@
             if (bsState === 'MOVING') {
                 const distError = bsTargetDist - currentDist;
 
-                // 🌟 新增防穿透逻辑：如果设置了初始运动方向，但当前 distError 符号反转了，说明冲过头了，强制当作到达处理
-                if (typeof this.initialMoveDir === 'undefined') {
-                    this.initialMoveDir = Math.sign(distError); // 记录刚开始移动时的相对方向
+                // ✅ 修复 3：将 this 改为显式的 window 挂载，防止作用域逃逸导致方向锁失效
+                if (typeof window.bsInitialMoveDir === 'undefined') {
+                    window.bsInitialMoveDir = Math.sign(distError);
                 }
                 const currentDir = Math.sign(distError);
-                const isOvershot = (this.initialMoveDir !== 0 && currentDir !== 0 && currentDir !== this.initialMoveDir);
+                const isOvershot = (window.bsInitialMoveDir !== 0 && currentDir !== 0 && currentDir !== window.bsInitialMoveDir);
 
                 // 如果误差小于 0.1m，或者发生穿透，视为到达目标
                 if (Math.abs(distError) < 0.1 || isOvershot) {
                     sendMoveCommand(0, 0, 0, 0, true); // 停车
                     bsState = 'EVAL_WAIT';
                     bsWaitEndTime = Date.now() + 20000; // 等待 20秒
-                    this.initialMoveDir = undefined; // 重置方向锁
+
+                    window.bsInitialMoveDir = undefined; // 重置方向锁
+                    // ✅ 修复 2：到达目标点时，强制清空移动过程中可能积攒的“脏信号”
+                    window.g_faultTriggeredInBS = false;
+
                     console.log("⏱️ [二分定位] 到达(或穿透)目标点，原地等待 20 秒检测信号...");
                     return;
                 }
 
-                // 🌟 核心修复：动态前瞻点 (Lookahead Point)
-                // 绝对不能直接把远处的终点作为纯追踪的 targetPose，必须沿着路径每次只看眼前 0.4 米
+                // === 🌟 核心修复：倒车时沿真实脚印回退 ===
+                let targetPose;
                 const LOOKAHEAD_DIST = 0.4;
-                let steeringDist = currentDist;
-                if (distError < 0) {
-                    // 倒车：在前瞻距离和目标点之间取最大值（防止前瞻点超出目标点）
-                    steeringDist = Math.max(bsTargetDist, currentDist - LOOKAHEAD_DIST);
-                } else {
-                    // 前进：在前瞻距离和目标点之间取最小值
-                    steeringDist = Math.min(bsTargetDist, currentDist + LOOKAHEAD_DIST);
-                }
 
-                // 获取眼前的引导坐标，而不是遥远的终点坐标
-                const targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
+                if (distError < 0 && bsFootprints.length > 5) {
+                    // 🔴 倒车模式：从机器狗真实踩过的脚印数组中，找身后 0.4 米的点
+                    let backDist = 0;
+                    let targetIdx = bsFootprints.length - 1;
+
+                    // 从数组末尾（也就是狗当前所在的位置）沿着脚印倒着往前算距离
+                    for (let i = bsFootprints.length - 1; i > 0; i--) {
+                        const d = Math.hypot(bsFootprints[i].x - bsFootprints[i - 1].x, bsFootprints[i].y - bsFootprints[i - 1].y);
+                        backDist += d;
+                        if (backDist >= LOOKAHEAD_DIST) {
+                            targetIdx = i - 1;
+                            break;
+                        }
+                    }
+                    targetPose = bsFootprints[targetIdx];
+                } else {
+                    // 🟢 前进模式：继续参考系统生成的平滑偏移路径
+                    let steeringDist = Math.min(bsTargetDist, currentDist + LOOKAHEAD_DIST);
+                    targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
+                }
                 const dx = targetPose.x - currentRobotPose.x;
                 const dy = targetPose.y - currentRobotPose.y;
 
@@ -4733,7 +4750,7 @@
 
                 if (distError < 0) {
                     // === 倒车模式 ===
-                    v = -0.3; // 🚀 提速：将基础倒车速度提高到 0.3 m/s (原为 -0.15)
+                    v = -0.15; // 🚀 提速：将基础倒车速度提高到 0.3 m/s (原为 -0.15)
 
                     // 倒车时，机器狗的前方是远离目标的，所以要把目标偏航角反转 180 度进行纠偏2
                     let reverseYaw = targetYaw + Math.PI;
@@ -5119,6 +5136,7 @@
                 lastFaultRobotDist = -1;
                 offsetPathDists = [];
                 maxFaultIdx = -1;
+                bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
                 isFaultFindingMode = true;
                 btnFault.innerText = "⏹ 停止寻找";
                 btnFault.style.color = "#ff4444";
@@ -5319,6 +5337,35 @@
                 // ✅ 核心修改：同时设置 pitch(绕Y轴) 和 yaw(绕Z轴)
                 // 'ZYX' 是旋转顺序，必须指定，否则在同时有偏航和俯仰时模型会发生万向节死锁导致倾斜
                 dogGroup.rotation.set(0, 0, pose.yaw, 'ZYX');
+
+                // ==========================================
+                // ✅ [新增] 真实脚印记录与动态裁剪 (卷尺算法)
+                // ==========================================
+                if (isFaultFindingMode) {
+                    const currentPos2D = { x: px, y: py };
+                    if (bsFootprints.length === 0) {
+                        bsFootprints.push(currentPos2D);
+                    } else {
+                        // 1. 寻找当前物理位置在脚印数组中的最近点
+                        let closestIdx = 0;
+                        let minD = Infinity;
+                        for (let i = Math.max(0, bsFootprints.length - 100); i < bsFootprints.length; i++) {
+                            const d = Math.hypot(px - bsFootprints[i].x, py - bsFootprints[i].y);
+                            if (d < minD) { minD = d; closestIdx = i; }
+                        }
+
+                        // 2. 如果倒车退回去了（索引差距大于3，约15cm），剪掉多余的“未来”轨迹
+                        if (closestIdx < bsFootprints.length - 3) {
+                            bsFootprints.length = closestIdx + 1;
+                        }
+
+                        // 3. 只有离开最后一个点超过 5cm，才记录新脚印
+                        const lastP = bsFootprints[bsFootprints.length - 1];
+                        if (Math.hypot(px - lastP.x, py - lastP.y) > 0.05) {
+                            bsFootprints.push(currentPos2D);
+                        }
+                    }
+                }
 
                 // 临时禁用旧链路遗留的“grid 跟随机器人平移”逻辑。
                 // 当前点云、机器人、轨迹都已在统一世界坐标中，继续移动 grid/clickPlane
@@ -5862,44 +5909,31 @@
                 const faultGps = window.slamToGps(window.lastFaultCablePos.x, window.lastFaultCablePos.y);
                 if (!faultGps) return;
 
-                // 3. 计算电缆在破损点处的切线朝向 (Yaw)
-                let globalYaw = 0.0;
+                // 3. ✅ 计算整体朝向 (Yaw) 并适配地理坐标系
+                let geoGlobalYaw = 0.0; // 最终发给小车的地理角度
                 if (window.savedCablePath && window.savedCablePath.length > 1) {
-                    // 寻找距离破损点最近的路径节点
-                    let minD = Infinity;
-                    let closestIdx = 0;
-                    for (let i = 0; i < window.savedCablePath.length; i++) {
-                        const d = window.lastFaultCablePos.distanceTo(window.savedCablePath[i]);
-                        if (d < minD) {
-                            minD = d;
-                            closestIdx = i;
-                        }
-                    }
+                    const pStart = window.savedCablePath[0];
+                    const pEnd = window.savedCablePath[window.savedCablePath.length - 1];
 
-                    // 取相邻点计算切线向量
-                    let p1, p2;
-                    if (closestIdx < window.savedCablePath.length - 1) {
-                        p1 = window.savedCablePath[closestIdx];
-                        p2 = window.savedCablePath[closestIdx + 1];
-                    } else {
-                        p1 = window.savedCablePath[closestIdx - 1];
-                        p2 = window.savedCablePath[closestIdx];
-                    }
-
-                    // 计算 SLAM 坐标系下的偏航角
-                    const dx = p2.x - p1.x;
-                    const dy = p2.y - p1.y;
+                    const dx = pEnd.x - pStart.x;
+                    const dy = pEnd.y - pStart.y;
                     const slamYaw = Math.atan2(dy, dx);
 
-                    // 加上 GPS 标定时的偏角，得到真实的全局航向角
-                    globalYaw = slamYaw + window.headingOffset;
+                    // mathGlobalYaw 是数学坐标系下的角度 (0=东, 90=北)
+                    let mathGlobalYaw = slamYaw + window.headingOffset;
+
+                    // 🌟 核心修复：将 数学角度 转换回 地理导航角度 (0=北, 90=东)
+                    // 公式: Geo = 90度 - Math (弧度制下为 PI/2 - Math)
+                    geoGlobalYaw = (Math.PI / 2) - mathGlobalYaw;
+
+                    // 规范化角度到 -PI 到 PI 之间 (防止超过 180度 或低于 -180度)
+                    while (geoGlobalYaw > Math.PI) geoGlobalYaw -= 2 * Math.PI;
+                    while (geoGlobalYaw < -Math.PI) geoGlobalYaw += 2 * Math.PI;
                 }
 
-                // 4. 发送给 Java 后端
-                // 为了防止精度丢失，保留较多的小数位
-                const url = `/api/car/target?lat=${faultGps.lat.toFixed(7)}&lon=${faultGps.lon.toFixed(7)}&yaw=${globalYaw.toFixed(4)}`;
+                // 4. ✅ 发送给 Java 后端，经纬度保留小数点后 8 位，使用地理角度
+                const url = `/api/car/target?lat=${faultGps.lat.toFixed(8)}&lon=${faultGps.lon.toFixed(8)}&yaw=${geoGlobalYaw.toFixed(4)}`;
 
-                // 按钮加上加载动画防止重复点击
                 const originText = btnSendFault.innerText;
                 btnSendFault.innerText = "⏳ 发送中...";
                 btnSendFault.disabled = true;
@@ -5907,7 +5941,7 @@
                 fetch(url)
                     .then(res => res.text())
                     .then(msg => {
-                        console.log(`📍 破损点下发成功: Lat=${faultGps.lat.toFixed(6)}, Lon=${faultGps.lon.toFixed(6)}, Yaw=${globalYaw.toFixed(2)}`);
+                        console.log(`📍 破损点下发成功: Lat=${faultGps.lat.toFixed(8)}, Lon=${faultGps.lon.toFixed(8)}, Yaw(Geo)=${geoGlobalYaw.toFixed(4)} rad`);
                         btnSendFault.innerText = "✅ 发送成功";
                         setTimeout(() => {
                             btnSendFault.innerText = originText;

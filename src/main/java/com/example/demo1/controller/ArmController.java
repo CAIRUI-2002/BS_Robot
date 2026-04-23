@@ -15,7 +15,7 @@ public class ArmController {
     
     // 务必确保机器狗能 Ping 通这个 IP
     private static final String ARM_IP = "10.21.31.104";
-    private static final String ARM_PORT = "5000";
+    private static final String ARM_PORT = "5005";
 
     // Spring 自带的 HTTP 请求工具
     private final RestTemplate restTemplate = new RestTemplate();
