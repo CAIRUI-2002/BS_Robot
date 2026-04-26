@@ -326,11 +326,11 @@
                             <div class="group-header-flex">
                                 <div class="group-title">关节与夹爪控制</div>
                                 <div style="display: flex; gap: 8px;">
-                                    <button onclick="captureFaultLeftSequence()"
-                                        class="test-sequence-btn capture-btn-left">📸 破损点左侧拍照</button>
-                                    <button onclick="captureFaultSequence()" class="test-sequence-btn capture-btn">📸
-                                        破损点右侧拍照</button>
-                                    <button onclick="testArmSequence()" class="test-sequence-btn">一键测试</button>
+                                    <button onclick="moveArmToFrontPress()"
+                                        class="test-sequence-btn capture-btn-left">🎯 向前按点</button>
+                                    <button onclick="moveArmToBackPress()" class="test-sequence-btn capture-btn">🎯
+                                        向后按点</button>
+                                    <button onclick="moveArmToZero()" class="test-sequence-btn">🔄 归零</button>
                                 </div>
                             </div>
 
@@ -519,6 +519,9 @@
                                     <button id="btnClearNav" class="nav-overlay-btn danger" title="清除标记">
                                         ✖ 清除
                                     </button>
+                                </div>
+                                <div id="realtimeGpsOverlay" class="realtime-gps-overlay">
+                                    🛰️ RTK: <span id="realtimeGpsText">等待定位...</span>
                                 </div>
 
                             </div>

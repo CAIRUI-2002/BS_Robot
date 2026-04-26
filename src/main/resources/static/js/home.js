@@ -2474,49 +2474,67 @@
             });
     };
     // ==========================================
-    // 5.3 ✅ 一键测试序列 (添加到 controlJoint 函数下面)
+    // 5.3 ✅ 向前按点、向后按点、归零 控制逻辑
     // ==========================================
 
-    window.testArmSequence = function () {
-        console.log("🧪 开始机械臂一键测试...");
-
-        // 1. 定义动作 A：所有关节去 20 度
-        const target20 = [20, 20, -20, 20, 20, 20];
+    // 向前按点：[0, 120, -130, 0, 20, 0]
+    window.moveArmToFrontPress = function () {
+        console.log("🎯 开始执行【向前按点】...");
+        const targetPose = [0, 120, -130, 0, 20, 0];
         const speed = 50;
 
-        // 更新全局状态 (很重要！否则下次点击单关节控制时位置会乱)
+        // 更新全局状态 (很重要，防止下次单关节控制时位置错乱)
         if (typeof currentAngles !== 'undefined') {
-            currentAngles = [...target20];
+            currentAngles = [...targetPose];
         }
 
-        // 拼接 URL 并发送第一波指令
-        // URL: /arm/move?j1=20&j2=20...&speed=50
-        const query20 = target20.map((a, i) => `j${i + 1}=${a}`).join("&");
-        const url20 = `${ARM_BACKEND_URL}/arm/move?${query20}&speed=${speed}`;
+        const queryPose = targetPose.map((a, i) => `j${i + 1}=${a}`).join("&");
+        const url = `${ARM_BACKEND_URL}/arm/move?${queryPose}&speed=${speed}`;
 
-        console.log("🚀 动作1: 前往全 20 度");
-        fetch(url20).then(res => res.text()).then(msg => console.log("反馈:", msg));
+        fetch(url)
+            .then(res => res.text())
+            .then(msg => console.log("向前按点反馈:", msg))
+            .catch(err => console.error("向前按点指令发送失败:", err));
+    };
 
-        // 2. 延时 1000 毫秒 (1秒) 后执行动作 B：归零
-        // 给机械臂足够的时间运动到位
-        setTimeout(() => {
-            console.log("🔄 动作2: 1秒已到，执行自动归零");
+    // 向后按点：[0, 35, -170, 0, -45, 0]
+    window.moveArmToBackPress = function () {
+        console.log("🎯 开始执行【向后按点】...");
+        const targetPose = [0, 35, -170, 0, -45, 0];
+        const speed = 50;
 
-            const target0 = [0, 0, 0, 0, 0, 0];
+        // 更新全局状态
+        if (typeof currentAngles !== 'undefined') {
+            currentAngles = [...targetPose];
+        }
 
-            // 再次更新全局状态
-            if (typeof currentAngles !== 'undefined') {
-                currentAngles = [...target0];
-            }
+        const queryPose = targetPose.map((a, i) => `j${i + 1}=${a}`).join("&");
+        const url = `${ARM_BACKEND_URL}/arm/move?${queryPose}&speed=${speed}`;
 
-            const query0 = target0.map((a, i) => `j${i + 1}=${a}`).join("&");
-            const url0 = `${ARM_BACKEND_URL}/arm/move?${query0}&speed=${speed}`;
+        fetch(url)
+            .then(res => res.text())
+            .then(msg => console.log("向后按点反馈:", msg))
+            .catch(err => console.error("向后按点指令发送失败:", err));
+    };
 
-            fetch(url0).then(res => res.text()).then(msg => console.log("归零反馈:", msg));
+    // 归零：[0, 0, 0, 0, 0, 0]
+    window.moveArmToZero = function () {
+        console.log("🔄 开始执行【归零】...");
+        const targetPose = [0, 0, 0, 0, 0, 0];
+        const speed = 50;
 
-            // 简单的弹窗提示（可选）
-            // alert("测试序列完成！");
-        }, 1000);
+        // 更新全局状态
+        if (typeof currentAngles !== 'undefined') {
+            currentAngles = [...targetPose];
+        }
+
+        const queryPose = targetPose.map((a, i) => `j${i + 1}=${a}`).join("&");
+        const url = `${ARM_BACKEND_URL}/arm/move?${queryPose}&speed=${speed}`;
+
+        fetch(url)
+            .then(res => res.text())
+            .then(msg => console.log("归零反馈:", msg))
+            .catch(err => console.error("归零指令发送失败:", err));
     };
     // ==========================================
     // 5.4 ✅ 破损点右侧拍照位姿序列 (丝滑过渡版 + 自动抓拍)
@@ -5294,6 +5312,112 @@
 
         function updateVis(data) {
             const pose = data.robot;
+
+            // ==========================================
+            // 🌟🌟🌟 新增：拦截解析 Python 传来的 RTK 数据
+            // ==========================================
+            if (data.rtk && data.rtk.lat && data.rtk.lon) {
+                // 1. 字符串清洗：去掉 "°N"、"°E" 等后缀，提取纯浮点数
+                const rawLat = parseFloat(data.rtk.lat.replace(/[^\d.-]/g, ''));
+                const rawLon = parseFloat(data.rtk.lon.replace(/[^\d.-]/g, ''));
+
+                // 2. 获取固定解状态
+                const status = data.rtk.status;
+                // 严格要求只有 "固定解" 才能用于标定基准 (如果不准可以放宽限制)
+                const isGoodSignal = (status === "固定解" || status === "4" || status === 4);
+
+                // 更新全局 UI 状态
+                window.currentGps = { lat: rawLat, lon: rawLon, status: status };
+
+                // 👇==========================================👇
+                // 🌟 新增：实时更新左下角的 GPS 显示面板
+                const gpsTextEl = document.getElementById('realtimeGpsText');
+                if (gpsTextEl) {
+                    // 如果是固定解，状态文字标绿；如果是不稳定解，状态文字标橙
+                    const statusClass = isGoodSignal ? 'status-fixed' : 'status-float';
+                    // 保留 8 位小数，精度最高
+                    gpsTextEl.innerHTML = `${rawLat.toFixed(8)}°, ${rawLon.toFixed(8)}° [<span class="${statusClass}">${status}</span>]`;
+                }
+                // 👆==========================================👆
+
+                // 3. 🌟 新增：触发轨迹配准(Kabsch)自动标定逻辑
+                if (isGoodSignal && !window.isGpsCalibrated && pose && pose.x !== -999) {
+                    // A. 初始化：钉下起始锚点，并创建数组准备收集两张“图纸”上的轨迹
+                    if (!window.gpsAnchor) {
+                        window.gpsAnchor = { lat: rawLat, lon: rawLon };
+                        window.slamAnchor = { x: pose.x, y: pose.y };
+                        window.calibSlamPts = []; // 存放完美形状的 SLAM 轨迹
+                        window.calibRtkPts = [];  // 存放带有手抖误差的 RTK 轨迹
+                        console.log(`📍 RTK基准锚点已记录! 纬度: ${rawLat}, 经度: ${rawLon}`);
+                        setStatus("📍 RTK锚点已固定，请遥控机器狗随意走动收集轨迹...", "warning");
+                    } else {
+                        // B. 采样过滤：每走出 0.1 米，才记录一个点 (防止原地打转导致重复数据堆积)
+                        const ptsCount = window.calibSlamPts.length;
+                        const lastSlam = ptsCount > 0 ? window.calibSlamPts[ptsCount - 1] : window.slamAnchor;
+
+                        const dx = pose.x - lastSlam.x;
+                        const dy = pose.y - lastSlam.y;
+                        const moveDist = Math.hypot(dx, dy);
+
+                        if (moveDist >= 0.1) {
+                            // 记录当前的 SLAM 局部坐标
+                            window.calibSlamPts.push({ x: pose.x, y: pose.y });
+
+                            // 将当前的 RTK 经纬度，转化为相较于起点的物理距离 (东向 E，北向 N，单位：米)
+                            const eMeters = (rawLon - window.gpsAnchor.lon) * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
+                            const nMeters = (rawLat - window.gpsAnchor.lat) * 111320;
+                            window.calibRtkPts.push({ e: eMeters, n: nMeters });
+
+                            // 设定需要收集的点数 (30 个点 × 0.1米/点 = 机器狗大约要走 3 米左右的任意不规则路径)
+                            const requiredPts = 30;
+                            setStatus(`📍 收集标定轨迹中... (${ptsCount + 1}/${requiredPts})`, "warning");
+
+                            // C. 轨迹收齐后，执行图形配准 (最小二乘法) 求解最精准旋转角
+                            if (window.calibSlamPts.length >= requiredPts) {
+                                let sumX = 0, sumY = 0, sumE = 0, sumN = 0;
+                                const N = window.calibSlamPts.length;
+
+                                // 步骤 1：把两张“图纸”的中心钉在一起 (求两套轨迹各自的重心)
+                                for (let i = 0; i < N; i++) {
+                                    sumX += window.calibSlamPts[i].x;
+                                    sumY += window.calibSlamPts[i].y;
+                                    sumE += window.calibRtkPts[i].e;
+                                    sumN += window.calibRtkPts[i].n;
+                                }
+                                const cX = sumX / N, cY = sumY / N, cE = sumE / N, cN = sumN / N;
+
+                                // 步骤 2：计算轨迹形状的交叉相关性 (比对形状的吻合度)
+                                let sumCross = 0; // Σ (x*n - y*e)
+                                let sumDot = 0;   // Σ (x*e + y*n)
+
+                                for (let i = 0; i < N; i++) {
+                                    // 计算每个点距离自己重心的偏差
+                                    const devX = window.calibSlamPts[i].x - cX;
+                                    const devY = window.calibSlamPts[i].y - cY;
+                                    const devE = window.calibRtkPts[i].e - cE;
+                                    const devN = window.calibRtkPts[i].n - cN;
+
+                                    sumCross += (devX * devN - devY * devE);
+                                    sumDot += (devX * devE + devY * devN);
+                                }
+
+                                // 步骤 3：旋转“图纸”，算出误差最小、最贴合的那个终极角度！
+                                window.headingOffset = Math.atan2(sumCross, sumDot);
+                                window.isGpsCalibrated = true;
+
+                                // 扫尾：释放不再需要的数组内存
+                                delete window.calibSlamPts;
+                                delete window.calibRtkPts;
+
+                                console.log(`🧭 轨迹对齐标定完成! 利用 ${N} 个点拟合，最终偏角: ${(window.headingOffset * 180 / Math.PI).toFixed(2)}度`);
+                                setStatus("✅ 轨迹无感标定完成！现在点击破损点可获取高精经纬度。", "success");
+                            }
+                        }
+                    }
+                }
+            }
+            // ==========================================
+
             if (pose) {
                 const scaleFactor = 1.0;
                 const px = pose.x * scaleFactor;

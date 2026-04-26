@@ -2430,3 +2430,41 @@ input[type="range"]::-webkit-slider-thumb {
     font-family: 'Consolas', monospace;
     user-select: none;
 }
+
+/* ==========================================
+   ✅ [新增] 三维视图左下角实时GPS悬浮窗
+   ========================================== */
+.realtime-gps-overlay {
+    position: absolute;
+    bottom: 10px;
+    /* 靠底部 10px */
+    left: 10px;
+    /* 靠左侧 10px */
+    background: rgba(0, 0, 0, 0.5);
+    /* 半透明黑底，不挡视线 */
+    border: 1px solid rgba(0, 204, 255, 0.3);
+    /* 暗蓝色边框 */
+    color: #eaf6ff;
+    padding: 4px 8px;
+    /* 减小内边距，让整体变小 */
+    border-radius: 4px;
+    font-size: 11px;
+    /* 使用 11px 的小字体 */
+    font-family: 'Consolas', 'Monaco', monospace;
+    /* 等宽字体防止数字跳动 */
+    z-index: 100;
+    pointer-events: none;
+    /* 鼠标穿透，不会影响你用鼠标拖拽地图 */
+    backdrop-filter: blur(2px);
+}
+
+.realtime-gps-overlay .status-fixed {
+    color: #00ff00;
+    /* 固定解用绿色 */
+    font-weight: bold;
+}
+
+.realtime-gps-overlay .status-float {
+    color: #ffaa00;
+    /* 浮点解用橙色警告 */
+}
