@@ -35,6 +35,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     // 运动参数 (手动模式使用 - 由前端 /app/move 实时更新)
     private float vx = 0;   // 前后
     private float vy = 0;   // 左右
+    private float vz = 0;   // ✅ 新增：高度方向速度
     private float vyaw = 0; // 转向
     private int currentMode = 0;
 
@@ -47,6 +48,16 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     // 这些值现在可以由前端滑条通过 setAutoSpeeds 动态修改
     private float autoForwardSpeed = 0.2f;
     private float autoStrafeSpeed = 0.2f;
+
+    // ✅ [新增] 终极 S 型巡线：姿态状态机与弯道补偿控制变量
+    private int currentPosture = 0;       // 0=初始平行/未知, 1=车头已偏右, 2=车头已偏左
+    private long turnEndTime = 0;         // 记录本次转向结束的时间戳
+    private int currentTurnDirection = 0; // 当前正在执行的转向：1(右), 2(左), 0(无/直行)
+    private long lastCrossTime = 0;       // 记录上一次成功跨越(收到0)或调整姿态的时间
+    
+    // ⚡ 核心参数调优
+    private static final long BASE_TURN_MS = 1000;   // 基础 1x 转向时间 (约代表 30°)
+    private static final long CURVE_TIMEOUT_MS = 4000; // 弯道超时时间设为 4 秒 (4000ms)
 
     @Override
     public void afterPropertiesSet() throws Exception {
@@ -96,13 +107,19 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     public void setAutoTracking(boolean enable) {
         this.isAutoTracking = enable;
         if (enable) {
-            // 开启时，强制切入 Mode 3 (足式模式)，因为只有它能横移
-            updateCommand(0, 0, 0, 3);
-            System.out.println("🚀 自动巡线已启动 (等待信号...)");
+            // ✅ [修改] 每次启动时重置姿态机和计时器
+            this.currentPosture = 0; 
+            this.currentTurnDirection = 0;
+            this.turnEndTime = 0;
+            this.lastCrossTime = System.currentTimeMillis(); // 启动时初始化跨越时间
+
+            updateCommand(0, 0, 0, 0, 3); 
+            System.out.println("🚀 终极 S 型自动巡线已启动 (带弯道补偿)");
         } else {
             // 关闭时，速度归零
             this.vx = 0;
             this.vy = 0;
+            this.vz = 0; // ✅ 可选：安全起见，也将 vz 归零
             this.vyaw = 0;
             System.out.println("🛑 自动巡线已停止");
         }
@@ -111,10 +128,11 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     /**
      * 更新控制指令 (手动/模式切换)
      */
-    public void updateCommand(float v, float y, float w, int mode) {
-        this.vx = v;
-        this.vy = y;
-        this.vyaw = w;
+    public void updateCommand(float v, float y, float w, float z, int mode) {
+    this.vx = v;
+    this.vy = y;
+    this.vyaw = w;
+    this.vz = z; // ✅ 更新高度速度
 
         // 防止重复发送相同的模式切换指令
         if (mode == currentMode && mode != 0) return;
@@ -152,8 +170,8 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * 负责计算并发送当前的速度参数
      */
     private void sendMotionLoop() {
-        // 拦截非运动模式
-        if (currentMode == 0 || currentMode == 1 || currentMode == 2 || currentMode == 4) {
+        // ✅ 修正：解除对 currentMode == 1 的拦截，允许在站立状态下调整高度和姿态
+        if (currentMode == 0 || currentMode == 2 || currentMode == 4) {
             return;
         }
 
@@ -162,30 +180,96 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         float finalYaw = 0;
 
         if (isAutoTracking) {
-            // --- A. 自动巡线逻辑 ---
+            // --- A. 自动巡线逻辑 (姿态记忆 + 1x/2x折返 + 3秒弯道补偿) ---
 
             // 1. 安全保护：如果超过 2秒 没收到信号，自动停车
             if (System.currentTimeMillis() - lastSignalTime > 2000) {
                 finalVx = 0;
                 finalVy = 0;
+                finalYaw = 0;
+                currentTurnDirection = 0; 
             } else {
-                // ✅ [修改点 3] 使用成员变量，不再使用局部硬编码值
+                long currentTime = System.currentTimeMillis();
 
-                // 2. 根据管线仪信号决定怎么走
-                if (pipelineSignal == 0) {
-                    // [信号 0] 正上方: 只直行
-                    finalVx = this.autoForwardSpeed;
-                    finalVy = 0;
+                // 2. 状态机判断 (仅在非转向期间接收新指令)
+                if (currentTime >= turnEndTime) {
+                    
+                    if (pipelineSignal == 0) {
+                        // 在正上方：刷新跨越时间，不改变姿态，利用惯性冲到另一边
+                        lastCrossTime = currentTime;
+                        
+                    } else if (pipelineSignal == 1) { // 需向右走
+                        if (currentPosture == 0) {
+                            // [起步切入] 平行状态 -> 向右转 1x 时间 (约 30°)
+                            currentTurnDirection = 1;
+                            turnEndTime = currentTime + BASE_TURN_MS;
+                            currentPosture = 1;
+                            lastCrossTime = currentTime;
+                            System.out.println("🔄 [起步] 向右转 1x 角度");
+                            
+                        } else if (currentPosture == 2) {
+                            // [S型折返] 当前偏左 -> 需要转 2x 时间才能变成偏右 (约 60°)
+                            currentTurnDirection = 1;
+                            turnEndTime = currentTime + (BASE_TURN_MS * 2); 
+                            currentPosture = 1;
+                            lastCrossTime = currentTime;
+                            System.out.println("🔄 [折返] 向右转 2x 角度 (抵消左偏+建立右偏)");
+                            
+                        } else if (currentPosture == 1) {
+                            // 已经偏右，但如果超过 3 秒未跨越中心线，说明遇到急弯
+                            if (currentTime - lastCrossTime > CURVE_TIMEOUT_MS) {
+                                currentTurnDirection = 1;
+                                turnEndTime = currentTime + BASE_TURN_MS; // 追加 1x 角度
+                                lastCrossTime = currentTime; // 刷新时间，防止连续追加
+                                System.out.println("⚠️ [弯道补偿] 3秒未跨越，追加向右转 1x 角度");
+                            }
+                        }
+                        
+                    } else if (pipelineSignal == 2) { // 需向左走
+                        if (currentPosture == 0) {
+                            // [起步切入] 平行状态 -> 向左转 1x 时间 (约 30°)
+                            currentTurnDirection = 2;
+                            turnEndTime = currentTime + BASE_TURN_MS;
+                            currentPosture = 2;
+                            lastCrossTime = currentTime;
+                            System.out.println("🔄 [起步] 向左转 1x 角度");
+                            
+                        } else if (currentPosture == 1) {
+                            // [S型折返] 当前偏右 -> 需要转 2x 时间才能变成偏左 (约 60°)
+                            currentTurnDirection = 2;
+                            turnEndTime = currentTime + (BASE_TURN_MS * 2); 
+                            currentPosture = 2;
+                            lastCrossTime = currentTime;
+                            System.out.println("🔄 [折返] 向左转 2x 角度 (抵消右偏+建立左偏)");
+                            
+                        } else if (currentPosture == 2) {
+                            // 已经偏左，检查 3 秒急弯补偿
+                            if (currentTime - lastCrossTime > CURVE_TIMEOUT_MS) {
+                                currentTurnDirection = 2;
+                                turnEndTime = currentTime + BASE_TURN_MS; // 追加 1x 角度
+                                lastCrossTime = currentTime; // 刷新时间
+                                System.out.println("⚠️ [弯道补偿] 3秒未跨越，追加向左转 1x 角度");
+                            }
+                        }
+                    }
+                }
 
-                } else if (pipelineSignal == 1) {
-                    // [信号 1] 向右走: 右平移 (Vy < 0)
-                    finalVx = this.autoForwardSpeed * 0.8f; // 纠偏时稍微减速
-                    finalVy = -this.autoStrafeSpeed;        // 使用设定的横移速度
+                // 3. 执行运动控制
+                finalVx = this.autoForwardSpeed; // 基础状态始终保持前进
+                finalVy = 0;                     // 彻底关闭横移
 
-                } else if (pipelineSignal == 2) {
-                    // [信号 2] 向左走: 左平移 (Vy > 0)
-                    finalVx = this.autoForwardSpeed * 0.8f;
-                    finalVy = this.autoStrafeSpeed;         // 使用设定的横移速度
+                // 检查定时器，执行具体的转向动作
+                if (currentTime < turnEndTime) {
+                    finalVx = this.autoForwardSpeed * 0.8f; // 转向时稍微减速增加抓地力
+                    if (currentTurnDirection == 1) {
+                        finalYaw = -this.autoStrafeSpeed; // 向右角速度
+                    } else if (currentTurnDirection == 2) {
+                        finalYaw = this.autoStrafeSpeed;  // 向左角速度
+                    }
+                } else {
+                    // 时间到了：角速度归零，机器狗带着已建立的偏角保持纯直行
+                    finalYaw = 0;
+                    currentTurnDirection = 0; 
                 }
             }
         } else {
@@ -203,13 +287,15 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         float scaleX = 1.5f;
         float scaleY = 2.0f;
         float scaleYaw = 0.8f;
+        float finalVz = this.vz; // ✅ 获取当前高度速度
 
         // 构建 Items JSON
         String items = String.format(
-                "\"X\": %.4f, \"Y\": %.4f, \"Z\": 0.0, \"Roll\": 0.0, \"Pitch\": 0.0, \"Yaw\": %.4f",
-                finalVx * scaleX,
-                finalVy * scaleY,
-                finalYaw * scaleYaw
+        "\"X\": %.4f, \"Y\": %.4f, \"Z\": %.4f, \"Roll\": 0.0, \"Pitch\": 0.0, \"Yaw\": %.4f",
+        finalVx * scaleX,
+        finalVy * scaleY,
+        finalVz, // ✅ 将 0.0 替换为实际速度值
+        finalYaw * scaleYaw
         );
 
         sendJsonCommand(2, 21, items);

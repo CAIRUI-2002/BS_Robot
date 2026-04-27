@@ -608,7 +608,7 @@
                 if (!isDogStanding) {
                     // === 站立 ===
                     console.log("🚀 指令: 机器狗站立 (Mode 1)");
-                    sendMoveCommand(0.0, 0.0, 0.0, MODES.STAND, true);
+                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.STAND, true);
 
                     this.textContent = "机器狗趴下";
                     this.classList.add("active");
@@ -617,7 +617,7 @@
                 } else {
                     // === 趴下 ===
                     console.log("🚀 指令: 机器狗趴下 (Mode 4)");
-                    sendMoveCommand(0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
+                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
 
                     this.textContent = "机器狗站立";
                     this.classList.remove("active");
@@ -632,7 +632,7 @@
             btnDogWalk.addEventListener('click', function () {
                 console.log("点击: 进入常规运动模式 (Mode 3)");
                 // 发送 Mode 3
-                sendMoveCommand(0.0, 0.0, 0.0, MODES.WALK, true);
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.WALK, true);
                 setStatus("发送指令：常规运动模式", "success");
             });
         }
@@ -793,7 +793,7 @@
                     console.log("🚀 [执行] 切换到: 站立 (Mode 1)");
 
                     // 发送指令
-                    sendMoveCommand(0.0, 0.0, 0.0, MODES.STAND, true);
+                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.STAND, true);
 
                     // 更新 UI
                     this.textContent = "机器狗趴下";
@@ -808,7 +808,7 @@
                     console.log("🚀 [执行] 切换到: 趴下 (Mode 4)");
 
                     // 发送指令
-                    sendMoveCommand(0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
+                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
 
                     // 更新 UI
                     this.textContent = "机器狗站立";
@@ -825,7 +825,7 @@
             btnDogWalk.addEventListener('click', function () {
                 console.log("点击: 运动控制模式");
                 // 发送控制指令：Mode = 6
-                sendMoveCommand(0.0, 0.0, 0.0, 3.0, true); // 3.0 对应后端的 "常规模式"
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, 3.0, true); // 3.0 对应后端的 "常规模式"
                 setStatus("发送指令：运动控制模式", "success");
             });
         }
@@ -1153,12 +1153,12 @@
                 motionTimer = null;
             }
             // 2. 立即发送停止指令
-            // ✅ 修复：第4个参数(mode/z) 必须是数字 0.0
-            sendMoveCommand(0.0, 0.0, 0.0, 0.0, false); // 第5个参数 false 代表不打印日志
+            // ✅ 修复：参数(mode) 必须是数字 0.0
+            sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, false); // 第6个参数 false 代表不打印日志
 
             // 20ms后再补一发，确保停止
             setTimeout(() => {
-                sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, true);
             }, 20);
             return;
         }
@@ -1224,11 +1224,11 @@
         if (v !== 0 || w !== 0 || y !== 0) {
             // 5. 立即发送第一帧
             // 参数说明: v(前后), w(旋转), y(横移), mode(0.0=保持当前), showLog
-            sendMoveCommand(v, w, y, 0.0, true);
+            sendMoveCommand(v, w, y, 0.0, 0.0, true);
 
             // 6. 开启心跳包 (长按连续发送)
             motionTimer = setInterval(() => {
-                sendMoveCommand(v, w, y, 0.0, false);
+                sendMoveCommand(v, w, y, 0.0, 0.0, false);
             }, 150);
         }
     }
@@ -1236,13 +1236,15 @@
     // ✅ 修改后的发送函数：增加 mode (通过 linear.z 传递)
     // 参数：v(前后), w(旋转), y(横移), mode(站立=1/运动=6), showLog
     // ✅ 修改后的发送函数：增加了 UI 状态更新
-    function sendMoveCommand(v, w, y, mode = 0.0, showLog = true) {
+    // 增加 z 参数，并将 mode 独立出来
+    function sendMoveCommand(v, w, y, z = 0.0, mode = 0.0, showLog = true) {
         if (stompClient && stompClient.connected) {
             const payload = JSON.stringify({
                 'v': v,
                 'w': w,
                 'y': y || 0.0,
-                'z': mode || 0.0
+                'z': z || 0.0,    // ✅ 这里现在是高度速度
+                'mode': mode || 0.0 // ✅ 这里现在是模式指令
             });
             stompClient.send("/app/move", {}, payload);
 
@@ -3321,11 +3323,11 @@
         // 直接复用已有的 WebSocket 发送函数，发送全 0 指令
         // 参数：v=0, w=0, y=0, mode=0.0 (保持当前模式或强制空闲), showLog=true
         if (typeof sendMoveCommand === 'function') {
-            sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+            sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, true);
 
             // 双重保险：50ms 后再发一次，防止丢包
             setTimeout(() => {
-                sendMoveCommand(0.0, 0.0, 0.0, 0.0, false);
+                sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, false);
             }, 50);
         } else {
             console.error("❌ 无法调用 sendMoveCommand，请检查代码作用域");
@@ -3423,7 +3425,7 @@
 
             // 3. 发送指令 (仅当有按键按下时在此处发送，松开逻辑在 keyup 处理)
             if (pressedKeys.size > 0) {
-                sendMoveCommand(v, w, y, 0.0, false);
+                sendMoveCommand(v, w, y, 0.0, 0.0, false);
             }
         }
 
@@ -3464,7 +3466,7 @@
                             clearInterval(keyboardTimer);
                             keyboardTimer = null;
                         }
-                        sendMoveCommand(0.0, 0.0, 0.0, 0.0, true);
+                        sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, true);
                     } else {
                         // 还有其他键，更新运动状态
                         updateKeyboardMotion();
@@ -4440,7 +4442,7 @@
                 if (elNavError) elNavError.textContent = "运行中...";
             }
 
-            if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 3.0, true);
+            if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, 3.0, true);
             if (navInterval) clearInterval(navInterval);
             navInterval = setInterval(controlLoop, 100);
         }
@@ -4448,7 +4450,7 @@
         function stopNav(isSuccess) {
             isNavigating = false;
             if (navInterval) { clearInterval(navInterval); navInterval = null; }
-            if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, true);
+            if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
             console.log("🛑 导航停止");
 
             // ✅✅✅ 修正：电缆跟踪与寻找破损模式停止逻辑
@@ -4529,7 +4531,7 @@
                             bsState = 'STEP_WAIT';
                             bsWaitEndTime = Date.now() + 20000; // 等待 20 秒
                             window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
-                            sendMoveCommand(0, 0, 0, 0, true);
+                            sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
                             console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 20 秒检测信号...`);
                             return; // 拦截结束，不执行下面的纯追踪
                         }
@@ -4538,7 +4540,7 @@
 
                     // 3. 停车等待 20 秒阶段 (STEP_WAIT)
                     else if (bsState === 'STEP_WAIT') {
-                        sendMoveCommand(0, 0, 0, 0, false); // 发送心跳包，保持原地停车
+                        sendMoveCommand(0, 0, 0, 0.0, 0.0, false); // 发送心跳包，保持原地停车
 
                         // A. 等待期间检测到信号：立即中断等待，继续前行
                         if (window.g_faultTriggeredInBS) {
@@ -4647,7 +4649,7 @@
             }
 
             if (typeof sendMoveCommand === 'function') {
-                sendMoveCommand(v, w, 0, 0, false);
+                sendMoveCommand(v, w, 0.0, 0.0, 0.0, false);
             }
         }
         function handleBinarySearchControl(currentDist) {
@@ -4668,7 +4670,7 @@
             if (bsState === 'EVAL_WAIT') {
                 // ✅ 修复 1：补充停车心跳包，防止单次指令丢失或物理惯性导致的持续滑行（倒退过头）
                 if (typeof sendMoveCommand === 'function') {
-                    sendMoveCommand(0, 0, 0, 0, false);
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
                 }
 
                 const signalDetectedNow = window.g_faultTriggeredInBS;
@@ -4720,7 +4722,7 @@
 
                 // 如果误差小于 0.1m，或者发生穿透，视为到达目标
                 if (Math.abs(distError) < 0.1 || isOvershot) {
-                    sendMoveCommand(0, 0, 0, 0, true); // 停车
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, true); // 停车
                     bsState = 'EVAL_WAIT';
                     bsWaitEndTime = Date.now() + 20000; // 等待 20秒
 
@@ -4793,7 +4795,7 @@
                 }
 
                 if (typeof sendMoveCommand === 'function') {
-                    sendMoveCommand(v, w, 0, 0, false);
+                    sendMoveCommand(v, w, 0.0, 0.0, 0.0, false);
                 }
             }
         }
