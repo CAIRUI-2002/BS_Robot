@@ -5493,12 +5493,12 @@
                     }
                 }
 
-                // 临时禁用旧链路遗留的“grid 跟随机器人平移”逻辑。
-                // 当前点云、机器人、轨迹都已在统一世界坐标中，继续移动 grid/clickPlane
-                // 会导致它们整体相对 grid 看起来发生偏移。
+                // 恢复 grid 与交互平面跟随机器狗平移的逻辑
                 if (typeof gridHelper !== 'undefined') {
-                    gridHelper.position.set(0, 0, 0);
-                    if (clickPlane) clickPlane.position.set(0, 0, 0);
+                    // 让网格的中心在 XY 平面上实时跟随机器狗
+                    gridHelper.position.set(px, py, 0);
+                    // 确保不可见的点击平面也同步跟随，否则“选点导航”等点击交互会发生严重偏移
+                    if (clickPlane) clickPlane.position.set(px, py, 0);
                 }
 
                 if (isFirstFrame) {
@@ -5787,7 +5787,6 @@
                 let c = 0;
                 let d = 0;
                 let scaleFactor = 1.0;
-                if (data.robot && (Math.abs(data.robot.x) > 100)) scaleFactor = 0.001;
 
                 const isFlat = (scan.length > 0 && typeof scan[0] === 'number');
 
