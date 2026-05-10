@@ -2468,3 +2468,63 @@ input[type="range"]::-webkit-slider-thumb {
     color: #ffaa00;
     /* 浮点解用橙色警告 */
 }
+
+/* 下拉菜单基础样式 */
+.dropdown-group {
+    position: relative;
+    display: inline-block;
+}
+
+.dropdown-content {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    background-color: rgba(5, 30, 50, 0.95);
+    min-width: 140px;
+    border: 1px solid rgba(135, 200, 255, 0.3);
+    border-radius: 4px;
+    z-index: 1000;
+    padding: 5px 0;
+}
+
+.dropdown-group:hover .dropdown-content {
+    display: block;
+}
+
+.dropdown-item {
+    background: transparent;
+    color: #eaf6ff;
+    padding: 8px 12px;
+    text-align: left;
+    border: none;
+    width: 100%;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.dropdown-item:hover {
+    background-color: rgba(0, 150, 255, 0.3);
+}
+
+/* 绘制状态下的按钮激活样式 */
+#btnManualDrawCable.drawing-active {
+    background: rgba(255, 0, 0, 0.2);
+    color: #ff4444 !important;
+    border-color: #ff4444 !important;
+    animation: simple-pulse 1.5s infinite;
+}
+
+@keyframes simple-pulse {
+    0% {
+        box-shadow: 0 0 5px rgba(255, 0, 0, 0.4);
+    }
+
+    50% {
+        box-shadow: 0 0 15px rgba(255, 0, 0, 0.8);
+    }
+
+    100% {
+        box-shadow: 0 0 5px rgba(255, 0, 0, 0.4);
+    }
+}

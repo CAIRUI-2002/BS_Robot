@@ -3506,6 +3506,26 @@
         let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
         let bsFootprints = [];       // ✅ 新增：用于记录机器狗前进时的真实历史脚印
 
+        // 1. 新增状态变量
+        let isManualDrawingCable = false;
+
+        // 2. 绑定按钮点击事件
+        const btnManualDraw = document.getElementById('btnManualDrawCable');
+        if (btnManualDraw) {
+            btnManualDraw.onclick = function () {
+                isManualDrawingCable = !isManualDrawingCable;
+                if (isManualDrawingCable) {
+                    this.innerText = "⏹ 结束绘制";
+                    this.classList.add('drawing-active');
+                    setStatus("手动绘制模式：当前路径记录为电缆", "success");
+                } else {
+                    this.innerText = "📍 手动绘制电缆";
+                    this.classList.remove('drawing-active');
+                    setStatus("手动绘制结束", "warning");
+                }
+            };
+        }
+
         // 1. 计算整条路径的距离积分
         function computePathDists(path) {
             offsetPathDists = [0];
@@ -5661,7 +5681,8 @@
                 }
 
                 // ✅✅✅ 修改：如果处于电缆跟踪模式，禁止绘制机器狗的蓝色轨迹
-                if (!isCableTrackingMode) {
+                // 只有在【非手动绘制电缆】且【非自动跟踪】模式下，才绘制蓝色路径
+                if (!isCableTrackingMode && !isManualDrawingCable) {
                     if (currentPos.distanceTo(lastTrailPos) > 0.05) {
                         trailPoints.push(currentPos);
                         lastTrailPos = currentPos;
@@ -5684,8 +5705,8 @@
                 // =========================================================
                 // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
                 // =========================================================
+                // 增加判断条件：如果是手动绘制模式，则绕过信号特征检测，直接绘制
                 const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
-
                 let isFeaturePoint = false;
 
                 // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
@@ -5702,15 +5723,23 @@
                     isFeaturePoint = true;
                 }
 
-                // ✅✅✅ 修改：增加 isAutoTracking 判断
-                // 只有在 (是特征点) AND (不是在跟踪回放模式) AND (正在自动巡线录制模式) 时，才绘制电缆
-                // ✅✅✅ 修改：增加 isFaultFindingMode 判断
-                if (isFeaturePoint && !isCableTrackingMode && !isFaultFindingMode && isAutoTracking) {
+                // =========================================================
+                // ✅✅✅ [修改] 电缆路径绘制逻辑 (兼容自动特征点与纯手动记录)
+                // =========================================================
+
+                // 触发条件 1：处于自动巡线模式，且检测到了管线仪特征点
+                const isAutoRecording = isFeaturePoint && isAutoTracking;
+
+                // 触发条件 2：用户开启了纯手动绘制模式
+                const isManualRecording = typeof isManualDrawingCable !== 'undefined' && isManualDrawingCable;
+
+                // 只要满足上述任意一种记录条件，且当前没有在执行跟踪或寻找任务
+                if ((isAutoRecording || isManualRecording) && !isCableTrackingMode && !isFaultFindingMode) {
                     const dist = currentPos.distanceTo(lastCablePos);
                     if (dist > 0.1) {
                         const cablePt = new THREE.Vector3(px, py, 0.08);
 
-                        // 初始生成时深度设为 null，等待后端突变深度到达后进行“区间回溯绑定”
+                        // 🛡️ 严格保留你原本的初始化方式，确保完美兼容你的“区间回溯绑定”逻辑
                         cablePt.userData = { depth: null };
 
                         cablePoints.push(cablePt);
@@ -5718,7 +5747,7 @@
 
                         if (cablePoints.length > 2000) {
                             cablePoints.shift();
-                            if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--; // 数组左移，游标也要跟着移
+                            if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--;
                         }
 
                         if (cablePoints.length > 3) {
@@ -5728,10 +5757,10 @@
                                 currentCableMesh = null;
                             }
 
-                            // 调用卡尔曼平滑
+                            // 调用卡尔曼平滑 (你的原有代码完全不需要动)
                             let displayPoints = KalmanSmoother.smooth(cablePoints);
 
-                            // ✅ 将原始点的深度属性同步给平滑后的显示点
+                            // 将原始点的深度属性同步给平滑后的显示点
                             for (let i = 0; i < displayPoints.length; i++) {
                                 displayPoints[i].userData = { depth: cablePoints[i].userData.depth };
                             }
@@ -5747,6 +5776,11 @@
                     }
                 }
                 lastSignal = sig;
+
+                // ==========================================
+                // 🌟 深度区间回溯绑定 (完全保留原有代码，不动)
+                // ==========================================
+                // ... (下方是你原本的 depth 绑定代码，直接原样保留即可)
 
                 // ==========================================
                 // 🌟 核心修改：接收到突变深度时，执行“区间回溯绑定”

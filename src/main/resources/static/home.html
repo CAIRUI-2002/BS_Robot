@@ -459,13 +459,9 @@
                                 <span>路径规划与定位地图</span>
 
                                 <div class="header-btn-group">
-
-                                    <button id="btnClearCloud" class="header-btn-mini">
-                                        消除点云
-                                    </button>
-
-                                    <button id="btnClearFaults" class="header-btn-mini">
-                                        消除破损点
+                                    <button id="btnManualDrawCable" class="header-btn-mini"
+                                        style="color: #ffd700; border-color: #ffd700;">
+                                        📍 手动绘制电缆
                                     </button>
 
                                     <button id="btnSavePcd" class="header-btn-mini"
@@ -473,13 +469,18 @@
                                         💾 保存点云
                                     </button>
 
-                                    <button id="btnClearDogPath" class="header-btn-mini">
-                                        消除机器狗路径
-                                    </button>
-
-                                    <button id="btnClearCablePath" class="header-btn-mini">
-                                        消除电缆路径
-                                    </button>
+                                    <div class="dropdown-group">
+                                        <button class="header-btn-mini dropdown-toggle"
+                                            style="color: #ffaa00; border-color: #ffaa00;">
+                                            🧹 清理数据 ▼
+                                        </button>
+                                        <div class="dropdown-content">
+                                            <button id="btnClearCloud" class="dropdown-item">消除点云</button>
+                                            <button id="btnClearFaults" class="dropdown-item">消除破损点</button>
+                                            <button id="btnClearDogPath" class="dropdown-item">消除机器狗路径</button>
+                                            <button id="btnClearCablePath" class="dropdown-item">消除电缆路径</button>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                             <div class="pf-body map-container" id="pathMapArea"
