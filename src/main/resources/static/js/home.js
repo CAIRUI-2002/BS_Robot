@@ -664,36 +664,44 @@
         // --- B. 初始化 WebSocket 连接 (机器狗) ---
         connectWebSocket();
 
-        // --- C. 面板切换逻辑 (升级版) ---
+        // --- C. 面板切换逻辑 (一体化同步版) ---
         function switchMainPanel(target) {
             console.log("切换面板模式至:", target);
-            // 👇 1. 新增这一行：记录当前激活的面板
+            // 记录当前激活的面板，供 Three.js 和 Canvas 节流拦截使用
             window.currentActivePanel = target;
 
-            // 1. 隐藏所有面板
+            // 1. 隐藏所有内容面板
             if (gprPanel) { gprPanel.classList.add("hidden"); gprPanel.style.display = 'none'; }
             if (robotPanel) { robotPanel.classList.add("hidden"); robotPanel.style.display = 'none'; }
             if (armPanel) { armPanel.classList.add("hidden"); armPanel.style.display = 'none'; }
-            if (pathFaultPanel) { pathFaultPanel.classList.add("hidden"); pathFaultPanel.style.display = 'none'; } // ✅ 隐藏新面板
+            if (pathFaultPanel) { pathFaultPanel.classList.add("hidden"); pathFaultPanel.style.display = 'none'; }
+            const inspectResultPanel = $("inspectResultPanel"); // 获取预留的巡检结果面板
+            if (inspectResultPanel) { inspectResultPanel.classList.add("hidden"); inspectResultPanel.style.display = 'none'; }
 
-            // 2. 显示目标面板
-            if (target === 'gpr' && gprPanel) {
-                gprPanel.classList.remove("hidden");
-                gprPanel.style.display = 'flex';
-                scrollToMain();
-            } else if (target === 'robot' && robotPanel) {
-                robotPanel.classList.remove("hidden");
-                robotPanel.style.display = 'flex';
-                scrollToMain();
-            } else if (target === 'arm' && armPanel) {
-                armPanel.classList.remove("hidden");
-                armPanel.style.display = 'flex';
-                scrollToMain();
-            } else if (target === 'pathFault' && pathFaultPanel) { // ✅ 新增：显示故障面板
-                pathFaultPanel.classList.remove("hidden");
-                pathFaultPanel.style.display = 'flex';
-                scrollToMain();
+            // 2. 移除顶部所有导航选项卡的 active 状态
+            const allNavBtns = document.querySelectorAll(".cyber-nav .nav-item");
+            allNavBtns.forEach(btn => btn.classList.remove("active"));
+
+            // 3. 针对选中的 target，同时赋予对应选项卡 active 高亮态，并展示下方内容容器
+            if (target === 'robot') {
+                if (btnRobotNav) btnRobotNav.classList.add("active");
+                if (robotPanel) { robotPanel.classList.remove("hidden"); robotPanel.style.display = 'flex'; }
+            } else if (target === 'pathFault') {
+                if (btnPathFault) btnPathFault.classList.add("active");
+                if (pathFaultPanel) { pathFaultPanel.classList.remove("hidden"); pathFaultPanel.style.display = 'flex'; }
+            } else if (target === 'gpr') {
+                if (btn3D) btn3D.classList.add("active");
+                if (gprPanel) { gprPanel.classList.remove("hidden"); gprPanel.style.display = 'flex'; }
+            } else if (target === 'inspectResult') {
+                const btnInspect = $("btnInspectResult");
+                if (btnInspect) btnInspect.classList.add("active");
+                if (inspectResultPanel) { inspectResultPanel.classList.remove("hidden"); inspectResultPanel.style.display = 'flex'; }
+            } else if (target === 'arm') {
+                // 侧边栏独立切换到机械臂面板
+                if (armPanel) { armPanel.classList.remove("hidden"); armPanel.style.display = 'flex'; }
             }
+
+            scrollToMain();
         }
 
         function scrollToMain() {
@@ -701,17 +709,23 @@
             if (mainArea) mainArea.scrollIntoView({ behavior: "smooth", block: "start" });
         }
 
-        // --- D. 绑定底部导航按钮 ---
-        if (btn3D) btn3D.addEventListener("click", () => switchMainPanel('gpr'));
+        // --- D. 绑定顶部导航按钮切换事件 ---
         if (btnRobotNav) btnRobotNav.addEventListener("click", () => switchMainPanel('robot'));
-        // ✅ 绑定左侧系统栏“设备”按钮 -> 切换到机械臂
+        if (btnPathFault) btnPathFault.addEventListener("click", () => switchMainPanel('pathFault'));
+        if (btn3D) btn3D.addEventListener("click", () => switchMainPanel('gpr'));
+
+        // 绑定新增的“巡检结果”按钮
+        const btnInspectResult = $("btnInspectResult");
+        if (btnInspectResult) btnInspectResult.addEventListener("click", () => switchMainPanel('inspectResult'));
+
+        // 绑定左侧系统栏“设备”按钮
         if (btnShowArm) {
             btnShowArm.addEventListener("click", () => switchMainPanel('arm'));
         }
 
-        if (btnPathFault) {
-            btnPathFault.addEventListener("click", () => switchMainPanel('pathFault'));
-        }
+        // 🌟 核心新增：页面加载完成后，默认自动执行一次切换操作
+        // 确保一开始打开网页时，不仅显示“控制与导航”页面，且顶部按钮默认呈发光激活状态
+        switchMainPanel('robot');
 
         // --- E. 绑定 GPR 按钮 ---
         if (btnStart) btnStart.addEventListener("click", startGprProcessing);

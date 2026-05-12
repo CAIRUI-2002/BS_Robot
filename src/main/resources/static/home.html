@@ -9,9 +9,57 @@
 
 <body>
     <div class="home-page">
-        <div class="top-banner">
-            <img src="/img/title.png" alt="巡检机器人作业平台" />
-        </div>
+        <header class="cyber-header">
+            <div class="header-side left-side">
+                <div class="cyber-logo-btn">
+                    <img src="/img/csg-logo.png" class="csg-logo-img" alt="南方电网" />
+                </div>
+
+                <nav class="cyber-nav">
+                    <div class="nav-item" id="btnRobotNav">
+                        <div class="nav-content">
+                            <span class="nav-icon">🖥️</span>
+                            <span class="nav-text">机器人控制与导航</span>
+                        </div>
+                        <div class="active-glow-bar"></div>
+                    </div>
+
+                    <div class="nav-item" id="btnPathFault">
+                        <div class="nav-content">
+                            <span class="nav-icon">📍</span>
+                            <span class="nav-text">路径查找及故障定点</span>
+                        </div>
+                        <div class="active-glow-bar"></div>
+                    </div>
+                </nav>
+            </div>
+
+            <div class="header-center">
+                <div class="center-title-wrapper">
+                    <div class="title-bg-glow"></div>
+                    <h1 class="center-title-text">巡检机器人作业平台</h1>
+                </div>
+            </div>
+
+            <div class="header-side right-side">
+                <nav class="cyber-nav">
+                    <div class="nav-item" id="btn3DReconstruct">
+                        <div class="nav-content">
+                            <span class="nav-icon">🌐</span>
+                            <span class="nav-text">三维重建</span>
+                        </div>
+                        <div class="active-glow-bar"></div>
+                    </div>
+                    <div class="nav-item" id="btnInspectResult">
+                        <div class="nav-content">
+                            <span class="nav-icon">🔗</span>
+                            <span class="nav-text">巡检结果</span>
+                        </div>
+                        <div class="active-glow-bar"></div>
+                    </div>
+                </nav>
+            </div>
+        </header>
 
         <div class="layout">
             <aside class="left-panel">
@@ -604,11 +652,6 @@
         </div>
 
         <div class="bottom-actions">
-            <div class="bottom-main-buttons">
-                <button class="action-btn" id="btnRobotNav">机器人控制与导航</button>
-                <button class="action-btn" id="btnPathFault">路径查找及故障定点</button>
-                <button class="action-btn" id="btn3DReconstruct">三维重建</button>
-            </div>
             <button class="emergency-btn">急停按钮</button>
         </div>
     </div>
