@@ -97,23 +97,6 @@
     // 全局存储最新一次触发的 FFT 频谱数据
     window.latestAcousticFFT = null;
 
-    // ====== 新增：FFT 参数调节函数 ======
-    window.adjustFftParam = function (type, delta) {
-        const elMin = document.getElementById('disp_fft_min');
-        const elMax = document.getElementById('disp_fft_max');
-
-        if (type === 'MIN') {
-            FFT_CONFIG.FREQ_MIN += delta;
-            if (FFT_CONFIG.FREQ_MIN < 0) FFT_CONFIG.FREQ_MIN = 0;
-            if (FFT_CONFIG.FREQ_MIN >= FFT_CONFIG.FREQ_MAX) FFT_CONFIG.FREQ_MIN = FFT_CONFIG.FREQ_MAX - 10;
-            if (elMin) elMin.textContent = FFT_CONFIG.FREQ_MIN;
-        } else if (type === 'MAX') {
-            FFT_CONFIG.FREQ_MAX += delta;
-            if (FFT_CONFIG.FREQ_MAX <= FFT_CONFIG.FREQ_MIN) FFT_CONFIG.FREQ_MAX = FFT_CONFIG.FREQ_MIN + 10;
-            if (elMax) elMax.textContent = FFT_CONFIG.FREQ_MAX;
-        }
-        console.log(`🎛️ [FFT参数] 显示范围 -> ${FFT_CONFIG.FREQ_MIN}Hz ~ ${FFT_CONFIG.FREQ_MAX}Hz`);
-    };
 
     // ====== 🌊 峰值监测全局变量 ======
     // 存储最近 50 帧的 { deviation: 偏离度, val: 信号强度 }
@@ -181,13 +164,39 @@
         statusSpan.classList.remove("error", "success");
         if (type) statusSpan.classList.add(type);
     }
-    // ✅ 新增：更新界面上的数值显示 (挂载到 window 以便 HTML 调用)
-    window.updateSpeedLabel = function (id, val) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = val;
-        // 自动模式的数值显示也在这里顺便更新，但发送请求单独处理
-        if (id === 'valAutoX') document.getElementById('valAutoX').textContent = val;
-        if (id === 'valAutoY') document.getElementById('valAutoY').textContent = val;
+    // ==========================================
+    // ✅ 新增：精确计算滑块 Thumb 实时偏移量的浮动标签函数
+    // ==========================================
+    window.updateFloatingThumb = function (inputEl, labelId) {
+        const labelEl = document.getElementById(labelId);
+        if (!labelEl || !inputEl) return;
+
+        // 1. 获取当前原始浮点数值 (用于后续内部偏移量计算)
+        const val = parseFloat(inputEl.value);
+
+        // 🌟 核心修改：生成强制保留 1 位小数的字符串格式 (例如 2 -> "2.0")
+        const displayVal = val.toFixed(1);
+
+        // 更新当前悬浮气泡的文本显示
+        labelEl.textContent = displayVal;
+
+        // 2. 顺便同步更新原有的自动巡线数字显示（统一显示保留一位小数的版本）
+        if (labelId === 'valAutoX') document.getElementById('valAutoX').textContent = displayVal;
+        if (labelId === 'valAutoY') document.getElementById('valAutoY').textContent = displayVal;
+
+        // 3. 核心物理几何对齐计算 (继续使用原始 val 进行数学计算，确保几何精度不变)
+        const min = parseFloat(inputEl.min) || 0;
+        const max = parseFloat(inputEl.max) || 3.0;
+
+        // 计算当前值在总射程中的百分比 (0.0 ~ 1.0)
+        const percent = (val - min) / (max - min);
+
+        // 💡 视觉修正魔法：补偿 range thumb 圆点在边缘的动态像素偏移
+        const thumbWidth = 14;
+        const offsetPx = (0.5 - percent) * thumbWidth;
+
+        // 应用计算结果到绝对定位的 left 属性
+        labelEl.style.left = `calc(${percent * 100}% + ${offsetPx}px)`;
     };
 
     // ✅ 新增：发送自动巡线速度给后端 (挂载到 window 以便 HTML 调用)
@@ -452,6 +461,21 @@
     // ==========================================
 
     document.addEventListener("DOMContentLoaded", function () {
+
+        // ✅ 初始化所有浮动滑块的位置
+        ['manualSpeedX', 'manualSpeedY', 'autoSpeedX', 'autoSpeedY'].forEach(id => {
+            const input = document.getElementById(id);
+            if (input) {
+                // 根据 input 的 id 推导对应的 tooltip id
+                let tipId = '';
+                if (id === 'manualSpeedX') tipId = 'valManX';
+                if (id === 'manualSpeedY') tipId = 'valManY';
+                if (id === 'autoSpeedX') tipId = 'valAutoX';
+                if (id === 'autoSpeedY') tipId = 'valAutoY';
+
+                window.updateFloatingThumb(input, tipId);
+            }
+        });
         // ==========================================
         // ✅ [修改] 初始化所有 AUC 算法参数显示 (Z-score, Pulse, AUC)
         // ==========================================
@@ -2965,8 +2989,6 @@
                 const peakVal = Math.abs(segment[AUC_CONFIG.WINDOW_BEFORE]) + 2048;
                 window.g_realtimeMag = peakVal;
 
-                const elMag = document.getElementById('magSignalVal');
-                if (elMag) elMag.style.color = "#ff4444";
 
                 setTimeout(() => { window.g_isFaultDetected = false; }, 500);
 
@@ -3143,20 +3165,6 @@
 
         // 更新左侧滚动的数值 (UI)
         function updateUIValues() {
-            // 1. 磁信号数值 (取最新数据的最大值，或者由 AUC 结果驱动)
-            if (channel1Data.length > 0) {
-                // 为了界面跳动效果，我们依然取当前帧的一个代表值
-                // 这里取当前帧最大值作为显示
-                const currVal = Math.max(...channel1Data);
-                magHistory.push(Math.floor(currVal));
-                if (magHistory.length > 3) magHistory.shift();
-
-                const elMag = document.getElementById('magSignalVal');
-                if (elMag) {
-                    elMag.textContent = magHistory.join('   ');
-                    if (!window.g_isFaultDetected) elMag.style.color = "#00e5ff";
-                }
-            }
 
             // 2. ✅ 声信号数值 (保持不变)
             if (channel2Data.length > 0) {

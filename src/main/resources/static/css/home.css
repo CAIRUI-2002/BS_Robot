@@ -228,7 +228,7 @@ body {
     /* 超出省略 */
     text-overflow: ellipsis;
 
-    font-size: 14px;
+    font-size: 16px;
     /* 默认字体稍微改小以适应 */
     border-radius: 24px;
     /* 背景和边框保持不变... */
@@ -440,7 +440,7 @@ screen and (max-height: 800px) {
 
     /* 5. 按钮文字变小 */
     .action-btn {
-        font-size: 12px;
+        font-size: 16px;
         letter-spacing: 1px;
         height: 40px;
         line-height: 40px;
@@ -721,7 +721,11 @@ screen and (max-height: 800px) {
 }
 
 .group-title {
-    font-size: 13px;
+    font-size: 14px;
+    /* ✏️ 修改：从 13px 改为 14px */
+    font-weight: bold;
+    /* ✏️ 保持加粗 */
+    /* 🗑️ 删除了原有的 font-family 强制属性，让其自然继承全局的 YaHei */
     color: #87c8ff;
     border-bottom: 1px solid rgba(135, 200, 255, 0.2);
     margin-bottom: 8px;
@@ -793,21 +797,6 @@ screen and (max-height: 800px) {
 }
 
 /* --- 关节控制样式 --- */
-.joint-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    flex: 1;
-    justify-content: center;
-}
-
-.joint-row {
-    display: flex;
-    align-items: center;
-    background: rgba(0, 0, 0, 0.2);
-    padding: 4px;
-    border-radius: 4px;
-}
 
 .joint-label {
     flex: 1;
@@ -1109,24 +1098,6 @@ screen and (max-height: 800px) {
 }
 
 /* 标题栏容器：Flex 布局，让标题和按钮左右对齐 */
-.group-header-flex {
-    display: flex;
-    justify-content: space-between;
-    /* 左右两端对齐 */
-    align-items: center;
-    /* 垂直居中 */
-    margin-bottom: 8px;
-    border-bottom: 1px solid rgba(135, 200, 255, 0.2);
-    /* 底部细分割线 */
-    padding-bottom: 4px;
-}
-
-/* 覆写标题样式：去掉原来的下边框和下边距（因为现在由父容器负责） */
-.group-header-flex .group-title {
-    margin-bottom: 0;
-    border-bottom: none;
-    text-align: left;
-}
 
 /* 确保视频容器去除默认的内边距 */
 .nav-display-area.video-container {
@@ -1514,16 +1485,16 @@ input[type="range"]::-webkit-slider-thumb {
     /* 增加行与行之间的间距 */
 }
 
-/* 3. 分组标题文字 */
+/* 速度控制分组标题 */
 .speed-header {
     font-size: 14px;
-    /* 字体加大 */
     font-weight: bold;
     color: #87c8ff;
     border-bottom: 1px solid rgba(135, 200, 255, 0.3);
-    /* 实线更清晰 */
-    padding-bottom: 4px;
-    margin-bottom: 4px;
+    padding-bottom: 2px;
+    /* 👈 缩减内边距 */
+    margin-bottom: 10px;
+    /* 👈 缩减外边距 */
     white-space: nowrap;
 }
 
@@ -1535,6 +1506,65 @@ input[type="range"]::-webkit-slider-thumb {
     /* 元素间隙加大 */
     height: 24px;
     /* 增加行高 */
+}
+
+/* =========================================
+   新增：滑条跟随浮动数值专属样式
+   ========================================= */
+
+/* 1. 压缩滑条容器行高与顶部边距，大幅节省垂直空间 */
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 26px;
+    /* 👈 从 32px 降到 26px */
+    margin-top: 4px;
+    /* 👈 从 8px 降到 4px */
+    margin-bottom: 0 !important;
+}
+
+/* 滑条外层相对定位容器 */
+.slider-wrapper {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+/* 实时跟随在圆点正上方的浮动气泡 */
+.floating-tooltip {
+    position: absolute;
+    bottom: 12px;
+    /* 👈 从 16px 降到 14px，刚好位于滑块正上方不重叠 */
+    left: 0;
+    transform: translateX(-50%);
+
+    background: rgba(0, 204, 255, 0.2);
+    border: 1px solid #00ccff;
+    color: #00ff00;
+    font-family: 'Consolas', monospace;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 1px 4px;
+    border-radius: 3px;
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 0 0 5px rgba(0, 204, 255, 0.5);
+    transition: left 0.05s ease-out;
+}
+
+/* 右侧固定的最大值显示 */
+.val-max {
+    font-size: 13px;
+    font-family: 'Consolas', monospace;
+    color: #87c8ff;
+    /* 采用与标题一致的暗蓝色，弱化视觉，突出绿色的实时值 */
+    width: 24px;
+    text-align: right;
+    display: inline-block;
+    user-select: none;
 }
 
 /* 行首标签 (前进/横移) */
@@ -1843,12 +1873,11 @@ input[type="range"]::-webkit-slider-thumb {
 /* 2. 左侧：速度滑条容器 */
 .nc-left-speed {
     flex: 4;
-    /* 占 40% 宽度 */
     display: flex;
     flex-direction: column;
-    /* 纵向排列 */
-    gap: 10px;
-    /* 两个组之间的间隙 */
+    gap: 5px;
+    /* 👈 从 10px 降到 5px，给底部腾出关键空间 */
+    justify-content: space-between;
 }
 
 /* 自动填充的组容器 */
@@ -2091,9 +2120,15 @@ input[type="range"]::-webkit-slider-thumb {
     color: #eaf6ff;
 }
 
+/* 机械臂实时姿态标题 */
 .arm-data-header {
     font-size: 14px;
-    color: #00e5ff;
+    /* 保持 14px */
+    font-weight: bold;
+    /* 保持加粗 */
+    /* 🗑️ 删除了 font-family: "Microsoft YaHei"... !important; */
+    color: #87c8ff;
+    /* ✅ 统一替换为标准浅蓝色 */
     border-bottom: 1px solid rgba(0, 229, 255, 0.3);
     padding-bottom: 5px;
     margin-bottom: 10px;
@@ -2527,4 +2562,103 @@ input[type="range"]::-webkit-slider-thumb {
     100% {
         box-shadow: 0 0 5px rgba(255, 0, 0, 0.4);
     }
+}
+
+/* =================================================================
+   升级重构：机械臂整合面板与夹爪迁移样式
+   ================================================================= */
+
+/* 1. 机械臂中下区域左右分栏布局 */
+.arm-integrated-wrapper {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+    flex: 1;
+    align-items: stretch;
+    /* 保证左右两栏高度拉伸一致 */
+}
+
+/* 左侧 6 关节网格自适应 */
+.integrated-grid {
+    flex: 8;
+    /* 占据绝大多数空间 */
+    grid-template-columns: 1fr 1fr;
+    /* 保持两列排布 */
+    gap: 6px;
+}
+
+/* 单个集成关节盒子的微调 */
+.integrated-box {
+    padding: 2px 5px;
+    /* 稍微压缩上下内边距，防止内容溢出 */
+    justify-content: space-evenly;
+}
+
+/* 核心：将按钮和数值强行放在同一行且完美垂直对齐 */
+.j-ctrl-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-top: 2px;
+}
+
+/* 数值显示居中，并限制最小宽度防止加减时发生水平抖动 */
+.j-ctrl-row .j-val {
+    flex: 1;
+    text-align: center;
+    font-size: 16px;
+    /* 稍微略微缩小字体以适配按钮并排 */
+    min-width: 45px;
+    margin: 0 4px;
+}
+
+/* 针对集成面板内的加减按钮进行专属尺寸微调 */
+.j-ctrl-row .joint-btn {
+    width: 28px !important;
+    height: 24px !important;
+    line-height: 20px;
+    margin: 0;
+    font-size: 14px;
+}
+
+/* 右侧快捷键专区纵向均匀排布 */
+.arm-quick-actions {
+    flex: 2;
+    /* 占据剩余右侧空间 */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-evenly;
+    border-left: 1px dashed rgba(0, 229, 255, 0.2);
+    padding-left: 8px;
+}
+
+/* 让快捷键强行撑满右侧专区宽度 */
+.arm-quick-actions .full-w {
+    width: 100% !important;
+    margin: 0;
+    height: 32px;
+    font-size: 12px;
+}
+
+/* 2. 右上角末端姿态控制追加的夹爪容器样式 */
+.integrated-gripper-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 4px;
+}
+
+.gripper-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.gripper-controls {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
 }
