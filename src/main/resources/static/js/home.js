@@ -29,7 +29,7 @@
     // 对应 Python 代码中的核心参数
     const AUC_CONFIG = {
         SAMPLING_RATE: 10000,   // 采样率
-        PULSE_THRESHOLD: 300,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
+        PULSE_THRESHOLD: 500,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
         DISTANCE_MIN: 1000,     // 粗筛：最小脉冲间隔 (防止重复触发)
 
         // --- 核心判定参数 ---

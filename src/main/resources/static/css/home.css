@@ -71,13 +71,13 @@ body {
 
 /* 操作栏：占高度多一点（1.2 份） */
 .panel-op {
-    flex: 5;
+    flex: 3;
     /* 在 left-panel 中分得更高的空间 */
 }
 
 /* 信息栏：占高度略少一点（1 份） */
 .panel-info {
-    flex: 2.5;
+    flex: 3.5;
     /* 增加高度份额，以便显示更多行信息 */
     min-height: 0;
     /* ✅ 关键：允许 Flex 项目压缩，不被内容撑开 */
@@ -134,23 +134,45 @@ body {
     /* 半透明深蓝背景 */
 }
 
-/* 底部容器：靠右对齐放置急停按钮 */
+/* 1. 底部总容器：改为“居中对齐”布局 */
 .bottom-actions {
     position: absolute;
     left: 20px;
     right: 20px;
     bottom: 15px;
     height: 48px;
+
     display: flex;
+    justify-content: center;
+    /* ✅ 核心修改：让内部的按钮组整体在页面水平居中 */
     align-items: center;
-    justify-content: flex-end;
-    /* 强制仅存的急停按钮停靠在最右侧 */
+
     pointer-events: none;
 }
 
 /* 恢复按钮的点击事件 */
 .bottom-actions>* {
     pointer-events: auto;
+}
+
+/* ==========================================
+   ✅ 新增：底部横向模式按钮组样式
+   ========================================== */
+/* 2. 模式按钮组：实现“分散”排列 */
+.bottom-mode-group {
+    display: flex;
+    align-items: center;
+    /* ✅ 增加间距：通过较大的 gap 实现“分散”感，建议 40px - 60px */
+    gap: 60px;
+    pointer-events: auto;
+}
+
+/* 让底部的模式按钮高度完美对齐右侧 48px 的急停按钮 */
+.bottom-mode-group .tech-mode-btn {
+    width: 160px;
+    height: 48px;
+    margin: 0;
+    font-size: 15px;
 }
 
 /* ==========================================
@@ -252,49 +274,51 @@ body {
 }
 
 /* =========================================================
-   复刻图示科技感 Header (Cyberpunk & Power Grid Style)
+   全新一体化机甲翼展 Header (参考网格化巡检系统大屏重构)
    ========================================================= */
 
-/* 1. 顶部栏总容器 */
+/* 1. 顶部栏总容器：打造连贯的通栏科技底座 */
 .cyber-header {
     position: absolute;
     top: 0;
     left: 0;
     width: 100%;
-    height: 65px;
-    background: #02162e;
-    /* 深蓝科技底色 */
-    border-bottom: 2px solid #0a4b8c;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+    height: 64px;
+    background: linear-gradient(180deg, rgba(2, 18, 36, 0.95) 0%, rgba(5, 32, 60, 0.85) 100%);
+    border-bottom: 1px solid #0a4b8c;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6), inset 0 -1px 0 rgba(0, 204, 255, 0.3);
     display: flex;
     justify-content: space-between;
     align-items: stretch;
     z-index: 999;
-    overflow: hidden;
     box-sizing: border-box;
+    padding: 0;
+    /* 移除原有默认padding，靠内部伸展对齐 */
 }
 
-/* 2. 左右侧容器布局 */
+/* 2. 左右侧翼容器 */
 .header-side {
     flex: 1;
     display: flex;
     align-items: center;
-    padding: 0 15px;
     z-index: 2;
 }
 
 .left-side {
     justify-content: flex-start;
+    padding-left: 15px;
+    /* 仅给最左侧Logo留白 */
 }
 
 .right-side {
     justify-content: flex-end;
+    padding-right: 15px;
 }
 
-/* 3. 最左侧固定圆形 Logo 按钮（无悬停动效版） */
+/* 3. 最左侧固定圆形 Logo 按钮 */
 .cyber-logo-btn {
-    width: 45px;
-    height: 45px;
+    width: 42px;
+    height: 42px;
     border-radius: 50%;
     background: #000000;
     border: 2px solid #00ccff;
@@ -302,86 +326,110 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
-    margin-right: 20px;
+    margin-right: 15px;
     flex-shrink: 0;
     overflow: hidden;
-    /* 确保内部图片不超界 */
 }
 
-/* 南方电网 Logo 图片布局约束 */
 .csg-logo-img {
     width: 70%;
-    /* 控制Logo在圆形边缘留出舒适的呼吸感安全距离 */
     height: 70%;
     object-fit: contain;
-    /* 保证原图等比例缩放完整显示 */
     user-select: none;
     -webkit-user-drag: none;
-    /* 禁止拖拽图片 */
 }
 
-
-
-
-/* 4. 斜切导航容器组 */
+/* 4. 斜切导航容器组：无缝嵌套的核心逻辑 */
 .cyber-nav {
     display: flex;
     align-items: stretch;
     height: 100%;
+    flex: 1;
+    /* 让导航条自动向中央靠拢填充空隙 */
 }
 
-/* 🔥核心：利用 skewX 实现平行四边形斜切选项卡 */
+/* 左侧导航向右延展，右侧导航向左延展，彻底消除断层 */
+.nav-left-wing {
+    justify-content: flex-end;
+    padding-right: 15px;
+    /* 与中央框切角形成平行缝隙 */
+}
+
+.nav-right-wing {
+    justify-content: flex-start;
+    padding-left: 15px;
+}
+
+/* 利用 skewX 实现完美贴合中央六边形的平行选项卡 */
 .nav-item {
     position: relative;
-    padding: 0 25px;
-    margin: 0 -5px;
-    /* 让相邻选项卡的斜边互相产生完美穿插嵌合 */
-    transform: skewX(-25deg);
-    /* 容器整体向左斜切 25 度 */
-    background: linear-gradient(180deg, rgba(6, 42, 80, 0.4) 0%, rgba(2, 22, 46, 0.8) 100%);
-    border-left: 1px solid rgba(0, 160, 255, 0.3);
-    border-right: 1px solid rgba(0, 160, 255, 0.3);
+    padding: 0 20px;
+    margin: 0 -1px;
+    /* 让相邻选项卡的斜边互相重叠镶嵌 */
+
+    /* 核心动效：左侧向右倾斜(+30deg)贴合左切角，右侧向左倾斜(-30deg)贴合右切角 */
+    background: transparent;
+    /* 默认通透底色 */
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: all 0.3s ease;
+    border: none;
+    /* 移除突兀的左右边框，改用光晕界定 */
 }
 
-/* 🔥核心：容器倾斜了，内部文字必须反向倾斜正回来 */
+/* 针对左右两翼分别倾斜，实现镜像对称的完美贴合感 */
+.nav-left-wing .nav-item {
+    transform: skewX(30deg);
+}
+
+.nav-right-wing .nav-item {
+    transform: skewX(-30deg);
+}
+
+/* 容器倾斜后内部文字必须反向修正回来 */
+.nav-left-wing .nav-content {
+    transform: skewX(-30deg);
+}
+
+.nav-right-wing .nav-content {
+    transform: skewX(30deg);
+}
+
 .nav-content {
-    transform: skewX(25deg);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     color: #79bbff;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: bold;
     letter-spacing: 1px;
     transition: color 0.2s;
+    white-space: nowrap;
 }
 
-/* 选项卡悬浮与激活态 */
+/* 选项卡悬浮与激活态：沉浸式高亮底色 */
+.nav-item:hover,
+.nav-item.active {
+    background: linear-gradient(180deg, rgba(0, 160, 255, 0.05) 0%, rgba(0, 229, 255, 0.2) 100%);
+}
+
 .nav-item:hover .nav-content,
 .nav-item.active .nav-content {
-    color: #00e5ff;
-    text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+    color: #ffffff;
+    text-shadow: 0 0 8px rgba(0, 229, 255, 0.8);
 }
 
-.nav-item:hover {
-    background: linear-gradient(180deg, rgba(0, 160, 255, 0.15) 0%, rgba(0, 229, 255, 0.25) 100%);
-}
-
-/* 参考图中底部高亮发光线条（仅激活态或悬停展示） */
+/* 底部发光光线 */
 .active-glow-bar {
     position: absolute;
     bottom: 0;
-    left: 10%;
-    width: 80%;
-    height: 3px;
+    left: 0;
+    width: 100%;
+    height: 2px;
     background: #00e5ff;
-    box-shadow: 0 -2px 10px #00e5ff;
+    box-shadow: 0 -2px 8px #00e5ff;
     opacity: 0;
     transition: opacity 0.3s;
 }
@@ -391,20 +439,21 @@ body {
     opacity: 1;
 }
 
-/* 5. 中央发光主标题容器 */
+/* 5. 中央发光主标题容器：与两侧平行切割精准嵌合 */
 .header-center {
     position: relative;
     width: 480px;
+    /* 黄金比例宽度 */
     height: 100%;
     z-index: 10;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0 0 10px rgba(0, 204, 255, 0.5));
+    filter: drop-shadow(0 0 12px rgba(0, 204, 255, 0.4));
 }
 
-/* 核心容器：绘制外围深蓝色基础底框 */
+/* 外围蓝色框体：配合左右翼的 30deg 倾角进行匹配裁切 */
 .center-title-wrapper {
     position: absolute;
     top: 0;
@@ -412,21 +461,20 @@ body {
     height: 100%;
     background: #0b4c8c;
 
-    clip-path: polygon(30px 0%,
-            calc(100% - 30px) 0%,
-            100% 45%,
-            calc(100% - 40px) 100%,
-            40px 100%,
-            0% 45%);
+    /* 精确推算出的机甲顶盖裁切路径（切角斜率与导航选项卡完美一致） */
+    clip-path: polygon(35px 0%,
+            calc(100% - 35px) 0%,
+            100% 40%,
+            calc(100% - 35px) 100%,
+            35px 100%,
+            0% 40%);
 
     display: flex;
     align-items: center;
     justify-content: center;
-    transform: none;
-    border: none;
 }
 
-/* 主体内容层：已将蜂窝底纹透明度 fill-opacity 调高至 0.25，使其更加明显 */
+/* 蜂窝主体层：保留 0.25 高透明度蜂窝质感 */
 .title-bg-glow {
     position: absolute;
     top: 2px;
@@ -439,12 +487,12 @@ body {
         url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='42' viewBox='0 0 24 42'%3E%3Cpath fill='%2300ccff' fill-opacity='0.25' d='M12 6.5l10 5.8v11.6l-10 5.8-10-5.8V12.3L12 6.5zm0 1.5L3.3 13v10l8.7 5 8.7-5V13L12 8z'/%3E%3C/svg%3E"),
         linear-gradient(180deg, #021631 0%, #06386e 100%);
 
-    clip-path: polygon(29px 0%,
-            calc(100% - 29px) 0%,
-            calc(100% - 1px) 45%,
-            calc(100% - 39px) calc(100% - 1px),
-            39px calc(100% - 1px),
-            1px 45%);
+    clip-path: polygon(34px 0%,
+            calc(100% - 34px) 0%,
+            calc(100% - 1px) 40%,
+            calc(100% - 34px) calc(100% - 1px),
+            34px calc(100% - 1px),
+            1px 40%);
 
     box-shadow:
         inset 0 0 25px rgba(0, 229, 255, 0.8),
@@ -452,15 +500,12 @@ body {
     z-index: 1;
 }
 
-/* ⚠️ 注意：原有的 .center-title-wrapper::before 样式块已完全删除，去掉了底部的激光封边条 */
-
-/* 主标题文字层保持不变 */
+/* 主标题文字层 */
 .center-title-text {
-    transform: none;
     margin: 0;
-    font-size: 26px;
+    font-size: 25px;
     font-weight: 900;
-    letter-spacing: 5px;
+    letter-spacing: 4px;
 
     background: linear-gradient(180deg, #ffffff 0%, #a8e0ff 40%, #00d9ff 100%);
     background-clip: text;
@@ -473,31 +518,27 @@ body {
     z-index: 3;
 }
 
-/* 红色急停按钮 */
+/* 3. 急停按钮：使用绝对定位强行固定在最右侧，不占用中间的居中空间 */
 .emergency-btn {
-    flex: 0 0 auto;
-    /* 不许压缩 */
+    position: absolute;
+    /* ✅ 核心修改：脱离常规流 */
+    right: 0;
+    /* 贴紧父容器右侧 */
+
+    /* 保持原有的外观样式 */
     height: 48px;
     min-width: 100px;
     padding: 10px 20px;
     border-radius: 6px;
-    /* 直角更明显一点 */
     border: 1px solid #ff7b7b;
     background: linear-gradient(180deg, #ff6565, #c81212);
-    /* 红色渐变 */
     color: #ffffff;
     font-size: 16px;
     font-weight: bold;
-    /* 加粗，显得更重要 */
     letter-spacing: 2px;
     cursor: pointer;
     box-shadow: 0 0 12px rgba(255, 80, 80, 0.8);
-    outline: none;
-
-    transition:
-        transform 0.08s ease,
-        box-shadow 0.08s ease,
-        filter 0.08s ease;
+    pointer-events: auto;
 }
 
 /* 急停按钮悬浮效果（更明显一点） */
@@ -637,52 +678,110 @@ body {
 
 /* ============ 4. 媒体查询：适配笔记本小屏幕 ============ */
 
-/* 当屏幕宽度小于 1400px 或高度小于 800px 时 */
+/* 针对标准笔记本屏幕 (宽度 <= 1400px 或 高度 <= 800px) */
 @media screen and (max-width: 1400px),
 screen and (max-height: 800px) {
 
-    /* 1. 缩小左侧栏 */
-    .left-panel {
-        width: 220px;
-    }
-
-    /* 2. 调整底部按钮栏的左边距 */
-    .bottom-actions {
-        left: 300px;
-        /* 220px + 20px */
-        bottom: 10px;
-    }
-
-    /* 3. 调整主区域底部留白，给按钮腾出空间 */
+    /* 1. 紧凑化主体框架：释放上下垂直空间 */
     .layout {
-        padding-bottom: 80px;
-        /* 从 120px 减小 */
-        padding-top: 75px;
-        /* 顶部横幅留白也减小 */
+        padding-top: 68px;
+        /* 略微拉近顶部导航栏间距 */
+        padding-bottom: 55px;
+        /* 缩减底部给按钮组预留的高度空间 */
     }
 
-    /* 4. 缩小顶部 Banner 图片 */
-    .top-banner img {
-        max-width: 60%;
+    /* 2. 缩小左侧控制面板总宽 */
+    .left-panel {
+        width: 230px;
+        /* 从原先的 280px 缩窄，为右侧主视图让出可视区域 */
     }
 
-    /* 5. 按钮文字变小 */
-    .action-btn {
-        font-size: 16px;
-        letter-spacing: 1px;
+    /* 3. 底部模式按钮组自适应适配：完美居中并缩减间距 */
+    .bottom-mode-group {
+        gap: 50px;
+        /* 缩减按钮之间的间距，防止在小屏下过于分散超出安全边界 */
+    }
+
+    .bottom-mode-group .tech-mode-btn {
+        width: 180px;
+        /* 按比例缩减按钮宽度 */
         height: 40px;
-        line-height: 40px;
+        /* 压低按钮高度 */
+        font-size: 15px;
+        /* 配合缩小字号 */
+    }
+
+    /* 4. 底部总容器与急停按钮同步压缩 */
+    .bottom-actions {
+        height: 40px;
+        bottom: 10px;
+        left: 10px;
+        right: 10px;
     }
 
     .emergency-btn {
         height: 40px;
+        right: 15px;
+        min-width: 85px;
+        padding: 6px 12px;
+        font-size: 14px;
+        letter-spacing: 1px;
+    }
+
+    /* 5. 侧边栏内部元素尺寸整体降级，彻底解决小屏纵向重叠溢出 */
+    .panel-header {
+        height: 28px;
+        line-height: 28px;
         font-size: 14px;
     }
 
-    /* 6. 系统栏图标变小 */
-    .sys-btn {
-        width: 50px;
-        height: 50px;
+    /* 缩小移动控制盘按钮，防止在低分辨率下撑爆容器 */
+    .side-control-pad .mini-btn {
+        width: 38px !important;
+        height: 38px !important;
+        font-size: 16px !important;
+    }
+
+    .side-control-pad .stop-btn {
+        width: 44px !important;
+        height: 44px !important;
+        font-size: 11px !important;
+    }
+
+    .side-control-pad {
+        gap: 4px;
+        padding-top: 4px;
+    }
+
+    /* 调整中间视图面板（速度控制与机械臂）在小屏下的内边距 */
+    .speed-panel,
+    .nav-control-area,
+    .arm-data-container {
+        padding: 6px !important;
+    }
+
+    .speed-header,
+    .arm-data-header,
+    .group-title {
+        font-size: 12px;
+        margin-bottom: 6px;
+    }
+
+    /* 压缩滑条行高 */
+    .slider-row {
+        height: 20px;
+    }
+
+    /* 缩减集成机械臂操作盘内加减按钮的高度 */
+    .j-ctrl-row .joint-btn {
+        width: 24px !important;
+        height: 20px !important;
+        line-height: 16px;
+        font-size: 12px;
+    }
+
+    .j-ctrl-row .j-val {
+        font-size: 14px;
     }
 }
 
@@ -888,37 +987,77 @@ screen and (max-height: 800px) {
     height: 100%;
 }
 
-/* 按钮本身样式 */
+/* ==========================================
+   🚀 底部科技感模式按钮：立体质感重构
+   ========================================== */
+
+/* 通用模式按钮样式 */
 .tech-mode-btn {
     width: 160px;
-    height: 45px;
-    background: rgba(0, 100, 255, 0.15);
-    /* 半透明蓝底 */
-    border: 1px solid #00a0e9;
-    /* 亮蓝边框 */
-    box-shadow: 0 0 8px rgba(0, 160, 233, 0.5);
-    /* 蓝色发光 */
-    color: #fff;
-    font-size: 16px;
+    height: 48px;
+    /* 统一匹配底部高度 */
+
+    /* 1. 实体化渐变背景：深邃蓝底 + 顶部高光微透，彻底告别单薄透明 */
+    background: linear-gradient(180deg, rgba(16, 60, 110, 0.85) 0%, rgba(6, 28, 55, 0.95) 100%);
+
+    /* 2. 精细边框：顶部较亮（模拟迎光面），底部较暗，形成立体浮雕感 */
+    border-top: 1px solid #00c6ff;
+    border-left: 1px solid rgba(0, 160, 233, 0.6);
+    border-right: 1px solid rgba(0, 160, 233, 0.6);
+    border-bottom: 1px solid #005088;
+
+    /* 3. 复合阴影：外侧柔和发光 + 内部顶层提亮（关键质感来源） */
+    box-shadow:
+        0 4px 10px rgba(0, 0, 0, 0.6),
+        /* 底部整体实体阴影 */
+        0 0 10px rgba(0, 160, 233, 0.4),
+        /* 外侧蓝色微光 */
+        inset 0 2px 4px rgba(255, 255, 255, 0.2);
+    /* 内部顶部玻璃质感高光 */
+
+    color: #eaf6ff;
+    font-size: 15px;
     font-weight: bold;
+    letter-spacing: 1px;
     cursor: pointer;
-    border-radius: 4px;
-    transition: all 0.2s;
+    border-radius: 6px;
+    /* 稍微圆润一点点，手感更好 */
+    outline: none;
+
     display: flex;
     align-items: center;
     justify-content: center;
-    letter-spacing: 1px;
+    gap: 6px;
+    /* 保证图标和文字间隔舒适 */
+
+    /* 顺滑平行的过渡动画 */
+    transition: all 0.25s cubic-bezier(0.2, 1, 0.3, 1);
 }
 
+/* 🖱️ 鼠标悬浮态 (Hover)：犹如被能量点亮 */
 .tech-mode-btn:hover {
-    background: rgba(0, 100, 255, 0.3);
-    box-shadow: 0 0 15px rgba(0, 160, 233, 0.8);
-    transform: scale(1.02);
+    color: #ffffff;
+    /* 整体背景色阶提亮 */
+    background: linear-gradient(180deg, rgba(28, 95, 170, 0.95) 0%, rgba(10, 45, 85, 0.95) 100%);
+    border-top-color: #ffffff;
+    border-bottom-color: #00a0e9;
+    /* 外发光范围扩大，内高光增强 */
+    box-shadow:
+        0 6px 15px rgba(0, 0, 0, 0.7),
+        0 0 18px rgba(0, 229, 255, 0.8),
+        inset 0 2px 5px rgba(255, 255, 255, 0.4);
+    transform: translateY(-2px);
+    /* 轻轻浮起 */
 }
 
+/* 🎯 鼠标按下态 (Active)：强烈的真实物理下压感 */
 .tech-mode-btn:active {
-    transform: scale(0.98);
-    background: rgba(0, 100, 255, 0.5);
+    transform: translateY(1px);
+    /* 往下沉 */
+    background: linear-gradient(180deg, rgba(5, 20, 40, 0.95) 0%, rgba(12, 45, 85, 0.95) 100%);
+    /* 阴影翻转为纯内阴影，模拟按下去的凹陷感 */
+    box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.8);
+    border-top-color: #005088;
 }
 
 /* 图标样式 */
@@ -2070,15 +2209,43 @@ input[type="range"]::-webkit-slider-thumb {
     /* 悬浮动效 */
 }
 
-/* 自动巡线按钮特殊颜色 (金色) */
-#btnAutoTrack.full-fill {
-    border-color: #ffd700;
+/* ==========================================
+   🟡 针对“启动自动巡线”按钮的专属金色定制
+   ========================================== */
+#btnAutoTrack {
+    /* 采用高贵稳重的暗金渐变 */
+    background: linear-gradient(180deg, rgba(130, 95, 20, 0.85) 0%, rgba(50, 35, 5, 0.95) 100%);
+
+    border-top: 1px solid #ffe600;
+    border-left: 1px solid rgba(255, 215, 0, 0.6);
+    border-right: 1px solid rgba(255, 215, 0, 0.6);
+    border-bottom: 1px solid #886000;
+
     color: #ffd700;
-    background: rgba(255, 215, 0, 0.1);
+
+    box-shadow:
+        0 4px 10px rgba(0, 0, 0, 0.6),
+        0 0 10px rgba(255, 215, 0, 0.3),
+        inset 0 2px 4px rgba(255, 255, 255, 0.25);
 }
 
-#btnAutoTrack.full-fill:hover {
-    background: rgba(255, 215, 0, 0.25);
+/* 自动巡线悬浮态 */
+#btnAutoTrack:hover {
+    color: #ffffff;
+    background: linear-gradient(180deg, rgba(180, 135, 30, 0.95) 0%, rgba(80, 55, 10, 0.95) 100%);
+    border-top-color: #ffffff;
+    border-bottom-color: #d4af37;
+    box-shadow:
+        0 6px 15px rgba(0, 0, 0, 0.7),
+        0 0 18px rgba(255, 215, 0, 0.8),
+        inset 0 2px 5px rgba(255, 255, 255, 0.5);
+}
+
+/* 自动巡线按下态 */
+#btnAutoTrack:active {
+    background: linear-gradient(180deg, rgba(30, 20, 5, 0.95) 0%, rgba(80, 55, 10, 0.95) 100%);
+    box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.9);
+    border-top-color: #886000;
 }
 
 /* ==========================================
@@ -2889,4 +3056,58 @@ input[type="range"]::-webkit-slider-thumb {
     flex-direction: row;
     align-items: center;
     width: 100%;
+}
+
+/* ==========================================
+   ✅ [新增] 信号波形左上角悬浮电磁阈值控制框
+   ========================================== */
+.floating-threshold-box {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.7);
+    /* 半透明深色底，保证文字清晰 */
+
+    /* 1. 🚫 仅去掉外层整体的边框线 */
+    border: none;
+
+    /* 2. 🚫 去掉外发光阴影 */
+    box-shadow: none;
+
+    padding: 4px 8px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+    /* 维持轻微磨砂效果让波形透过来 */
+    user-select: none;
+}
+
+.floating-threshold-box .threshold-label {
+    font-size: 12px;
+    color: #87c8ff;
+    font-weight: bold;
+}
+
+.floating-threshold-box .threshold-val {
+    font-size: 13px;
+    font-family: 'Consolas', monospace;
+    color: #00e5ff;
+    /* 亮青色显眼数值 */
+    min-width: 32px;
+    text-align: center;
+    font-weight: bold;
+}
+
+/* 针对悬浮框内部加减按钮的极致紧凑化定制 */
+.floating-threshold-box .joint-btn.mini-btn-spec {
+    width: 20px !important;
+    height: 20px !important;
+    line-height: 16px;
+    font-size: 14px;
+    margin: 0;
+    padding: 0;
+    border-radius: 3px;
 }

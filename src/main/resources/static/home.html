@@ -15,8 +15,8 @@
                     <img src="/img/csg-logo.png" class="csg-logo-img" alt="南方电网" />
                 </div>
 
-                <nav class="cyber-nav">
-                    <div class="nav-item" id="btnRobotNav">
+                <nav class="cyber-nav nav-left-wing">
+                    <div class="nav-item active" id="btnRobotNav">
                         <div class="nav-content">
                             <span class="nav-icon">🖥️</span>
                             <span class="nav-text">机器人控制与导航</span>
@@ -42,7 +42,7 @@
             </div>
 
             <div class="header-side right-side">
-                <nav class="cyber-nav">
+                <nav class="cyber-nav nav-right-wing">
                     <div class="nav-item" id="btn3DReconstruct">
                         <div class="nav-content">
                             <span class="nav-icon">🌐</span>
@@ -79,22 +79,6 @@
                                 <span id="currentModeLabel" class="info-value">未知</span>
                             </div>
 
-
-
-                            <div class="info-item" style="justify-content: space-between; align-items: center;">
-                                <span class="info-label">电磁阈值：</span>
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                    <button class="joint-btn minus" onclick="adjustAucParam('PULSE', -20)"
-                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">-</button>
-
-                                    <span id="disp_pulse_threshold" class="info-value"
-                                        style="min-width: 40px; text-align: center; color: #00e5ff;">500</span>
-
-                                    <button class="joint-btn plus" onclick="adjustAucParam('PULSE', 20)"
-                                        style="width: 24px; height: 24px; font-size: 14px; margin: 0;">+</button>
-                                </div>
-                            </div>
-
                         </div>
                     </div>
                 </section>
@@ -123,22 +107,6 @@
                                 <span class="side-label">横移</span>
                                 <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeRight">⇢</button>
                             </div>
-                        </div>
-
-                        <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 5px 0;"></div>
-
-                        <div class="sidebar-mode-group fill-area">
-                            <button id="btnDogStand" class="tech-mode-btn full-fill">
-                                <span class="btn-icon"></span> 机器狗站立
-                            </button>
-
-                            <button id="btnDogControl" class="tech-mode-btn full-fill">
-                                <span class="btn-icon"></span> 常规模式
-                            </button>
-
-                            <button id="btnAutoTrack" class="tech-mode-btn full-fill">
-                                <span class="btn-icon">📡</span> 启动自动巡线
-                            </button>
                         </div>
 
                     </div>
@@ -225,7 +193,7 @@
                             <div class="nc-left-speed">
 
                                 <div class="speed-group-fill">
-                                    <div class="speed-header">🎮 手动模式 (m/s)</div>
+                                    <div class="speed-header">🎮 机器狗运动速度 (m/s)</div>
                                     <div class="slider-row">
                                         <span class="slider-label">前进:</span>
                                         <div class="slider-wrapper">
@@ -247,7 +215,7 @@
                                 </div>
 
                                 <div class="speed-group-fill">
-                                    <div class="speed-header">📡 巡线模式 (m/s)</div>
+                                    <div class="speed-header">📡 机器狗巡线运动速度 (m/s)</div>
                                     <div class="slider-row">
                                         <span class="slider-label">前进:</span>
                                         <div class="slider-wrapper">
@@ -482,9 +450,19 @@
                 <div id="pathFaultPanel" class="path-fault-panel hidden">
                     <div class="pf-col pf-side">
                         <div class="pf-header">信号强度监测 (声波/电磁波)</div>
+
                         <div class="pf-body" id="signalDataArea">
                             <canvas id="signalCanvas"></canvas>
                             <div id="signalStatus">WAITING...</div>
+
+                            <div class="floating-threshold-box">
+                                <span class="threshold-label">电磁阈值:</span>
+                                <button class="joint-btn minus mini-btn-spec"
+                                    onclick="adjustAucParam('PULSE', -20)">-</button>
+                                <span id="disp_pulse_threshold" class="threshold-val">500</span>
+                                <button class="joint-btn plus mini-btn-spec"
+                                    onclick="adjustAucParam('PULSE', 20)">+</button>
+                            </div>
                         </div>
                     </div>
 
@@ -625,7 +603,7 @@
                                     <div class="img-wrapper" style="border: 1px solid #909399;">
                                         <span class="capture-label"
                                             style="position:absolute; top:4px; left:4px; font-size:12px; color:#fff; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; z-index:10;">后方</span>
-                                        <img id="dispCaptureBack" src="" alt="[ 后方空白 ]" </div>
+                                        <img id="dispCaptureBack" src="" alt="[ 后方空白 ]" />
                                     </div>
                                 </div>
 
@@ -652,6 +630,20 @@
         </div>
 
         <div class="bottom-actions">
+            <div class="bottom-mode-group">
+                <button id="btnDogStand" class="tech-mode-btn">
+                    <span class="btn-icon"></span> 机器狗站立
+                </button>
+
+                <button id="btnDogControl" class="tech-mode-btn">
+                    <span class="btn-icon"></span> 常规模式
+                </button>
+
+                <button id="btnAutoTrack" class="tech-mode-btn">
+                    <span class="btn-icon">📡</span> 启动自动巡线
+                </button>
+            </div>
+
             <button class="emergency-btn">急停按钮</button>
         </div>
     </div>
