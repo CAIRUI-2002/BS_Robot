@@ -354,7 +354,9 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                 int type = deviceNode.path("Type").asInt();
                 int command = deviceNode.path("Command").asInt();
                 
-                // 校验：Type=1002 且 Command=5 为机器狗主动上报的设备状态集
+                // ==================================================
+                // 1. 拦截 Type=1002, Command=5 (设备常规状态集：电量与灯光)
+                // ==================================================
                 if (type == 1002 && command == 5) {
                     JsonNode itemsNode = deviceNode.path("Items");
                     
@@ -380,6 +382,28 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                         template.convertAndSend("/topic/robot_status", (Object) statusPayload);
                     }
                 }
+                
+                // ==================================================
+                // 👇 新增：2. 拦截 Type=1002, Command=4 (运动状态集：剩余续航里程) 👇
+                // ==================================================
+                else if (type == 1002 && command == 4) {
+                    JsonNode itemsNode = deviceNode.path("Items");
+                    JsonNode motionNode = itemsNode.path("MotionStatus");
+                    
+                    if (!motionNode.isMissingNode()) {
+                        // 提取预计剩余续航里程 (单位: km)
+                        double remainMile = motionNode.path("RemainMile").asDouble();
+                        
+                        Map<String, Object> motionPayload = new HashMap<>();
+                        motionPayload.put("remainMile", remainMile);
+                        
+                        // 为了节约前端监听开销，我们直接复用同一个状态推送通道
+                        if (template != null) {
+                            template.convertAndSend("/topic/robot_status", (Object) motionPayload);
+                        }
+                    }
+                }
+                // 👆 新增结束 👆
             }
         } catch (Exception e) {
             // 解析异常忽略，防止偶发畸形包刷屏

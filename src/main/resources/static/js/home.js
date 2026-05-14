@@ -1096,6 +1096,15 @@
                 try {
                     const statusData = JSON.parse(message.body);
 
+                    // 👇 新增：解析并更新预计剩余续航里程 (如果有该字段) 👇
+                    if (statusData.remainMile !== undefined) {
+                        const elRemainMile = document.getElementById('remainMileValue');
+                        if (elRemainMile) {
+                            // 保留 2 位小数显示，加上单位
+                            elRemainMile.textContent = statusData.remainMile.toFixed(2) + ' km';
+                        }
+                    }
+
                     // 1. 更新左侧电池显示 (低于20%触发红色高亮预警)
                     const elBatLeft = document.getElementById('batteryLeftValue');
                     if (elBatLeft) {
