@@ -1090,6 +1090,56 @@
             updateConnectionUI(true);
 
             // ==================================================
+            // 🌟 新增：订阅机器狗实时设备状态 (电量与照明灯)
+            // ==================================================
+            stompClient.subscribe('/topic/robot_status', function (message) {
+                try {
+                    const statusData = JSON.parse(message.body);
+
+                    // 1. 更新左侧电池显示 (低于20%触发红色高亮预警)
+                    const elBatLeft = document.getElementById('batteryLeftValue');
+                    if (elBatLeft) {
+                        elBatLeft.textContent = statusData.batteryLeft.toFixed(0) + ' %';
+                        elBatLeft.style.color = statusData.batteryLeft < 20 ? '#ff4444' : '#00ff00';
+                    }
+
+                    // 2. 更新右侧电池显示
+                    const elBatRight = document.getElementById('batteryRightValue');
+                    if (elBatRight) {
+                        elBatRight.textContent = statusData.batteryRight.toFixed(0) + ' %';
+                        elBatRight.style.color = statusData.batteryRight < 20 ? '#ff4444' : '#00ff00';
+                    }
+
+                    // 3. 更新前侧照明灯状态徽章
+                    const elLightFront = document.getElementById('lightFrontBadge');
+                    if (elLightFront) {
+                        if (statusData.lightFront === 1) {
+                            elLightFront.textContent = '开启';
+                            elLightFront.className = 'status-badge online';
+                        } else {
+                            elLightFront.textContent = '关闭';
+                            elLightFront.className = 'status-badge offline';
+                        }
+                    }
+
+                    // 4. 更新后侧照明灯状态徽章
+                    const elLightBack = document.getElementById('lightBackBadge');
+                    if (elLightBack) {
+                        if (statusData.lightBack === 1) {
+                            elLightBack.textContent = '开启';
+                            elLightBack.className = 'status-badge online';
+                        } else {
+                            elLightBack.textContent = '关闭';
+                            elLightBack.className = 'status-badge offline';
+                        }
+                    }
+
+                } catch (e) {
+                    console.error("机器狗状态数据解析与更新错误:", e);
+                }
+            });
+
+            // ==================================================
             // 🌟 新增：订阅管线仪数据
             // ==================================================
             stompClient.subscribe('/topic/pipeline', function (message) {

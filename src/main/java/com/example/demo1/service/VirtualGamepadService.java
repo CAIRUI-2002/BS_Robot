@@ -19,6 +19,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 @Service
 public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
@@ -31,6 +34,9 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
     private DatagramSocket socket;
     private ScheduledExecutorService scheduler;
+    // 新增：用于接收 UDP 回传的线程与 JSON 解析器
+    private Thread udpListenerThread;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     // 运动参数 (手动模式使用 - 由前端 /app/move 实时更新)
     private float vx = 0;   // 前后
@@ -64,14 +70,18 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         socket = new DatagramSocket();
         scheduler = Executors.newSingleThreadScheduledExecutor();
 
+        // 👇 新增：启动 UDP 监听线程接收机器狗主动上报的状态数据
+        startUdpListener();
+
         // 1. 心跳 (10Hz) - 保持连接必须
         scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, 100, TimeUnit.MILLISECONDS);
 
         // 2. 运动指令 (20Hz) - 负责发送移动控制
         scheduler.scheduleAtFixedRate(this::sendMotionLoop, 0, 50, TimeUnit.MILLISECONDS);
 
-        System.out.println("✅ M20 Pro 服务启动 - 已集成动态速度调节功能");
+        System.out.println("✅ M20 Pro 服务启动 - 已集成动态速度调节与设备状态监听功能");
     }
+
 
     /**
      * ✅ [修改点 2] 新增：设置自动巡线速度 (供 Controller 调用)
@@ -301,6 +311,81 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         sendJsonCommand(2, 21, items);
     }
 
+    /**
+     * 持续阻塞接收机器狗发来的 UDP 数据包
+     */
+    private void startUdpListener() {
+        udpListenerThread = new Thread(() -> {
+            byte[] buffer = new byte[65535];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            
+            while (!Thread.currentThread().isInterrupted() && !socket.isClosed()) {
+                try {
+                    socket.receive(packet);
+                    
+                    // 将有效负载转为字符串。由于数据包前带有 16 字节的二进制协议头，
+                    // 我们直接使用 indexOf("{") 安全截取真正的 JSON 字符串起始位置。
+                    String rawMsg = new String(packet.getData(), packet.getOffset(), packet.getLength(), "UTF-8");
+                    int jsonStartIndex = rawMsg.indexOf("{");
+                    
+                    if (jsonStartIndex != -1) {
+                        String jsonStr = rawMsg.substring(jsonStartIndex);
+                        parseAndPushRobotStatus(jsonStr);
+                    }
+                } catch (Exception e) {
+                    // Socket 关闭导致的正常中断不做处理
+                }
+            }
+        });
+        udpListenerThread.setDaemon(true);
+        udpListenerThread.setName("M20Pro-UdpStatusListener");
+        udpListenerThread.start();
+    }
+
+    /**
+     * 解析 JSON 结构并通过 WebSocket 推送给前端
+     */
+    private void parseAndPushRobotStatus(String jsonStr) {
+        try {
+            JsonNode rootNode = objectMapper.readTree(jsonStr);
+            JsonNode deviceNode = rootNode.path("PatrolDevice");
+            
+            if (!deviceNode.isMissingNode()) {
+                int type = deviceNode.path("Type").asInt();
+                int command = deviceNode.path("Command").asInt();
+                
+                // 校验：Type=1002 且 Command=5 为机器狗主动上报的设备状态集
+                if (type == 1002 && command == 5) {
+                    JsonNode itemsNode = deviceNode.path("Items");
+                    
+                    // 提取左右电池剩余百分比
+                    JsonNode batteryNode = itemsNode.path("BatteryStatus");
+                    double batteryLeft = batteryNode.path("BatteryLevelLeft").asDouble();
+                    double batteryRight = batteryNode.path("BatteryLevelRight").asDouble();
+                    
+                    // 提取前后照明灯状态 (0=关闭, 1=开启)
+                    JsonNode fillNode = itemsNode.path("Led").path("Fill");
+                    int lightFront = fillNode.path("Front").asInt();
+                    int lightBack = fillNode.path("Back").asInt();
+                    
+                    // 封装轻量级 Map 载荷
+                    Map<String, Object> statusPayload = new HashMap<>();
+                    statusPayload.put("batteryLeft", batteryLeft);
+                    statusPayload.put("batteryRight", batteryRight);
+                    statusPayload.put("lightFront", lightFront);
+                    statusPayload.put("lightBack", lightBack);
+                    
+                    // 推送到前端专门的主题通道
+                    if (template != null) {
+                        template.convertAndSend("/topic/robot_status", (Object) statusPayload);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 解析异常忽略，防止偶发畸形包刷屏
+        }
+    }
+
     private void sendJsonCommand(int type, int command, String items) {
         String json = buildJson(type, command, items);
         sendUdp(json);
@@ -340,6 +425,8 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     @Override
     public void destroy() {
         if (scheduler != null) scheduler.shutdown();
-        if (socket != null) socket.close();
+        // 关闭 socket 会自动触发 receive() 的 SocketException 从而退出循环
+        if (socket != null && !socket.isClosed()) socket.close();
+        if (udpListenerThread != null) udpListenerThread.interrupt();
     }
 }
