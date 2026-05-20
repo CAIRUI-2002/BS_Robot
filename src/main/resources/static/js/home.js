@@ -184,6 +184,14 @@
         if (labelId === 'valAutoX') document.getElementById('valAutoX').textContent = displayVal;
         if (labelId === 'valAutoY') document.getElementById('valAutoY').textContent = displayVal;
 
+        // 同步更新信息栏中的机器狗前进速度
+        if (inputEl.id === 'manualSpeedX') {
+            const infoSpeedEl = document.getElementById('infoForwardSpeedValue');
+            if (infoSpeedEl) {
+                infoSpeedEl.textContent = displayVal + ' m/s';
+            }
+        }
+
         // 3. 核心物理几何对齐计算 (继续使用原始 val 进行数学计算，确保几何精度不变)
         const min = parseFloat(inputEl.min) || 0;
         const max = parseFloat(inputEl.max) || 3.0;
@@ -198,6 +206,8 @@
         // 应用计算结果到绝对定位的 left 属性
         labelEl.style.left = `calc(${percent * 100}% + ${offsetPx}px)`;
     };
+
+
 
     // ✅ 新增：发送自动巡线速度给后端 (挂载到 window 以便 HTML 调用)
     window.updateAutoSpeed = function () {
@@ -3437,6 +3447,60 @@
 
     // 2. 绑定按钮事件 (页面加载完成后执行)
     document.addEventListener('DOMContentLoaded', function () {
+
+        // ==========================================
+        // ✅ 新增：速度调节弹窗控制逻辑
+        // ==========================================
+        const btnSpeedSettings = document.getElementById("btnSpeedSettings");
+        const speedSettingsPopup = document.getElementById("speedSettingsPopup");
+        const btnCloseSpeedPopup = document.getElementById("btnCloseSpeedPopup");
+
+        if (btnSpeedSettings && speedSettingsPopup) {
+            // 点击按钮切换弹窗显隐
+            btnSpeedSettings.addEventListener("click", function (e) {
+                e.stopPropagation(); // 阻止事件冒泡
+                speedSettingsPopup.classList.toggle("hidden");
+
+                // 🌟 修复：因为 input range 之前处于 hidden 状态（宽度为0），
+                // 浮动 tooltip 可能会算错位置，这里在显示时强制重新计算一次位置
+                if (!speedSettingsPopup.classList.contains("hidden")) {
+                    setTimeout(() => {
+                        ['manualSpeedX', 'manualSpeedY', 'autoSpeedX', 'autoSpeedY'].forEach(id => {
+                            const input = document.getElementById(id);
+                            if (input) {
+                                let tipId = '';
+                                if (id === 'manualSpeedX') tipId = 'valManX';
+                                if (id === 'manualSpeedY') tipId = 'valManY';
+                                if (id === 'autoSpeedX') tipId = 'valAutoX';
+                                if (id === 'autoSpeedY') tipId = 'valAutoY';
+                                window.updateFloatingThumb(input, tipId);
+                            }
+                        });
+                    }, 10);
+                }
+            });
+
+            // 点击右上角 X 关闭
+            if (btnCloseSpeedPopup) {
+                btnCloseSpeedPopup.addEventListener("click", function () {
+                    speedSettingsPopup.classList.add("hidden");
+                });
+            }
+
+            // 点击屏幕其他区域自动关闭弹窗
+            document.addEventListener("click", function (e) {
+                if (!speedSettingsPopup.classList.contains("hidden") &&
+                    !speedSettingsPopup.contains(e.target) &&
+                    e.target !== btnSpeedSettings) {
+                    speedSettingsPopup.classList.add("hidden");
+                }
+            });
+
+            // 阻止点击弹窗内部时触发全局关闭
+            speedSettingsPopup.addEventListener("click", function (e) {
+                e.stopPropagation();
+            });
+        }
         // 获取两个 STOP 按钮
         const btnSideStop = document.getElementById('btnSideStop'); // 侧边栏 STOP
         const btnStopMove = document.getElementById('btnStopMove'); // 控制盘 STOP

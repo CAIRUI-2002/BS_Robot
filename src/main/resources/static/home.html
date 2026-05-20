@@ -70,13 +70,27 @@
                         <div class="info-list">
 
                             <div class="info-item">
-                                <span class="info-label">机器狗连接状态：</span>
+                                <span class="info-label">连接状态：</span>
                                 <span id="robotConnectionBadge" class="status-badge offline">离线</span>
                             </div>
 
                             <div class="info-item">
-                                <span class="info-label">机器狗运行状态：</span>
+                                <span class="info-label">运行状态：</span>
                                 <span id="currentModeLabel" class="info-value">未知</span>
+                            </div>
+
+                            <div class="info-item">
+                                <div style="display: flex; align-items: center; gap: 6px;">
+                                    <span class="info-label">速度：</span>
+
+                                    <button id="btnSpeedSettings" class="action-btn-small"
+                                        style="background: transparent; border: 1px solid #00ccff; padding: 2px 6px; font-size: 12px; color: #00ccff; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                                        ⚙️ ▼
+                                    </button>
+                                </div>
+
+                                <span id="infoForwardSpeedValue" class="info-value"
+                                    style="font-weight: bold; color: #00ff00;">2.0 m/s</span>
                             </div>
 
                             <div class="info-item">
@@ -217,53 +231,74 @@
                         <div class="nav-control-area">
 
                             <div class="nc-left-speed">
+                                <div class="control-group-box" style="margin: 0; justify-content: space-around;">
+                                    <div class="group-title">机械臂末端姿态调整及夹爪控制</div>
 
-                                <div class="speed-group-fill">
-                                    <div class="speed-header">🎮 机器狗运动速度 (m/s)</div>
-                                    <div class="slider-row">
-                                        <span class="slider-label">前进:</span>
-                                        <div class="slider-wrapper">
-                                            <span id="valManX" class="floating-tooltip">0.5</span>
-                                            <input type="range" id="manualSpeedX" class="custom-range" min="0" max="3.0"
-                                                step="0.5" value="2.0" oninput="updateFloatingThumb(this, 'valManX')">
+                                    <div class="cartesian-grid">
+                                        <div class="cart-col">
+                                            <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, 1, event)"
+                                                onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                ontouchstart="startCartesianJog(2, 1, event)"
+                                                ontouchend="stopCartesianJog()">⬆<br>升</button>
+                                            <div class="axis-label">高度</div>
+                                            <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, -1, event)"
+                                                onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                ontouchstart="startCartesianJog(2, -1, event)"
+                                                ontouchend="stopCartesianJog()">⬇<br>降</button>
                                         </div>
-                                        <span class="val-max">3.0</span>
+
+                                        <div class="cart-dpad">
+                                            <div class="dpad-row">
+                                                <button class="cart-btn" onmousedown="startCartesianJog(0, 1, event)"
+                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                    ontouchstart="startCartesianJog(0, 1, event)"
+                                                    ontouchend="stopCartesianJog()">前</button>
+                                            </div>
+                                            <div class="dpad-row">
+                                                <button class="cart-btn" onmousedown="startCartesianJog(1, 1, event)"
+                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                    ontouchstart="startCartesianJog(1, 1, event)"
+                                                    ontouchend="stopCartesianJog()">左</button>
+                                                <div class="dpad-center"></div>
+                                                <button class="cart-btn" onmousedown="startCartesianJog(1, -1, event)"
+                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                    ontouchstart="startCartesianJog(1, -1, event)"
+                                                    ontouchend="stopCartesianJog()">右</button>
+                                            </div>
+                                            <div class="dpad-row">
+                                                <button class="cart-btn" onmousedown="startCartesianJog(0, -1, event)"
+                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                                    ontouchstart="startCartesianJog(0, -1, event)"
+                                                    ontouchend="stopCartesianJog()">后</button>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="slider-row">
-                                        <span class="slider-label">横移:</span>
-                                        <div class="slider-wrapper">
-                                            <span id="valManY" class="floating-tooltip">0.5</span>
-                                            <input type="range" id="manualSpeedY" class="custom-range" min="0" max="3.0"
-                                                step="0.5" value="0.5" oninput="updateFloatingThumb(this, 'valManY')">
+
+                                    <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 8px 0;"></div>
+
+                                    <div class="integrated-gripper-box">
+                                        <div class="gripper-header">
+                                            <span class="axis-label" style="font-weight: bold; color: #87c8ff;">夹爪控制
+                                                (0-100mm)</span>
+                                            <span class="j-val" id="disp_gripper"
+                                                style="color: #00ff00; font-family: monospace; font-size: 14px;">0.0
+                                                mm</span>
                                         </div>
-                                        <span class="val-max">3.0</span>
+                                        <div class="gripper-controls">
+                                            <button class="joint-btn minus" onmousedown="startGripperJog(-1)"
+                                                onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                                ontouchstart="startGripperJog(-1)" ontouchend="stopGripperJog()"
+                                                style="flex: 1; height: 32px; margin: 0;">闭合</button>
+                                            <input type="range" id="gripperSlider" class="custom-range" min="0"
+                                                max="100" step="1" value="0" oninput="updateGripperLabel(this.value)"
+                                                onchange="setGripperValue(this.value)" style="flex: 3; margin: 0 8px;">
+                                            <button class="joint-btn plus" onmousedown="startGripperJog(1)"
+                                                onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                                ontouchstart="startGripperJog(1)" ontouchend="stopGripperJog()"
+                                                style="flex: 1; height: 32px; margin: 0;">张开</button>
+                                        </div>
                                     </div>
                                 </div>
-
-                                <div class="speed-group-fill">
-                                    <div class="speed-header">📡 机器狗巡线运动速度 (m/s)</div>
-                                    <div class="slider-row">
-                                        <span class="slider-label">前进:</span>
-                                        <div class="slider-wrapper">
-                                            <span id="valAutoX" class="floating-tooltip">0.2</span>
-                                            <input type="range" id="autoSpeedX" class="custom-range" min="0" max="3.0"
-                                                step="0.2" value="0.2" oninput="updateFloatingThumb(this, 'valAutoX')"
-                                                onchange="updateAutoSpeed()">
-                                        </div>
-                                        <span class="val-max">3.0</span>
-                                    </div>
-                                    <div class="slider-row">
-                                        <span class="slider-label">转向:</span>
-                                        <div class="slider-wrapper">
-                                            <span id="valAutoY" class="floating-tooltip">0.2</span>
-                                            <input type="range" id="autoSpeedY" class="custom-range" min="0" max="3.0"
-                                                step="0.2" value="0.4" oninput="updateFloatingThumb(this, 'valAutoY')"
-                                                onchange="updateAutoSpeed()">
-                                        </div>
-                                        <span class="val-max">3.0</span>
-                                    </div>
-                                </div>
-
                             </div>
 
                             <div class="nc-right-arm-video" id="armDataDisplay">
@@ -398,74 +433,28 @@
                     </div>
 
                     <div class="robot-right-col">
-                        <div class="control-group-box">
-                            <div class="group-title">机械臂末端姿态调整及夹爪控制</div>
 
-                            <div class="cartesian-grid">
-                                <div class="cart-col">
-                                    <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, 1, event)"
-                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                        ontouchstart="startCartesianJog(2, 1, event)"
-                                        ontouchend="stopCartesianJog()">⬆<br>升</button>
-                                    <div class="axis-label">高度</div>
-                                    <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, -1, event)"
-                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                        ontouchstart="startCartesianJog(2, -1, event)"
-                                        ontouchend="stopCartesianJog()">⬇<br>降</button>
+                        <div class="control-group-box" style="flex: 1.5; display: flex; flex-direction: column;">
+                            <div class="group-title">🎥 机械臂末端画面</div>
+
+                            <div class="camera-stream-container"
+                                style="flex: 1; display: flex; justify-content: center; align-items: center; background: #000000; border-radius: 4px; overflow: hidden; position: relative;">
+
+                                <img id="armEndCameraStream" src="" alt="Camera Stream"
+                                    style="width: 100%; height: 100%; object-fit: contain; display: none;" />
+
+                                <div id="armEndCameraPlaceholder" class="placeholder-text-small"
+                                    style="text-align: center; color: rgba(135, 200, 255, 0.4);">
+                                    <span style="font-size: 24px; display: block; margin-bottom: 8px;">📡</span>
+                                    末端视频流未连接<br>
+                                    <span
+                                        style="font-size: 11px; color: rgba(135, 200, 255, 0.25); font-family: monospace;"></span>
                                 </div>
 
-                                <div class="cart-dpad">
-                                    <div class="dpad-row">
-                                        <button class="cart-btn" onmousedown="startCartesianJog(0, 1, event)"
-                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                            ontouchstart="startCartesianJog(0, 1, event)"
-                                            ontouchend="stopCartesianJog()">前</button>
-                                    </div>
-                                    <div class="dpad-row">
-                                        <button class="cart-btn" onmousedown="startCartesianJog(1, 1, event)"
-                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                            ontouchstart="startCartesianJog(1, 1, event)"
-                                            ontouchend="stopCartesianJog()">左</button>
-                                        <div class="dpad-center"></div>
-                                        <button class="cart-btn" onmousedown="startCartesianJog(1, -1, event)"
-                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                            ontouchstart="startCartesianJog(1, -1, event)"
-                                            ontouchend="stopCartesianJog()">右</button>
-                                    </div>
-                                    <div class="dpad-row">
-                                        <button class="cart-btn" onmousedown="startCartesianJog(0, -1, event)"
-                                            onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                            ontouchstart="startCartesianJog(0, -1, event)"
-                                            ontouchend="stopCartesianJog()">后</button>
-                                    </div>
-                                </div>
                             </div>
-                            <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 8px 0;"></div>
-
-                            <div class="integrated-gripper-box">
-                                <div class="gripper-header">
-                                    <span class="axis-label" style="font-weight: bold; color: #87c8ff;">夹爪控制
-                                        (0-100mm)</span>
-                                    <span class="j-val" id="disp_gripper"
-                                        style="color: #00ff00; font-family: monospace; font-size: 14px;">0.0 mm</span>
-                                </div>
-                                <div class="gripper-controls">
-                                    <button class="joint-btn minus" onmousedown="startGripperJog(-1)"
-                                        onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
-                                        ontouchstart="startGripperJog(-1)" ontouchend="stopGripperJog()"
-                                        style="flex: 1; height: 32px; margin: 0;">闭合</button>
-                                    <input type="range" id="gripperSlider" class="custom-range" min="0" max="100"
-                                        step="1" value="0" oninput="updateGripperLabel(this.value)"
-                                        onchange="setGripperValue(this.value)" style="flex: 3; margin: 0 8px;">
-                                    <button class="joint-btn plus" onmousedown="startGripperJog(1)"
-                                        onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
-                                        ontouchstart="startGripperJog(1)" ontouchend="stopGripperJog()"
-                                        style="flex: 1; height: 32px; margin: 0;">张开</button>
-                                </div>
-                            </div>
-
                         </div>
-                        <div class="control-group-box joints-group placeholder-box">
+
+                        <div class="control-group-box joints-group placeholder-box" style="flex: 1;">
                             <div class="placeholder-text-small" style="opacity: 0.5;">
                                 [ 区域已整理留白 - 预留拓展位 ]
                             </div>
@@ -671,6 +660,60 @@
             </div>
 
             <button class="emergency-btn">急停按钮</button>
+        </div>
+
+        <div id="speedSettingsPopup" class="speed-popup hidden">
+            <div class="popup-header">
+                <span>⚙️ 运动与巡线速度设置</span>
+                <button id="btnCloseSpeedPopup" class="popup-close-btn">×</button>
+            </div>
+            <div class="popup-content">
+                <div class="speed-group-fill">
+                    <div class="speed-header">🎮 机器狗运动速度 (m/s)</div>
+                    <div class="slider-row">
+                        <span class="slider-label">前进:</span>
+                        <div class="slider-wrapper">
+                            <span id="valManX" class="floating-tooltip">2.0</span>
+                            <input type="range" id="manualSpeedX" class="custom-range" min="0" max="3.0" step="0.5"
+                                value="2.0" oninput="updateFloatingThumb(this, 'valManX')">
+                        </div>
+                        <span class="val-max">3.0</span>
+                    </div>
+                    <div class="slider-row">
+                        <span class="slider-label">横移:</span>
+                        <div class="slider-wrapper">
+                            <span id="valManY" class="floating-tooltip">0.5</span>
+                            <input type="range" id="manualSpeedY" class="custom-range" min="0" max="3.0" step="0.5"
+                                value="0.5" oninput="updateFloatingThumb(this, 'valManY')">
+                        </div>
+                        <span class="val-max">3.0</span>
+                    </div>
+                </div>
+
+                <div class="speed-group-fill">
+                    <div class="speed-header">📡 机器狗巡线运动速度 (m/s)</div>
+                    <div class="slider-row">
+                        <span class="slider-label">前进:</span>
+                        <div class="slider-wrapper">
+                            <span id="valAutoX" class="floating-tooltip">0.2</span>
+                            <input type="range" id="autoSpeedX" class="custom-range" min="0" max="3.0" step="0.2"
+                                value="0.2" oninput="updateFloatingThumb(this, 'valAutoX')"
+                                onchange="updateAutoSpeed()">
+                        </div>
+                        <span class="val-max">3.0</span>
+                    </div>
+                    <div class="slider-row">
+                        <span class="slider-label">转向:</span>
+                        <div class="slider-wrapper">
+                            <span id="valAutoY" class="floating-tooltip">0.4</span>
+                            <input type="range" id="autoSpeedY" class="custom-range" min="0" max="3.0" step="0.2"
+                                value="0.4" oninput="updateFloatingThumb(this, 'valAutoY')"
+                                onchange="updateAutoSpeed()">
+                        </div>
+                        <span class="val-max">3.0</span>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
