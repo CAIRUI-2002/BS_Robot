@@ -466,6 +466,34 @@
         };
     };
 
+    // ====== 🌍 全局新增：全球 GPS 经纬度转 SLAM 本地坐标 (x,y) ======
+    window.gpsToSlam = function (lat, lon) {
+        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
+            return null; // 尚未完成 GPS 标定，无法转换
+        }
+
+        // 1. 计算地理坐标相较于地理锚点的经纬度偏移量
+        const latOffset = lat - window.gpsAnchor.lat;
+        const lonOffset = lon - window.gpsAnchor.lon;
+
+        // 2. 将经纬度偏移换算为真实的地球正东、正北方向位移（米）
+        const trueDy = latOffset * 111320;
+        const trueDx = lonOffset * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
+
+        // 3. 逆向旋转坐标系（旋转角度为 -headingOffset）
+        const cosO = Math.cos(window.headingOffset);
+        const sinO = Math.sin(window.headingOffset);
+
+        const dx = trueDx * cosO + trueDy * sinO;
+        const dy = -trueDx * sinO + trueDy * cosO;
+
+        // 4. 叠加局部锚点坐标，还原为 SLAM 坐标
+        return {
+            x: window.slamAnchor.x + dx,
+            y: window.slamAnchor.y + dy
+        };
+    };
+
     // ==========================================
     // 2. 页面初始化逻辑 (DOMContentLoaded)
     // ==========================================
@@ -5125,6 +5153,8 @@
             };
         }
 
+
+
         const btnClearCable = document.getElementById("btnClearCablePath");
         if (btnClearCable) {
             btnClearCable.onclick = function () {
@@ -5145,6 +5175,123 @@
                 }
                 // 追加这行：同时隐藏信息弹窗
                 document.getElementById('cableInfoPopup').style.display = 'none';
+            };
+        }
+
+        // =========================================================
+        // ✅ [新增] KML 航线文件读取与三维黄色电缆路径绘制
+        // =========================================================
+        const btnLoadKml = document.getElementById("btnLoadKml");
+        const kmlFileInput = document.getElementById("kmlFileInput");
+
+        if (btnLoadKml && kmlFileInput) {
+            // 点击视觉按钮触发隐藏的文件域选择
+            btnLoadKml.onclick = function () {
+                // 拦截校验：确保系统已经标定（有RTK固定解或执行了 Shift+C 虚拟标定），否则无法换算物理坐标
+                if (!window.isGpsCalibrated) {
+                    alert("⚠️ 航线读取失败：当前 SLAM 坐标系尚未与 GPS 地理坐标完成配准标定！\n室内测试请先通过 [Shift + C] 注入虚拟标定参数。");
+                    return;
+                }
+                kmlFileInput.click();
+            };
+
+            // 文件选择后触发读取解析
+            kmlFileInput.onchange = function (e) {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                setStatus("正在解析 KML 航线文件...", "warning");
+                const reader = new FileReader();
+
+                reader.onload = function (evt) {
+                    try {
+                        const kmlText = evt.target.result;
+
+                        // 1. 使用浏览器原生 DOMParser 解析 XML 结构的 KML 文件
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(kmlText, "text/xml");
+                        const coordsTags = xmlDoc.getElementsByTagName("coordinates");
+
+                        if (!coordsTags.length) {
+                            throw new Error("未在 KML 文件中找到符合规范的 <coordinates> 数据节点！");
+                        }
+
+                        // 2. 清空当前地图上的旧电缆数据及显示网格
+                        cablePoints.length = 0;
+                        segmentPoints.length = 0;
+                        lastDepthUpdateIdx = 0;
+                        if (currentCableMesh) {
+                            cableGroup.remove(currentCableMesh);
+                            currentCableMesh.geometry.dispose();
+                            currentCableMesh = null;
+                        }
+
+                        // 3. 逐个提取坐标文本并转换为 SLAM 3D Vector3 点
+                        for (let i = 0; i < coordsTags.length; i++) {
+                            const txt = coordsTags[i].textContent.trim();
+                            // 兼容空格、换行或制表符等不规则分隔符
+                            const parts = txt.split(/[\s\n\r]+/);
+
+                            parts.forEach(part => {
+                                if (!part) return;
+                                const latLonAlt = part.split(',');
+                                if (latLonAlt.length >= 2) {
+                                    const lon = parseFloat(latLonAlt[0]);
+                                    const lat = parseFloat(latLonAlt[1]);
+
+                                    if (!isNaN(lon) && !isNaN(lat)) {
+                                        // 转换为 SLAM 坐标下的 {x, y}
+                                        const slamPt = window.gpsToSlam(lat, lon);
+                                        if (slamPt) {
+                                            // 创建 3D 点对象，深度(Z轴高度)默认固定在 0.08m 面层
+                                            const cablePt = new THREE.Vector3(slamPt.x, slamPt.y, 0.08);
+                                            cablePt.userData = { depth: null }; // 预留深度属性空间
+                                            cablePoints.push(cablePt);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        if (cablePoints.length < 2) {
+                            throw new Error("有效航线轨迹测点少于 2 个，无法生成电缆实体线。");
+                        }
+
+                        // 4. 核心：调用卡尔曼滤波平滑算法，计算渲染曲线
+                        let displayPoints = KalmanSmoother.smooth(cablePoints);
+
+                        // 将深度属性同步传导至平滑点
+                        for (let i = 0; i < displayPoints.length; i++) {
+                            displayPoints[i].userData = { depth: cablePoints[i].userData.depth };
+                        }
+
+                        // 5. 挂载到全局变量，激活随后的柔性并入跟踪算法 (Flexible Merge)
+                        window.savedCablePath = displayPoints;
+
+                        // 6. 构造 CatmullRom 连续曲线并在 3D Scene 中生成黄色粗线条管线
+                        const curve = new THREE.CatmullRomCurve3(displayPoints);
+                        const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
+                        currentCableMesh = new THREE.Mesh(tube, cableMat); // 复用自带的黄色材质 cableMat
+                        cableGroup.add(currentCableMesh);
+
+                        // 修改最后一个测点为历史相对参考点
+                        const lastPt = cablePoints[cablePoints.length - 1];
+                        lastCablePos.set(lastPt.x, lastPt.y, 0.08);
+
+                        setStatus(`✅ KML航线加载成功！共绘制 ${cablePoints.length} 个基准电缆路径点。`, "success");
+                        console.log(`📂 [KML 加载] 成功导入航线线段，管道模型已成功在世界坐标重绘。`);
+
+                    } catch (err) {
+                        console.error("KML 航线解析报错:", err);
+                        alert("❌ 航线文件加载失败:\n" + err.message);
+                        setStatus("KML 加载失败", "error");
+                    } finally {
+                        // 清空文件域的值，保证下一次选中同一个文件时依然能触发 onchange
+                        kmlFileInput.value = "";
+                    }
+                };
+
+                reader.readAsText(file);
             };
         }
 

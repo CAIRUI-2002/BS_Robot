@@ -128,7 +128,7 @@
                     <div class="panel-body" id="operationArea">
 
                         <div class="side-control-pad fill-area" style="flex-direction: column; gap: 10px;">
-                            <div class="joystick-title" style="margin: 0; color: #87c8ff;">运动控制 (前后/横移)</div>
+                            <div class="joystick-title" style="margin: 0; color: #87c8ff;">运动控制</div>
 
                             <div class="joystick-base" id="dogTransBase"
                                 style="position: relative; width: 130px; height: 130px; box-shadow: inset 0 0 15px rgba(0,0,0,0.8); touch-action: none;">
@@ -489,10 +489,14 @@
                                 <span>路径规划与定位地图</span>
 
                                 <div class="header-btn-group">
+                                    <input type="file" id="kmlFileInput" accept=".kml" style="display: none;" />
+                                    <button id="btnLoadKml" class="header-btn-mini">
+                                        📂 读取KML航线
+                                    </button>
+
                                     <button id="btnManualDrawCable" class="header-btn-mini">
                                         📍 手动绘制电缆
                                     </button>
-
                                     <button id="btnSavePcd" class="header-btn-mini">
                                         💾 保存点云
                                     </button>
