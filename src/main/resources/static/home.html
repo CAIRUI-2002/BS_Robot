@@ -127,26 +127,18 @@
                     <div class="panel-header">操作栏</div>
                     <div class="panel-body" id="operationArea">
 
-                        <div class="side-control-pad fill-area">
-                            <div class="side-row">
-                                <button class="dir-btn mini-btn" id="btnSideMoveForward">▲</button>
+                        <div class="side-control-pad fill-area" style="flex-direction: column; gap: 10px;">
+                            <div class="joystick-title" style="margin: 0; color: #87c8ff;">运动控制 (前后/横移)</div>
+
+                            <div class="joystick-base" id="dogTransBase"
+                                style="position: relative; width: 130px; height: 130px; box-shadow: inset 0 0 15px rgba(0,0,0,0.8); touch-action: none;">
+                                <div class="joystick-stick" id="dogTransStick"
+                                    style="position: absolute; width: 44px; height: 44px; top: 43px; left: 43px; background: radial-gradient(circle, #00ccff, #005588);">
+                                </div>
                             </div>
 
-                            <div class="side-row">
-                                <button class="dir-btn mini-btn" id="btnSideTurnLeft">◀</button>
-                                <button class="stop-btn mini-btn" id="btnSideStop">STOP</button>
-                                <button class="dir-btn mini-btn" id="btnSideTurnRight">▶</button>
-                            </div>
-
-                            <div class="side-row">
-                                <button class="dir-btn mini-btn" id="btnSideMoveBackward">▼</button>
-                            </div>
-
-                            <div class="side-row">
-                                <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeLeft">⇠</button>
-                                <span class="side-label">横移</span>
-                                <button class="dir-btn mini-btn btn-strafe" id="btnSideStrafeRight">⇢</button>
-                            </div>
+                            <div class="joystick-status" id="dogTransStatus" style="font-size: 11px; margin-top: 5px;">
+                                等待操作...</div>
                         </div>
 
                     </div>
@@ -454,10 +446,19 @@
                             </div>
                         </div>
 
-                        <div class="control-group-box joints-group placeholder-box" style="flex: 1;">
-                            <div class="placeholder-text-small" style="opacity: 0.5;">
-                                [ 区域已整理留白 - 预留拓展位 ]
+                        <div class="control-group-box joints-group"
+                            style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+                            <div class="group-title" style="width: 100%; margin-bottom: 15px;">转向控制 (左右转)</div>
+
+                            <div class="joystick-base" id="dogRotBase"
+                                style="position: relative; width: 160px; height: 60px; border-radius: 30px; display: flex; align-items: center; touch-action: none;">
+                                <div class="joystick-stick" id="dogRotStick"
+                                    style="position: absolute; width: 44px; height: 44px; top: 8px; left: 58px; background: radial-gradient(circle, #00ccff, #005588);">
+                                </div>
                             </div>
+
+                            <div class="joystick-status" id="dogRotStatus" style="font-size: 11px; margin-top: 10px;">
+                                等待操作...</div>
                         </div>
                     </div>
                 </div>
@@ -659,7 +660,7 @@
                 </button>
             </div>
 
-            <button class="emergency-btn">急停按钮</button>
+            <button class="emergency-btn" id="btnEmergencyStop">急停按钮 (STOP)</button>
         </div>
 
         <div id="speedSettingsPopup" class="speed-popup hidden">
