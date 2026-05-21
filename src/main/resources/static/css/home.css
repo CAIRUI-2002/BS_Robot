@@ -1616,12 +1616,15 @@ screen and (max-height: 800px) {
 
 /* 上半部分 (实景抓拍区) - 自动占满所有剩余空间 */
 .pipeline-upper {
-    flex: 1;
     width: 100%;
     /* ✅ 核心修改：明确指定宽度 100% */
     border-bottom: 1px dashed #444;
     display: flex;
     flex-direction: column;
+    flex: 1;
+    /* 👈 核心：允许上部区域自动向下延伸，填满空白 */
+    min-height: 0;
+    /* 👈 核心：防止内容溢出 */
     padding: 10px 12px;
     box-sizing: border-box;
     overflow: hidden;
@@ -2076,50 +2079,41 @@ input[type="range"]::-webkit-slider-thumb {
     gap: 8px;
 }
 
-/* 迷你按钮通用样式 */
+/* 迷你按钮通用样式（已同步为实景抓拍按钮的极简暗蓝风格） */
 .header-btn-mini {
-    font-size: 12px;
-    padding: 2px 8px;
-    cursor: pointer;
+    background: rgba(10, 60, 90, 0.6);
+    /* 统一低调的半透明暗蓝背景 */
+    border: 1px solid rgba(120, 200, 255, 0.4);
+    /* 细微的亮蓝色边框 */
+    color: #eaf6ff;
+    /* 浅蓝白字体 */
+    padding: 4px 8px;
+    /* 左右保留8px内边距，防止长文本过于贴边 */
+    font-size: 11px;
     border-radius: 4px;
-    background: transparent;
+    cursor: pointer;
     transition: all 0.2s ease;
-    /* 添加一点交互动画 */
     outline: none;
+    text-align: center;
+    box-shadow: none;
+    white-space: nowrap;
 }
 
-/* active 效果：点击时下沉一点点 */
+/* 鼠标悬浮时稍微亮起 */
+.header-btn-mini:hover {
+    background: rgba(0, 150, 255, 0.5);
+    border-color: #ffffff;
+    box-shadow: 0 0 6px rgba(0, 150, 255, 0.5);
+    transform: scale(1.02);
+    /* 微微放大 */
+}
+
+/* 鼠标按下时的阻尼回弹 */
 .header-btn-mini:active {
-    transform: translateY(1px);
+    transform: scale(0.95);
+    background: rgba(0, 120, 200, 0.8);
 }
 
-/* --- 🟡 消除机器狗轨迹按钮 (黄色) --- */
-#btnClearDogPath {
-    background: rgba(255, 255, 0, 0.1);
-    color: #ffff00;
-    border: 1px solid #ffff00;
-}
-
-#btnClearDogPath:hover {
-    background: rgba(255, 255, 0, 0.3);
-    /* 悬停变亮 */
-    box-shadow: 0 0 8px rgba(255, 255, 0, 0.4);
-    /* 发光效果 */
-}
-
-/* --- 🔵 消除电缆路径按钮 (蓝色) --- */
-#btnClearCablePath {
-    background: rgba(0, 204, 255, 0.1);
-    color: #00ccff;
-    border: 1px solid #00ccff;
-}
-
-#btnClearCablePath:hover {
-    background: rgba(0, 204, 255, 0.3);
-    /* 悬停变亮 */
-    box-shadow: 0 0 8px rgba(0, 204, 255, 0.4);
-    /* 发光效果 */
-}
 
 /* ==========================================
    新增：操作栏全自动填充样式 (Auto Fill)
@@ -2642,45 +2636,6 @@ input[type="range"]::-webkit-slider-thumb {
     /* 增加行高 */
 }
 
-/* --- 🔴 消除点云按钮 (红橙色) --- */
-#btnClearCloud {
-    background: rgba(255, 80, 0, 0.15);
-    color: #ff5000;
-    border: 1px solid #ff5000;
-    font-weight: bold;
-    box-shadow: 0 0 5px rgba(255, 80, 0, 0.2);
-}
-
-#btnClearCloud:hover {
-    background: rgba(255, 80, 0, 0.4);
-    box-shadow: 0 0 10px rgba(255, 80, 0, 0.6);
-    color: #ffffff;
-    transform: translateY(-1px);
-}
-
-#btnClearCloud:active {
-    transform: translateY(1px);
-    box-shadow: none;
-}
-
-/* --- 🔴 消除破损点按钮 (深红色) --- */
-#btnClearFaults {
-    background: rgba(255, 0, 0, 0.15);
-    color: #ff4444;
-    border: 1px solid #ff4444;
-}
-
-#btnClearFaults:hover {
-    background: rgba(255, 0, 0, 0.3);
-    /* 悬停变亮 */
-    box-shadow: 0 0 8px rgba(255, 0, 0, 0.5);
-    /* 发光效果 */
-    color: #fff;
-}
-
-#btnClearFaults:active {
-    transform: translateY(1px);
-}
 
 /* ==========================================
    ✅ [新增] 电缆信息点击弹出框样式
@@ -2899,42 +2854,73 @@ input[type="range"]::-webkit-slider-thumb {
     /* 浮点解用橙色警告 */
 }
 
-/* 下拉菜单基础样式 */
+/* ==========================================
+   下拉菜单及按钮 (极简暗蓝重构版)
+   ========================================== */
 .dropdown-group {
     position: relative;
     display: inline-block;
 }
 
+/* 下拉菜单外层容器：改为 Flex 布局，使内部按钮像卡片一样排列 */
 .dropdown-content {
     display: none;
     position: absolute;
     right: 0;
-    top: 100%;
-    background-color: rgba(5, 30, 50, 0.95);
-    min-width: 140px;
-    border: 1px solid rgba(135, 200, 255, 0.3);
+    top: calc(100% + 4px);
+    /* 向下稍微偏移，留出间隙 */
+    background-color: rgba(5, 20, 35, 0.85);
+    /* 整体较深的半透明底色，凸显按钮 */
+    min-width: 120px;
+    border: 1px solid rgba(120, 200, 255, 0.2);
     border-radius: 4px;
     z-index: 1000;
-    padding: 5px 0;
+    padding: 6px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+    flex-direction: column;
+    gap: 6px;
+    /* 按钮之间的垂直间距 */
 }
 
+/* 鼠标悬浮时以 Flex 模式显示下拉框 */
 .dropdown-group:hover .dropdown-content {
-    display: block;
+    display: flex;
 }
 
+/* 下拉菜单中的每个选项按钮（完美复用实景抓拍按钮风格） */
 .dropdown-item {
-    background: transparent;
+    background: rgba(10, 60, 90, 0.6);
+    border: 1px solid rgba(120, 200, 255, 0.4);
     color: #eaf6ff;
-    padding: 8px 12px;
-    text-align: left;
-    border: none;
+    padding: 6px 12px;
+    text-align: center;
+    /* 文字居中 */
+    border-radius: 4px;
     width: 100%;
     cursor: pointer;
-    font-size: 12px;
+    font-size: 11px;
+    transition: all 0.2s ease;
+    outline: none;
+    box-shadow: none;
+    white-space: nowrap;
+    box-sizing: border-box;
+    /* 防止 padding 撑破父容器宽度 */
+    margin: 0;
 }
 
+/* 选项按钮：鼠标悬浮微亮发光 */
 .dropdown-item:hover {
-    background-color: rgba(0, 150, 255, 0.3);
+    background: rgba(0, 150, 255, 0.5);
+    border-color: #ffffff;
+    box-shadow: 0 0 6px rgba(0, 150, 255, 0.5);
+    transform: scale(1.02);
+    /* 微微放大增加交互感 */
+}
+
+/* 选项按钮：鼠标按下阻尼回弹 */
+.dropdown-item:active {
+    transform: scale(0.95);
+    background: rgba(0, 120, 200, 0.8);
 }
 
 /* 绘制状态下的按钮激活样式 */
@@ -3191,4 +3177,77 @@ input[type="range"]::-webkit-slider-thumb {
 #armEndCameraStream {
     background-color: #000000;
     transition: opacity 0.3s ease;
+}
+
+/* ==========================================
+   新增：点云地图左上角悬浮管线圆盘指示器
+   ========================================== */
+.floating-compass {
+    position: absolute;
+    top: 15px;
+    /* 👈 就是这个参数控制上下位置 */
+    left: 15px;
+    /* 控制左右位置 */
+    width: 110px;
+    /* 强制缩小原圆盘尺寸 */
+    height: 110px;
+    z-index: 100;
+    pointer-events: none;
+    /* 让鼠标事件穿透，不影响你拖拽地图 */
+}
+
+.floating-compass .compass-container {
+    width: 100% !important;
+    height: 100% !important;
+    border-width: 2px;
+    /* 边框改细，适配小尺寸 */
+}
+
+/* 缩小圆盘内的箭头尺寸 */
+.floating-compass .side-arrow {
+    font-size: 1.5rem !important;
+}
+
+.floating-compass .cable-up-arrow {
+    font-size: 1.5rem !important;
+}
+
+/* ==========================================
+   统一且简洁的实景抓拍按钮样式 (一排四个)
+   ========================================== */
+.simple-capture-btn {
+    background: rgba(10, 60, 90, 0.6);
+    /* 统一低调的半透明暗蓝背景 */
+    border: 1px solid rgba(120, 200, 255, 0.4);
+    /* 细微的亮蓝色边框 */
+    color: #eaf6ff;
+    padding: 4px 0;
+    /* 压缩上下内边距，让按钮变扁 */
+    font-size: 11px;
+    /* 字体改小，适配一排四个的紧凑空间 */
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    outline: none;
+    text-align: center;
+    box-shadow: none;
+    /* 摒弃原先花哨的发光阴影 */
+    margin: 0;
+    white-space: nowrap;
+    /* 强制文字不换行 */
+}
+
+/* 鼠标悬浮时稍微亮起 */
+.simple-capture-btn:hover {
+    background: rgba(0, 150, 255, 0.5);
+    border-color: #ffffff;
+    box-shadow: 0 0 6px rgba(0, 150, 255, 0.5);
+    transform: scale(1.02);
+    /* 微微放大 */
+}
+
+/* 鼠标按下时的阻尼回弹 */
+.simple-capture-btn:active {
+    transform: scale(0.95);
+    background: rgba(0, 120, 200, 0.8);
 }

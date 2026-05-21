@@ -489,19 +489,16 @@
                                 <span>路径规划与定位地图</span>
 
                                 <div class="header-btn-group">
-                                    <button id="btnManualDrawCable" class="header-btn-mini"
-                                        style="color: #ffd700; border-color: #ffd700;">
+                                    <button id="btnManualDrawCable" class="header-btn-mini">
                                         📍 手动绘制电缆
                                     </button>
 
-                                    <button id="btnSavePcd" class="header-btn-mini"
-                                        style="color: #00e5ff; border-color: #00e5ff;">
+                                    <button id="btnSavePcd" class="header-btn-mini">
                                         💾 保存点云
                                     </button>
 
                                     <div class="dropdown-group">
-                                        <button class="header-btn-mini dropdown-toggle"
-                                            style="color: #ffaa00; border-color: #ffaa00;">
+                                        <button class="header-btn-mini dropdown-toggle">
                                             🧹 清理数据 ▼
                                         </button>
                                         <div class="dropdown-content">
@@ -554,6 +551,16 @@
                                 <div id="realtimeGpsOverlay" class="realtime-gps-overlay">
                                     🛰️ RTK: <span id="realtimeGpsText">等待定位...</span>
                                 </div>
+                                <div class="floating-compass">
+                                    <div class="compass-container">
+                                        <div id="arrowRight" class="arrow-icon side-arrow">▶</div>
+                                        <div class="cable-assembly">
+                                            <div class="cable-up-arrow">▲</div>
+                                            <div class="cable-thick-line"></div>
+                                        </div>
+                                        <div id="arrowLeft" class="arrow-icon side-arrow">◀</div>
+                                    </div>
+                                </div>
 
                             </div>
                         </div>
@@ -584,18 +591,14 @@
 
                             <div class="pipeline-upper">
                                 <div
-                                    style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; flex-shrink: 0; width: 100%;">
+                                    style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; flex-shrink: 0; width: 100%;">
                                     <button onclick="captureFaultLeftSequence()"
-                                        class="test-sequence-btn capture-btn-left" style="margin: 0; padding: 6px 0;">📸
-                                        左侧拍照</button>
-                                    <button onclick="captureFaultSequence()" class="test-sequence-btn capture-btn"
-                                        style="margin: 0; padding: 6px 0;">📸 右侧拍照</button>
-                                    <button onclick="captureFaultFrontSequence()" class="test-sequence-btn"
-                                        style="margin: 0; padding: 6px 0; background: linear-gradient(180deg, #409eff 0%, #0066cc 100%); border-color: #0066cc;">📸
-                                        前方拍照</button>
-                                    <button onclick="captureFaultBackSequence()" class="test-sequence-btn"
-                                        style="margin: 0; padding: 6px 0; background: linear-gradient(180deg, #909399 0%, #606266 100%); border-color: #606266;">📸
-                                        后方拍照</button>
+                                        class="simple-capture-btn">📸左侧</button>
+                                    <button onclick="captureFaultSequence()" class="simple-capture-btn">📸右侧</button>
+                                    <button onclick="captureFaultFrontSequence()"
+                                        class="simple-capture-btn">📸前方</button>
+                                    <button onclick="captureFaultBackSequence()"
+                                        class="simple-capture-btn">📸后方</button>
                                 </div>
 
                                 <div class="fault-capture-content">
@@ -624,17 +627,18 @@
                                 </div>
 
                                 <div class="pipeline-lower">
-                                    <div class="compass-container">
-
-                                        <div id="arrowRight" class="arrow-icon side-arrow">▶</div>
-
-                                        <div class="cable-assembly">
-                                            <div class="cable-up-arrow">▲</div>
-                                            <div class="cable-thick-line"></div>
+                                    <div class="control-group-box joints-group"
+                                        style="width: 100%; border: none; background: transparent; padding: 0;">
+                                        <div class="group-title" style="width: 100%; margin-bottom: 8px;">转向控制 (左右转)
                                         </div>
-
-                                        <div id="arrowLeft" class="arrow-icon side-arrow">◀</div>
-
+                                        <div class="joystick-base" id="dogRotBase2"
+                                            style="position: relative; width: 140px; height: 50px; border-radius: 25px; display: flex; align-items: center; margin: 0 auto; touch-action: none;">
+                                            <div class="joystick-stick" id="dogRotStick2"
+                                                style="position: absolute; width: 36px; height: 36px; top: 7px; left: 52px; background: radial-gradient(circle, #00ccff, #005588);">
+                                            </div>
+                                        </div>
+                                        <div class="joystick-status" id="dogRotStatus2"
+                                            style="font-size: 11px; margin-top: 10px;">等待操作...</div>
                                     </div>
                                 </div>
 

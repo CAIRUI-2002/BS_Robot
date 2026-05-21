@@ -6264,45 +6264,47 @@
         }
     })();
     // ==========================================
-    // 新增：机器狗全向移动与转向双摇杆控制 (完美复刻履带小车丝滑版)
+    // 新增：机器狗全向移动与转向双摇杆控制 (完美复刻履带小车丝滑版 - 支持多面板)
     // ==========================================
     (function initDogJoysticks() {
         const transBase = document.getElementById('dogTransBase');
         const transStick = document.getElementById('dogTransStick');
-        const rotBase = document.getElementById('dogRotBase');
-        const rotStick = document.getElementById('dogRotStick');
+        const transStatus = document.getElementById('dogTransStatus');
 
         const elSpeedX = document.getElementById('manualSpeedX');
         const elSpeedY = document.getElementById('manualSpeedY');
-        const transStatus = document.getElementById('dogTransStatus');
-        const rotStatus = document.getElementById('dogRotStatus');
 
-        if (!transBase || !rotBase) return;
+        // 收集所有的转向摇杆（主面板 + 破损点面板）
+        const rotBases = [document.getElementById('dogRotBase'), document.getElementById('dogRotBase2')];
+        const rotSticks = [document.getElementById('dogRotStick'), document.getElementById('dogRotStick2')];
+        const rotStatuses = [document.getElementById('dogRotStatus'), document.getElementById('dogRotStatus2')];
+
+        if (!transBase) return;
 
         const maxTransRadius = 43;
-        const maxRotRadius = 58;
 
         let isTransDragging = false;
         let isRotDragging = false;
 
-        // 纯视觉目标偏移量 (永远100%跟随手指，绝对丝滑)
+        // 当前激活的转向摇杆元素引用
+        let activeRotStick = null;
+        let activeRotStatus = null;
+        let activeMaxRotRadius = 58; // 动态计算半径
+
+        // 纯视觉目标偏移量
         let t_visualDx = 0, t_visualDy = 0;
         let r_visualDx = 0;
 
-        // 发送给后端的逻辑数值
         let targetV = 0, targetY = 0, targetW = 0;
-
         let sendTimer = null;
         let renderFrameId = null;
 
-        // 1. 核心渲染循环：贴合屏幕刷新率 (60Hz / 120Hz)
         function renderLoop() {
             if (!isTransDragging && !isRotDragging) {
                 renderFrameId = null;
-                return; // 结束循环
+                return;
             }
 
-            // 仅在屏幕准备好刷新时，才更新 DOM (极其丝滑的关键)
             if (isTransDragging) {
                 transStick.style.transform = `translate(${t_visualDx}px, ${t_visualDy}px)`;
                 if (transStatus) {
@@ -6310,18 +6312,18 @@
                     transStatus.style.color = "#00e5ff";
                 }
             }
-            if (isRotDragging) {
-                rotStick.style.transform = `translate(${r_visualDx}px, 0px)`;
-                if (rotStatus) {
-                    rotStatus.textContent = `转向速度: ${targetW.toFixed(2)}`;
-                    rotStatus.style.color = "#00e5ff";
+            if (isRotDragging && activeRotStick) {
+                activeRotStick.style.transform = `translate(${r_visualDx}px, 0px)`;
+                if (activeRotStatus) {
+                    activeRotStatus.textContent = `转向速度: ${targetW.toFixed(2)}`;
+                    activeRotStatus.style.color = "#00e5ff";
                 }
             }
 
             renderFrameId = requestAnimationFrame(renderLoop);
         }
 
-        // 2. 计算平移摇杆坐标 (实时计算边界，防页面滚动偏移)
+        // ================= 平移摇杆逻辑 (维持原样) =================
         function calculateTransTarget(clientX, clientY) {
             const rect = transBase.getBoundingClientRect();
             const centerX = rect.left + rect.width / 2;
@@ -6331,7 +6333,6 @@
             let dy = clientY - centerY;
             const distance = Math.hypot(dx, dy);
 
-            // A. UI 视觉坐标始终限制在圆内 (不加任何死区干扰)
             if (distance > maxTransRadius) {
                 dx = (dx / distance) * maxTransRadius;
                 dy = (dy / distance) * maxTransRadius;
@@ -6339,11 +6340,9 @@
             t_visualDx = dx;
             t_visualDy = dy;
 
-            // B. 后台逻辑过滤 (死区防误触仅在这里生效)
             let logicDx = dx;
             let logicDy = dy;
 
-            // 只有当推力超过10像素时才启用死区，防止原点附近的微操被吞没
             if (distance > 10) {
                 if (Math.abs(logicDy) > 15 && Math.abs(logicDx) < 25) { logicDx = 0; }
                 if (Math.abs(logicDx) > 15 && Math.abs(logicDy) < 25) { logicDy = 0; }
@@ -6355,50 +6354,10 @@
             const manualX = elSpeedX ? parseFloat(elSpeedX.value) : 0.5;
             const manualY = elSpeedY ? parseFloat(elSpeedY.value) : 0.3;
 
-            // 根据过滤后的逻辑坐标计算速度
             targetV = -(logicDy / maxTransRadius) * manualX;
             targetY = -(logicDx / maxTransRadius) * manualY;
         }
 
-        // 3. 计算转向摇杆坐标
-        function calculateRotTarget(clientX) {
-            const rect = rotBase.getBoundingClientRect();
-            const centerX = rect.left + rect.width / 2;
-
-            let dx = clientX - centerX;
-
-            if (dx > maxRotRadius) dx = maxRotRadius;
-            if (dx < -maxRotRadius) dx = -maxRotRadius;
-
-            r_visualDx = dx;
-
-            const manualW = 1.0;
-            targetW = -(dx / maxRotRadius) * manualW;
-        }
-
-        // 4. 心跳发送 (10Hz)
-        function startSending() {
-            if (sendTimer) return;
-            sendTimer = setInterval(() => {
-                if (typeof sendMoveCommand === 'function') {
-                    sendMoveCommand(targetV, targetW, targetY, 0.0, 0.0, false);
-                }
-            }, 100);
-        }
-
-        function stopSending() {
-            if (!isTransDragging && !isRotDragging) {
-                if (sendTimer) {
-                    clearInterval(sendTimer);
-                    sendTimer = null;
-                }
-                if (typeof sendMoveCommand === 'function') {
-                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, true); // 触发停车
-                }
-            }
-        }
-
-        // 5. 归零复位 (复用履带车的 returning 类实现弹性回中)
         function resetTrans() {
             isTransDragging = false;
             t_visualDx = 0; t_visualDy = 0;
@@ -6414,32 +6373,12 @@
             stopSending();
         }
 
-        function resetRot() {
-            isRotDragging = false;
-            r_visualDx = 0; targetW = 0;
-
-            rotStick.classList.add('returning');
-            rotStick.style.transform = `translate(0px, 0px)`;
-
-            if (rotStatus) {
-                rotStatus.textContent = "等待操作...";
-                rotStatus.style.color = "";
-            }
-            stopSending();
-        }
-
-        // ===================================
-        // 现代 Pointer Events (统一兼容鼠标和触屏)
-        // ===================================
-
-        // --- 左侧：平移摇杆 ---
         transBase.addEventListener('pointerdown', (e) => {
             isTransDragging = true;
             transBase.setPointerCapture(e.pointerId);
-            transStick.classList.remove('returning'); // 移除回弹动画，无延迟跟手
+            transStick.classList.remove('returning');
 
             calculateTransTarget(e.clientX, e.clientY);
-
             if (!renderFrameId) renderLoop();
             startSending();
         });
@@ -6458,44 +6397,106 @@
         transBase.addEventListener('pointerup', handleTransUp);
         transBase.addEventListener('pointercancel', handleTransUp);
 
-        // --- 右下：转向摇杆 ---
-        rotBase.addEventListener('pointerdown', (e) => {
-            isRotDragging = true;
-            rotBase.setPointerCapture(e.pointerId);
-            rotStick.classList.remove('returning');
 
-            calculateRotTarget(e.clientX);
+        // ================= 转向摇杆逻辑 (已重构以支持多实例) =================
+        function calculateRotTarget(clientX, baseElement) {
+            const rect = baseElement.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
 
-            if (!renderFrameId) renderLoop();
-            startSending();
-        });
+            let dx = clientX - centerX;
 
-        rotBase.addEventListener('pointermove', (e) => {
-            if (!isRotDragging) return;
-            calculateRotTarget(e.clientX);
-        });
+            if (dx > activeMaxRotRadius) dx = activeMaxRotRadius;
+            if (dx < -activeMaxRotRadius) dx = -activeMaxRotRadius;
 
-        function handleRotUp(e) {
-            if (isRotDragging) {
-                rotBase.releasePointerCapture(e.pointerId);
-                resetRot();
+            r_visualDx = dx;
+            const manualW = 1.0;
+            targetW = -(dx / activeMaxRotRadius) * manualW;
+        }
+
+        function resetRot() {
+            isRotDragging = false;
+            r_visualDx = 0; targetW = 0;
+
+            if (activeRotStick) {
+                activeRotStick.classList.add('returning');
+                activeRotStick.style.transform = `translate(0px, 0px)`;
+            }
+
+            if (activeRotStatus) {
+                activeRotStatus.textContent = "等待操作...";
+                activeRotStatus.style.color = "";
+            }
+            stopSending();
+        }
+
+        function startSending() {
+            if (sendTimer) return;
+            sendTimer = setInterval(() => {
+                if (typeof sendMoveCommand === 'function') {
+                    sendMoveCommand(targetV, targetW, targetY, 0.0, 0.0, false);
+                }
+            }, 100);
+        }
+
+        function stopSending() {
+            if (!isTransDragging && !isRotDragging) {
+                if (sendTimer) {
+                    clearInterval(sendTimer);
+                    sendTimer = null;
+                }
+                if (typeof sendMoveCommand === 'function') {
+                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, 0.0, true);
+                }
             }
         }
-        rotBase.addEventListener('pointerup', handleRotUp);
-        rotBase.addEventListener('pointercancel', handleRotUp);
 
-        // ===================================
-        // 全局急停按钮绑定
-        // ===================================
+        // 遍历并为所有面板里的转向摇杆绑定独立事件
+        rotBases.forEach((rotBase, index) => {
+            if (!rotBase) return;
+            const rotStick = rotSticks[index];
+            const rotStatus = rotStatuses[index];
+
+            rotBase.addEventListener('pointerdown', (e) => {
+                isRotDragging = true;
+                // 将激活句柄切换到当前操作的这套摇杆上
+                activeRotStick = rotStick;
+                activeRotStatus = rotStatus;
+
+                // 动态计算该摇杆的最大游动半径 (兼容小摇杆和长摇杆)
+                activeMaxRotRadius = (rotBase.clientWidth - rotStick.clientWidth) / 2;
+
+                rotBase.setPointerCapture(e.pointerId);
+                rotStick.classList.remove('returning');
+
+                calculateRotTarget(e.clientX, rotBase);
+
+                if (!renderFrameId) renderLoop();
+                startSending();
+            });
+
+            rotBase.addEventListener('pointermove', (e) => {
+                if (!isRotDragging) return;
+                calculateRotTarget(e.clientX, rotBase);
+            });
+
+            function handleRotUp(e) {
+                if (isRotDragging) {
+                    rotBase.releasePointerCapture(e.pointerId);
+                    resetRot();
+                }
+            }
+            rotBase.addEventListener('pointerup', handleRotUp);
+            rotBase.addEventListener('pointercancel', handleRotUp);
+        });
+
+        // 急停按钮绑定保持不变
         const btnEmergency = document.getElementById('btnEmergencyStop');
         if (btnEmergency) {
             const newBtn = btnEmergency.cloneNode(true);
             btnEmergency.parentNode.replaceChild(newBtn, btnEmergency);
             newBtn.addEventListener('click', function (e) {
                 e.preventDefault();
-                if (typeof emergencyStop === 'function') {
-                    emergencyStop();
-                }
+                if (typeof emergencyStop === 'function') emergencyStop();
             });
         }
     })();
