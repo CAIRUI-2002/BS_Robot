@@ -1600,20 +1600,6 @@ screen and (max-height: 800px) {
    管线仪仪表盘样式
    ========================================= */
 
-/* 1. 布局容器：分为上下两部分 */
-#pipelineDataArea {
-    display: flex !important;
-    flex-direction: column;
-
-    /* ✅ 核心修改：强制内部元素向两侧拉伸，无视前面的 center 设置 */
-    align-items: stretch !important;
-
-    padding: 0 !important;
-    background-color: #1a1a1a;
-    width: 100%;
-    height: 100%;
-}
-
 /* 上半部分 (实景抓拍区) - 自动占满所有剩余空间 */
 .pipeline-upper {
     width: 100%;
@@ -1703,18 +1689,6 @@ screen and (max-height: 800px) {
     text-align: center;
 }
 
-/* 下半部分 (罗盘箭头区) - 缩小并固定高度 */
-.pipeline-lower {
-    /* ✅ 核心修改：加上 !important 强制生效，无视文件后面的重复代码 */
-    flex: 0 0 200px !important;
-    width: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 10px;
-    box-sizing: border-box;
-    overflow: hidden;
-}
 
 /* 2. 箭头样式基础 (默认熄灭状态) */
 .arrow-icon {
@@ -2323,22 +2297,6 @@ input[type="range"]::-webkit-slider-thumb {
 /* ==========================================
    新增：管线仪罗盘仪表盘样式 (自动填充版)
    ========================================== */
-
-/* 1. 确保下半部分区域填满父容器并居中 */
-.pipeline-lower {
-    flex: 1;
-    /* 填满剩余垂直空间 */
-    width: 100%;
-    /* 填满水平宽度 */
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    padding: 5px;
-    /* 稍微留点边距 */
-    box-sizing: border-box;
-    overflow: hidden;
-    /* 防止溢出 */
-}
 
 /* 2. 罗盘圆形容器 (核心修改：自适应大小) */
 .compass-container {
@@ -3250,4 +3208,96 @@ input[type="range"]::-webkit-slider-thumb {
 .simple-capture-btn:active {
     transform: scale(0.95);
     background: rgba(0, 120, 200, 0.8);
+}
+
+/* ==========================================
+   布局重构：地图向下填充与右侧视频垂直排列
+   ========================================== */
+
+/* 1. 让中间地图区域向下填充空白 */
+.pf-map-wrapper {
+    flex: 1 !important;
+    /* 强制占满中间列的所有高度 */
+    border-bottom: none;
+    /* 去除可能遗留的底部边框 */
+}
+
+/* 2. 右侧视频流：上下排列样式 */
+.pf-video-vertical {
+    flex: 0 0 220px;
+    /* 固定视频区域的总高度，可根据实际需求微调 */
+    display: flex;
+    flex-direction: column;
+    /* 上下排列 */
+    width: 100%;
+    border-bottom: 1px dashed #444;
+    /* 与下方图片区做分隔 */
+    background: #000;
+    box-sizing: border-box;
+}
+
+.pf-video-vertical .video-box {
+    flex: 1;
+    /* 上下视频各占 50% 高度 */
+    border-right: none !important;
+    /* 清除原有横向排列的右边框 */
+    border-bottom: 1px solid #444;
+    /* 添加上下视频的分隔线 */
+    width: 100%;
+}
+
+.pf-video-vertical .video-box:last-child {
+    border-bottom: none;
+}
+
+/* 3. 压缩图片显示区域 */
+/* pipeline-upper 原本设置了 flex: 1，所以会被上面挤压而自动变小 */
+/* 但我们需要降低图片的最小高度阈值，防止它宁愿溢出也不缩小 */
+.img-wrapper {
+    min-height: 80px !important;
+    /* 原为 140px，改小让其能被压缩 */
+}
+
+/* 摇杆区域的 .pipeline-lower 原本已经是 flex: 0 0 200px !important; 
+   由于设置了固定值且不可压缩，所以摇杆区域的大小会完美保持不变 */
+
+/* ==========================================
+   布局重构：转向控制摇杆完全分离样式
+   ========================================== */
+
+/* 1. 让上方的抓拍与视频容器自动充满除摇杆外的所有空间 */
+#pipelineDataArea {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column;
+    align-items: stretch !important;
+    padding: 0 !important;
+    background-color: #1a1a1a;
+    width: 100%;
+
+    /* 👇 新增这两行修复高度溢出问题 👇 */
+    height: auto !important;
+    /* 强行覆盖掉第865行的 height: 100% */
+    min-height: 0 !important;
+    /* 允许弹性容器收缩，防止被内部视频/图片撑爆 */
+}
+
+/* 2. 新型独立转向控制区域样式 */
+#steeringControlArea {
+    flex: 0 0 110px !important;
+    /* 核心：强行固定下方摇杆区域的总高度，不参与任何压缩 */
+    width: 100%;
+    box-sizing: border-box;
+    padding: 12px 10px !important;
+    background: rgba(4, 24, 44, 0.5);
+    /* 稍微变换一下半透明底色，增强模块间的分离感 */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+/* 3. 为新创建的转向标题行追加顶部细线，进一步强化视觉分界线 */
+.steering-header {
+    border-top: 1px solid rgba(100, 180, 255, 0.25) !important;
+    margin-top: 0;
 }
