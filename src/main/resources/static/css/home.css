@@ -1531,9 +1531,10 @@ screen and (max-height: 800px) {
 .stream-img {
     width: 100%;
     height: 100%;
-    object-fit: contain;
-    /* 保持比例，能看到全貌 (可能会有黑边) */
-    /* object-fit: cover;  // 如果想铺满格子裁切掉边缘，用这个 */
+    object-fit: cover;
+    /* 👈 将 contain 改为 cover，它会自动等比放大填满容器 */
+    object-position: center;
+    /* 👈 建议加上这行，保证画面是以正中心为基准进行放大裁剪的 */
 }
 
 /* 视频左上角的标签浮层 */
