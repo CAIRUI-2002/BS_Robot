@@ -625,7 +625,7 @@
 
                     // 填入你在调试控制台记录下的角度（弧度制）
                     // 如果你记录的是角度(°)，需要转换：角度 * Math.PI / 180
-                    pcdGroup.rotation.y = 1.8401; // 示例：旋转 90 度 (π/2)
+                    pcdGroup.rotation.y = 1.8501; // 示例：旋转 90 度 (π/2)
 
                     // ==========================================
 
@@ -1902,12 +1902,14 @@
                 pipelinesMap.forEach(meshes => {
                     const pipelineGroup = new THREE.Group();
 
-                    // 使用 HSL 均匀取色，颜色区分度比较高
-                    const color = new THREE.Color().setHSL(
-                        pipelineCount > 0 ? (pipelineIndex / pipelineCount) : 0,
-                        0.8,
-                        0.5
-                    );
+                    const color = new THREE.Color();
+                    if (pipelineCount === 1) {
+                        // ✅ 新增：当只有一根管道时，默认直接渲染为纯黄色
+                        color.setHex(0xffff00);
+                    } else {
+                        // 如果有多根管道，依然通过 HSL 自动均匀分色，防止颜色冲突
+                        color.setHSL((pipelineIndex / pipelineCount), 0.8, 0.5);
+                    }
                     pipelineIndex++;
 
                     meshes.forEach(mesh => {
@@ -2114,7 +2116,7 @@
         );
 
         const material = new THREE.MeshBasicMaterial({
-            color: 0xff0000
+            color: 0xffff00 // ✅ 将初始底层颜色也改为黄色
         });
 
         const mesh = new THREE.Mesh(geometry, material);
@@ -2330,56 +2332,71 @@
             window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), 0xffff00));
             window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0xffff00));
         }
-        // ================= 新增：为 6 个面添加半透明玻璃材质包裹 =================
-        // 定义玻璃材质 (CAD 磨砂玻璃风格)
-        const glassMaterial = new THREE.MeshBasicMaterial({
-            color: 0xcccccc,         // ✅ 改为浅灰色/灰白色
-            transparent: true,       // 开启透明
-            opacity: 0.2,           // ✅ 提高不透明度 (0.3~0.4左右)，增加实体感
+        // ================= 升级：为 6 个面添加真实的土壤纹理贴图 (无光照渲染版) =================
+        const textureLoader = new THREE.TextureLoader();
+        const soilTexture = textureLoader.load('/img/soil_diffuse2.jpg');
+        soilTexture.wrapS = THREE.RepeatWrapping;
+        soilTexture.wrapT = THREE.RepeatWrapping;
+
+        const repeatPerMeter = 0.5;
+
+        // 1. ✅ 核心修改：改用 MeshBasicMaterial，它不需要灯光也能完美显示贴图
+        const soilMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,         // 纯白底色，确保图片原本的颜色不被改变
+            map: soilTexture,        // ✅ 贴上土壤图片
+            transparent: true,       // 允许透明
+            opacity: 0.65,           // 透明度，让内部红色数据透出来 (可按需微调)
             side: THREE.DoubleSide,  // 双面渲染
-            depthWrite: false        // 保持 false，防止遮挡内部的三维电缆和管线
-            // ✅ 注意：这里去掉了 blending: THREE.AdditiveBlending，恢复为普通透明遮挡关系
+            depthWrite: false        // 防止遮挡管线
         });
 
-        // 定义三个方向的几何平面
-        const planeX = new THREE.PlaneGeometry(zLen, yLen); // 左右面的大小
-        const planeY = new THREE.PlaneGeometry(xLen, zLen); // 上下面大小
-        const planeZ = new THREE.PlaneGeometry(xLen, yLen); // 前后面大小
+        // 2. 辅助函数：直接修改几何体的 UV 映射比例
+        function scaleUV(geometry, scaleU, scaleV) {
+            const uv = geometry.attributes.uv;
+            for (let i = 0; i < uv.count; i++) {
+                uv.setXY(i, uv.getX(i) * scaleU, uv.getY(i) * scaleV);
+            }
+        }
 
-        // 1. 顶面玻璃 (Top)
-        const topGlass = new THREE.Mesh(planeY, glassMaterial);
-        topGlass.position.set(cx, 0, cz);
-        topGlass.rotation.x = -Math.PI / 2;
-        axisGroup.add(topGlass); // ✅ 修改：直接添加到 axisGroup，不受视角自适应控制
+        // 3. 定义几何体，并分别缩放 UV 
+        const planeX = new THREE.PlaneGeometry(zLen, yLen);
+        scaleUV(planeX, zLen * repeatPerMeter, yLen * repeatPerMeter);
 
-        // 2. 底面玻璃 (Bottom)
-        const bottomGlass = new THREE.Mesh(planeY, glassMaterial);
-        bottomGlass.position.set(cx, -maxDepth, cz);
-        bottomGlass.rotation.x = Math.PI / 2;
-        axisGroup.add(bottomGlass); // ✅ 修改
+        const planeY = new THREE.PlaneGeometry(xLen, zLen);
+        scaleUV(planeY, xLen * repeatPerMeter, zLen * repeatPerMeter);
 
-        // 3. 左侧玻璃 (Left)
-        const leftGlass = new THREE.Mesh(planeX, glassMaterial);
-        leftGlass.position.set(bounds.minX, cy, cz);
-        leftGlass.rotation.y = -Math.PI / 2;
-        axisGroup.add(leftGlass); // ✅ 修改
+        const planeZ = new THREE.PlaneGeometry(xLen, yLen);
+        scaleUV(planeZ, xLen * repeatPerMeter, yLen * repeatPerMeter);
 
-        // 4. 右侧玻璃 (Right)
-        const rightGlass = new THREE.Mesh(planeX, glassMaterial);
-        rightGlass.position.set(bounds.maxX, cy, cz);
-        rightGlass.rotation.y = Math.PI / 2;
-        axisGroup.add(rightGlass); // ✅ 修改
+        // 4. 创建长方体的 6 个面
+        const topFace = new THREE.Mesh(planeY, soilMaterial);
+        topFace.position.set(cx, 0, cz);
+        topFace.rotation.x = -Math.PI / 2;
+        axisGroup.add(topFace);
 
-        // 5. 前面玻璃 (Front)
-        const frontGlass = new THREE.Mesh(planeZ, glassMaterial);
-        frontGlass.position.set(cx, cy, bounds.maxZ);
-        axisGroup.add(frontGlass); // ✅ 修改
+        const bottomFace = new THREE.Mesh(planeY, soilMaterial);
+        bottomFace.position.set(cx, -maxDepth, cz);
+        bottomFace.rotation.x = Math.PI / 2;
+        axisGroup.add(bottomFace);
 
-        // 6. 后面玻璃 (Back)
-        const backGlass = new THREE.Mesh(planeZ, glassMaterial);
-        backGlass.position.set(cx, cy, bounds.minZ);
-        backGlass.rotation.y = Math.PI;
-        axisGroup.add(backGlass); // ✅ 修改
+        const leftFace = new THREE.Mesh(planeX, soilMaterial);
+        leftFace.position.set(bounds.minX, cy, cz);
+        leftFace.rotation.y = -Math.PI / 2;
+        axisGroup.add(leftFace);
+
+        const rightFace = new THREE.Mesh(planeX, soilMaterial);
+        rightFace.position.set(bounds.maxX, cy, cz);
+        rightFace.rotation.y = Math.PI / 2;
+        axisGroup.add(rightFace);
+
+        const frontFace = new THREE.Mesh(planeZ, soilMaterial);
+        frontFace.position.set(cx, cy, bounds.maxZ);
+        axisGroup.add(frontFace);
+
+        const backFace = new THREE.Mesh(planeZ, soilMaterial);
+        backFace.position.set(cx, cy, bounds.minZ);
+        backFace.rotation.y = Math.PI;
+        axisGroup.add(backFace);
         // =====================================================================
 
         // ================= 3. 添加坐标轴刻度与文字 (白色) =================
