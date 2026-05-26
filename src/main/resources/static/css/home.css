@@ -3301,3 +3301,70 @@ input[type="range"]::-webkit-slider-thumb {
     border-top: 1px solid rgba(100, 180, 255, 0.25) !important;
     margin-top: 0;
 }
+
+/* ==========================================
+   新增：机械臂控制弹窗样式
+   ========================================== */
+.cyber-modal-overlay {
+    display: none;
+    position: fixed;
+    z-index: 9999;
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: transparent;
+    /* 将原本的黑色半透明背景改为完全透明 */
+    backdrop-filter: none;
+    /* 取消原本的 blur(8px) 毛玻璃模糊效果 */
+}
+
+.cyber-modal-content {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: auto;
+    background: rgba(5, 30, 50, 0.9);
+    border: 1px solid rgba(100, 180, 255, 0.5);
+    box-shadow: 0 0 30px rgba(0, 204, 255, 0.4);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+}
+
+.cyber-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid rgba(135, 200, 255, 0.2);
+    background: linear-gradient(90deg, rgba(10, 60, 90, 0.9), transparent);
+}
+
+.cyber-modal-header h3 {
+    margin: 0;
+    color: #87c8ff;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.close-modal-btn {
+    color: #888;
+    font-size: 26px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: color 0.3s;
+}
+
+.close-modal-btn:hover {
+    color: #ff4d4d;
+}
+
+.arm-modal-body {
+    padding: 20px;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 20px;
+}

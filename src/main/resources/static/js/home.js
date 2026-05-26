@@ -6647,5 +6647,33 @@
             });
         }
     })();
+    // ==========================================
+    // ✅ 新增：机械臂控制弹窗逻辑
+    // ==========================================
+    document.addEventListener("DOMContentLoaded", function () {
+        const btnShowArmModal = document.getElementById('btnShowArmModal');
+        const armControlModal = document.getElementById('armControlModal');
+        const closeArmModal = document.getElementById('closeArmModal');
+
+        if (btnShowArmModal && armControlModal && closeArmModal) {
+            // 点击底栏按钮打开弹窗
+            btnShowArmModal.addEventListener('click', function (e) {
+                e.preventDefault();
+                armControlModal.style.display = 'block';
+            });
+
+            // 点击右上角 X 关闭弹窗
+            closeArmModal.addEventListener('click', function () {
+                armControlModal.style.display = 'none';
+            });
+
+            // 点击弹窗以外的黑色遮罩层自动关闭弹窗
+            window.addEventListener('click', function (event) {
+                if (event.target === armControlModal) {
+                    armControlModal.style.display = 'none';
+                }
+            });
+        }
+    });
 
 })(); 

@@ -218,208 +218,7 @@
 
                         </div>
 
-                        <div class="nav-control-area">
 
-                            <div class="nc-left-speed">
-                                <div class="control-group-box" style="margin: 0; justify-content: space-around;">
-                                    <div class="group-title">机械臂末端姿态调整及夹爪控制</div>
-
-                                    <div class="cartesian-grid">
-                                        <div class="cart-col">
-                                            <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, 1, event)"
-                                                onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                ontouchstart="startCartesianJog(2, 1, event)"
-                                                ontouchend="stopCartesianJog()">⬆<br>升</button>
-                                            <div class="axis-label">高度</div>
-                                            <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, -1, event)"
-                                                onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                ontouchstart="startCartesianJog(2, -1, event)"
-                                                ontouchend="stopCartesianJog()">⬇<br>降</button>
-                                        </div>
-
-                                        <div class="cart-dpad">
-                                            <div class="dpad-row">
-                                                <button class="cart-btn" onmousedown="startCartesianJog(0, 1, event)"
-                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                    ontouchstart="startCartesianJog(0, 1, event)"
-                                                    ontouchend="stopCartesianJog()">前</button>
-                                            </div>
-                                            <div class="dpad-row">
-                                                <button class="cart-btn" onmousedown="startCartesianJog(1, 1, event)"
-                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                    ontouchstart="startCartesianJog(1, 1, event)"
-                                                    ontouchend="stopCartesianJog()">左</button>
-                                                <div class="dpad-center"></div>
-                                                <button class="cart-btn" onmousedown="startCartesianJog(1, -1, event)"
-                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                    ontouchstart="startCartesianJog(1, -1, event)"
-                                                    ontouchend="stopCartesianJog()">右</button>
-                                            </div>
-                                            <div class="dpad-row">
-                                                <button class="cart-btn" onmousedown="startCartesianJog(0, -1, event)"
-                                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
-                                                    ontouchstart="startCartesianJog(0, -1, event)"
-                                                    ontouchend="stopCartesianJog()">后</button>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 8px 0;"></div>
-
-                                    <div class="integrated-gripper-box">
-                                        <div class="gripper-header">
-                                            <span class="axis-label" style="font-weight: bold; color: #87c8ff;">夹爪控制
-                                                (0-100mm)</span>
-                                            <span class="j-val" id="disp_gripper"
-                                                style="color: #00ff00; font-family: monospace; font-size: 14px;">0.0
-                                                mm</span>
-                                        </div>
-                                        <div class="gripper-controls">
-                                            <button class="joint-btn minus" onmousedown="startGripperJog(-1)"
-                                                onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
-                                                ontouchstart="startGripperJog(-1)" ontouchend="stopGripperJog()"
-                                                style="flex: 1; height: 32px; margin: 0;">闭合</button>
-                                            <input type="range" id="gripperSlider" class="custom-range" min="0"
-                                                max="100" step="1" value="0" oninput="updateGripperLabel(this.value)"
-                                                onchange="setGripperValue(this.value)" style="flex: 3; margin: 0 8px;">
-                                            <button class="joint-btn plus" onmousedown="startGripperJog(1)"
-                                                onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
-                                                ontouchstart="startGripperJog(1)" ontouchend="stopGripperJog()"
-                                                style="flex: 1; height: 32px; margin: 0;">张开</button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="nc-right-arm-video" id="armDataDisplay">
-                                <div class="arm-data-container">
-                                    <div class="arm-data-header">
-                                        <span class="pulse-dot">●</span> 机械臂实时姿态与关节调控 (°)
-                                    </div>
-
-                                    <div class="arm-integrated-wrapper">
-
-                                        <div class="arm-joints-grid integrated-grid">
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J1 基座</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(0, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(0, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j1">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(0, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(0, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J2 大臂</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(1, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(1, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j2">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(1, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(1, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J3 小臂</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(2, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(2, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j3">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(2, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(2, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J4 腕旋</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(3, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(3, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j4">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(3, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(3, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J5 腕折</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(4, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(4, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j5">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(4, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(4, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                            <div class="joint-box integrated-box">
-                                                <span class="j-label">J6 末端</span>
-                                                <div class="j-ctrl-row">
-                                                    <button class="joint-btn minus"
-                                                        onmousedown="startArmJog(5, -1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(5, -1, event)"
-                                                        ontouchend="stopArmJog()">-</button>
-                                                    <span class="j-val" id="disp_j6">--</span>
-                                                    <button class="joint-btn plus"
-                                                        onmousedown="startArmJog(5, 1, event)" onmouseup="stopArmJog()"
-                                                        onmouseleave="stopArmJog()"
-                                                        ontouchstart="startArmJog(5, 1, event)"
-                                                        ontouchend="stopArmJog()">+</button>
-                                                </div>
-                                            </div>
-
-                                        </div>
-
-                                        <div class="arm-quick-actions">
-                                            <button onclick="moveArmToFrontPress()"
-                                                class="test-sequence-btn capture-btn-left full-w">🎯 向前按点</button>
-                                            <button onclick="moveArmToBackPress()"
-                                                class="test-sequence-btn capture-btn full-w">🎯 向后按点</button>
-                                            <button onclick="moveArmToZero()" class="test-sequence-btn full-w">🔄
-                                                归零</button>
-                                        </div>
-
-                                    </div>
-
-                                </div>
-                            </div>
-
-                        </div>
                     </div>
 
                     <div class="robot-right-col">
@@ -658,6 +457,11 @@
                 <button id="btnAutoTrack" class="tech-mode-btn">
                     <span class="btn-icon">📡</span> 启动自动巡线
                 </button>
+
+                <button id="btnShowArmModal" class="tech-mode-btn"
+                    style="background: linear-gradient(180deg, rgba(16, 60, 110, 0.85) 0%, rgba(6, 28, 55, 0.95) 100%);">
+                    <span class="btn-icon">🦾</span> 机械臂控制面板
+                </button>
             </div>
 
             <button class="emergency-btn" id="btnEmergencyStop">急停按钮 (STOP)</button>
@@ -714,6 +518,199 @@
                         <span class="val-max">3.0</span>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+    <div id="armControlModal" class="cyber-modal-overlay">
+        <div class="cyber-modal-content">
+            <div class="cyber-modal-header">
+                <h3>🦾 机械臂综合控制中枢</h3>
+                <span class="close-modal-btn" id="closeArmModal">&times;</span>
+            </div>
+
+            <div class="arm-modal-body">
+                <div class="nc-left-speed">
+                    <div class="control-group-box" style="margin: 0; justify-content: space-around;">
+                        <div class="group-title">机械臂末端姿态调整及夹爪控制</div>
+
+                        <div class="cartesian-grid">
+                            <div class="cart-col">
+                                <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, 1, event)"
+                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                    ontouchstart="startCartesianJog(2, 1, event)"
+                                    ontouchend="stopCartesianJog()">⬆<br>升</button>
+                                <div class="axis-label">高度</div>
+                                <button class="cart-btn z-btn" onmousedown="startCartesianJog(2, -1, event)"
+                                    onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                    ontouchstart="startCartesianJog(2, -1, event)"
+                                    ontouchend="stopCartesianJog()">⬇<br>降</button>
+                            </div>
+
+                            <div class="cart-dpad">
+                                <div class="dpad-row">
+                                    <button class="cart-btn" onmousedown="startCartesianJog(0, 1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(0, 1, event)"
+                                        ontouchend="stopCartesianJog()">前</button>
+                                </div>
+                                <div class="dpad-row">
+                                    <button class="cart-btn" onmousedown="startCartesianJog(1, 1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(1, 1, event)"
+                                        ontouchend="stopCartesianJog()">左</button>
+                                    <div class="dpad-center"></div>
+                                    <button class="cart-btn" onmousedown="startCartesianJog(1, -1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(1, -1, event)"
+                                        ontouchend="stopCartesianJog()">右</button>
+                                </div>
+                                <div class="dpad-row">
+                                    <button class="cart-btn" onmousedown="startCartesianJog(0, -1, event)"
+                                        onmouseup="stopCartesianJog()" onmouseleave="stopCartesianJog()"
+                                        ontouchstart="startCartesianJog(0, -1, event)"
+                                        ontouchend="stopCartesianJog()">后</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="height: 1px; background: rgba(135,200,255,0.2); margin: 8px 0;"></div>
+
+                        <div class="integrated-gripper-box">
+                            <div class="gripper-header">
+                                <span class="axis-label" style="font-weight: bold; color: #87c8ff;">夹爪控制
+                                    (0-100mm)</span>
+                                <span class="j-val" id="disp_gripper"
+                                    style="color: #00ff00; font-family: monospace; font-size: 14px;">0.0
+                                    mm</span>
+                            </div>
+                            <div class="gripper-controls">
+                                <button class="joint-btn minus" onmousedown="startGripperJog(-1)"
+                                    onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                    ontouchstart="startGripperJog(-1)" ontouchend="stopGripperJog()"
+                                    style="flex: 1; height: 32px; margin: 0;">闭合</button>
+                                <input type="range" id="gripperSlider" class="custom-range" min="0" max="100" step="1"
+                                    value="0" oninput="updateGripperLabel(this.value)"
+                                    onchange="setGripperValue(this.value)" style="flex: 3; margin: 0 8px;">
+                                <button class="joint-btn plus" onmousedown="startGripperJog(1)"
+                                    onmouseup="stopGripperJog()" onmouseleave="stopGripperJog()"
+                                    ontouchstart="startGripperJog(1)" ontouchend="stopGripperJog()"
+                                    style="flex: 1; height: 32px; margin: 0;">张开</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="nc-right-arm-video" id="armDataDisplay">
+                    <div class="arm-data-container">
+                        <div class="arm-data-header">
+                            <span class="pulse-dot">●</span> 机械臂实时姿态与关节调控 (°)
+                        </div>
+
+                        <div class="arm-integrated-wrapper">
+
+                            <div class="arm-joints-grid integrated-grid">
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J1 基座</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(0, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(0, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j1">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(0, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(0, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J2 大臂</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(1, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(1, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j2">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(1, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(1, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J3 小臂</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(2, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(2, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j3">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(2, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(2, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J4 腕旋</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(3, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(3, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j4">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(3, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(3, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J5 腕折</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(4, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(4, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j5">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(4, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(4, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                                <div class="joint-box integrated-box">
+                                    <span class="j-label">J6 末端</span>
+                                    <div class="j-ctrl-row">
+                                        <button class="joint-btn minus" onmousedown="startArmJog(5, -1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(5, -1, event)"
+                                            ontouchend="stopArmJog()">-</button>
+                                        <span class="j-val" id="disp_j6">--</span>
+                                        <button class="joint-btn plus" onmousedown="startArmJog(5, 1, event)"
+                                            onmouseup="stopArmJog()" onmouseleave="stopArmJog()"
+                                            ontouchstart="startArmJog(5, 1, event)" ontouchend="stopArmJog()">+</button>
+                                    </div>
+                                </div>
+
+                            </div>
+
+                            <div class="arm-quick-actions">
+                                <button onclick="moveArmToFrontPress()"
+                                    class="test-sequence-btn capture-btn-left full-w">🎯 向前按点</button>
+                                <button onclick="moveArmToBackPress()" class="test-sequence-btn capture-btn full-w">🎯
+                                    向后按点</button>
+                                <button onclick="moveArmToZero()" class="test-sequence-btn full-w">🔄
+                                    归零</button>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+
+
             </div>
         </div>
     </div>

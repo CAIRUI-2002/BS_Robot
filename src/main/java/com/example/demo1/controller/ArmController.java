@@ -46,7 +46,7 @@ public class ArmController {
 
         } catch (Exception e) {
             e.printStackTrace();
-            return "通信失败 (请检查树莓派IP和网络): " + e.getMessage();
+            return "通信失败 (请检查IP和网络): " + e.getMessage();
         }
     }
 
