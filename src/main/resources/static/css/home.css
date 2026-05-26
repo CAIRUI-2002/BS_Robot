@@ -3369,3 +3369,85 @@ input[type="range"]::-webkit-slider-thumb {
     align-items: stretch;
     gap: 20px;
 }
+
+/* ==========================================
+   新增：实景抓拍弹窗样式
+   ========================================== */
+
+/* 核心：让弹窗的外层遮罩完全穿透，不阻挡底部界面的点击操作 */
+.non-blocking-overlay {
+    pointer-events: none !important;
+}
+
+/* 核心：弹窗本体需要恢复鼠标事件，否则弹窗右上角的关闭按钮点不了 */
+.pointer-auto {
+    pointer-events: auto !important;
+}
+
+/* 抓拍弹窗本体位置与大小 */
+.capture-modal-content {
+    /* 建议固定在屏幕中心偏上的位置，避免完全遮挡下方的按钮 */
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 650px;
+    /* 根据你的图片比例调整 */
+    background: rgba(5, 30, 50, 0.95);
+    border: 1px solid rgba(100, 180, 255, 0.6);
+    box-shadow: 0 0 30px rgba(0, 204, 255, 0.3);
+    border-radius: 8px;
+    padding: 15px;
+    z-index: 10000;
+}
+
+/* 2x2 网格布局 */
+.capture-grid-2x2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    /* 强制两列 */
+    grid-template-rows: 1fr 1fr;
+    /* 强制两行 */
+    gap: 15px;
+    /* 图片之间的间隙 */
+    margin-top: 15px;
+}
+
+/* 图片容器及图片自适应 */
+.capture-img-box {
+    position: relative;
+    border: 1px solid rgba(100, 180, 255, 0.3);
+    border-radius: 4px;
+    background: #000;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    aspect-ratio: 4 / 3;
+    /* 维持图片宽高比，防止变形 */
+}
+
+.capture-img-box img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    /* 保证图片完整显示不被裁切 */
+}
+
+/* 图片左上角的文本小标签 */
+.img-label {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #00ccff;
+    padding: 2px 6px;
+    font-size: 12px;
+    border-radius: 3px;
+    z-index: 2;
+}
+
+/* 间距辅助 */
+.mt-2 {
+    margin-top: 15px !important;
+}

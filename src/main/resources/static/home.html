@@ -388,7 +388,7 @@
 
                             <div class="pipeline-upper">
                                 <div
-                                    style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 8px; flex-shrink: 0; width: 100%;">
+                                    style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; margin-bottom: 2px; flex-shrink: 0; width: 100%;">
                                     <button onclick="captureFaultLeftSequence()"
                                         class="simple-capture-btn">📸左侧</button>
                                     <button onclick="captureFaultSequence()" class="simple-capture-btn">📸右侧</button>
@@ -396,32 +396,14 @@
                                         class="simple-capture-btn">📸前方</button>
                                     <button onclick="captureFaultBackSequence()"
                                         class="simple-capture-btn">📸后方</button>
-                                </div>
 
-                                <div class="fault-capture-content">
-                                    <div class="img-wrapper" style="border: 1px solid #00ced1;">
-                                        <span class="capture-label"
-                                            style="position:absolute; top:4px; left:4px; font-size:12px; color:#fff; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; z-index:10;">左侧</span>
-                                        <img id="dispCaptureLeft" src="" alt="[ 左侧空白 ]"
-                                            style="transform: rotate(180deg);" />
-                                    </div>
-                                    <div class="img-wrapper" style="border: 1px solid #67c23a;">
-                                        <span class="capture-label"
-                                            style="position:absolute; top:4px; left:4px; font-size:12px; color:#fff; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; z-index:10;">右侧</span>
-                                        <img id="dispCaptureRight" src="" alt="[ 右侧空白 ]"
-                                            style="transform: rotate(180deg);" />
-                                    </div>
-                                    <div class="img-wrapper" style="border: 1px solid #409eff;">
-                                        <span class="capture-label"
-                                            style="position:absolute; top:4px; left:4px; font-size:12px; color:#fff; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; z-index:10;">前方</span>
-                                        <img id="dispCaptureFront" src="" alt="[ 前方空白 ]" />
-                                    </div>
-                                    <div class="img-wrapper" style="border: 1px solid #909399;">
-                                        <span class="capture-label"
-                                            style="position:absolute; top:4px; left:4px; font-size:12px; color:#fff; background:rgba(0,0,0,0.6); padding:2px 6px; border-radius:4px; z-index:10;">后方</span>
-                                        <img id="dispCaptureBack" src="" alt="[ 后方空白 ]" />
-                                    </div>
                                 </div>
+                                <button id="btnShowCaptureModal" class="simple-capture-btn"
+                                    style="width: 100%; margin-bottom: 2px; flex-shrink: 0; padding: 2px 0; font-size: 11px; letter-spacing: 1px;">
+                                    👁️ 点击查看抓拍图片
+                                </button>
+
+
                             </div>
                         </div>
 
@@ -711,6 +693,35 @@
                 </div>
 
 
+            </div>
+        </div>
+    </div>
+
+    <div id="captureImageModal" class="cyber-modal-overlay non-blocking-overlay" style="display: none;">
+        <div class="cyber-modal-content capture-modal-content pointer-auto">
+            <div class="cyber-modal-header">
+                <span>🖼️ 实景抓拍画面</span>
+                <button id="closeCaptureModal" class="close-btn">×</button>
+            </div>
+            <div class="cyber-modal-body">
+                <div class="capture-grid-2x2">
+                    <div class="capture-img-box">
+                        <div class="img-label">前视抓拍</div>
+                        <img id="imgCaptureFront" src="/img/placeholder.png" alt="前" />
+                    </div>
+                    <div class="capture-img-box">
+                        <div class="img-label">后视抓拍</div>
+                        <img id="imgCaptureBack" src="/img/placeholder.png" alt="后" />
+                    </div>
+                    <div class="capture-img-box">
+                        <div class="img-label">左视抓拍</div>
+                        <img id="imgCaptureLeft" src="/img/placeholder.png" alt="左" />
+                    </div>
+                    <div class="capture-img-box">
+                        <div class="img-label">右视抓拍</div>
+                        <img id="imgCaptureRight" src="/img/placeholder.png" alt="右" />
+                    </div>
+                </div>
             </div>
         </div>
     </div>

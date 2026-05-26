@@ -6693,4 +6693,37 @@
         }
     });
 
+    // ==========================================
+    // ✅ 新增：抓拍图片弹窗控制逻辑 (不阻塞UI版)
+    // ==========================================
+    document.addEventListener("DOMContentLoaded", function () {
+        const btnShowCaptureModal = document.getElementById('btnShowCaptureModal');
+        const captureImageModal = document.getElementById('captureImageModal');
+        const closeCaptureModal = document.getElementById('closeCaptureModal');
+
+        if (btnShowCaptureModal && captureImageModal && closeCaptureModal) {
+
+            // 1. 点击【查看抓拍图片】按钮，显示弹窗
+            btnShowCaptureModal.addEventListener('click', function (e) {
+                e.preventDefault();
+
+                // 切换显示/隐藏状态
+                if (captureImageModal.style.display === 'none' || captureImageModal.style.display === '') {
+                    captureImageModal.style.display = 'block';
+                } else {
+                    captureImageModal.style.display = 'none';
+                }
+            });
+
+            // 2. 点击弹窗右上角的【X】关闭弹窗
+            closeCaptureModal.addEventListener('click', function () {
+                captureImageModal.style.display = 'none';
+            });
+
+            // 注意：由于我们在 CSS 中使用了 pointer-events: none; 
+            // 遮罩层不再接收点击事件，因此无需（也无法）监听点击黑色遮罩关闭弹窗。
+            // 这正是为了保证你能点击到主界面的“抓拍按钮”！
+        }
+    });
+
 })(); 
