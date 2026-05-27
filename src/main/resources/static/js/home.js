@@ -811,6 +811,48 @@
                 }
             });
         }
+
+        // 👇========= 🌟 新增代码：网格与刻度线显隐控制交互 =========👇
+        const btnToggleGrid = document.getElementById('btnToggleGrid');
+        if (typeof window.isGridVisible === 'undefined') {
+            window.isGridVisible = true; // 默认全局状态是显示
+        }
+
+        if (btnToggleGrid) {
+            btnToggleGrid.addEventListener('click', function (e) {
+                e.preventDefault();
+                window.isGridVisible = !window.isGridVisible; // 切换状态
+
+                // 切换按钮的暗化 UI 样式
+                if (window.isGridVisible) {
+                    btnToggleGrid.classList.remove('off-state');
+                } else {
+                    btnToggleGrid.classList.add('off-state');
+                }
+
+                // 1. 【核心精细化控制】：使用 traverse 递归遍历整个坐标系组的所有子孙节点
+                if (window.gprAxesGroup) {
+                    window.gprAxesGroup.traverse(child => {
+                        // 💡 判断1：如果是土壤的面 (Mesh)，强制保持显示
+                        if (child.type === 'Mesh') {
+                            child.visible = true;
+                        }
+                        // 💡 判断2：如果是线 (长方体表面的网格、外围边线) 或 精灵/文字 (刻度数字)
+                        else if (child.type === 'Line' || child.type === 'LineSegments' || child.type === 'Sprite') {
+                            child.visible = window.isGridVisible;
+                        }
+                    });
+                }
+
+                // 2. 同步控制 Z 形折线（巡检轨迹/电缆形态）
+                // 注意：这里需要你配合进行“第二步”的修改
+                if (window.gprZPathLine) {
+                    window.gprZPathLine.visible = window.isGridVisible;
+                }
+            });
+        }
+        // 👆=======================================================👆
+
         if (segmentSelect) segmentSelect.disabled = true;
 
         // --- F. 绑定机器人运动控制按钮 (长按连续发送) ---
@@ -1942,7 +1984,20 @@
             }
             const pathGeom = new THREE.BufferGeometry().setFromPoints(points);
             const pathMat = new THREE.LineBasicMaterial({ color: 0xffffff });
-            world.add(new THREE.Line(pathGeom, pathMat));
+
+            // 👇==================== 🌟 修改开始 ====================👇
+            // 1. 将直接 add 改为先赋值给常量 pathLine
+            const pathLine = new THREE.Line(pathGeom, pathMat);
+            world.add(pathLine);
+
+            // 2. 将线条对象挂载到 window 全局变量，方便按钮控制
+            window.gprZPathLine = pathLine;
+
+            // 3. 初始渲染时，如果用户之前已经点击了隐藏，新生成的线条也直接隐藏
+            if (window.isGridVisible === false) {
+                pathLine.visible = false;
+            }
+            // 👆==================== 🌟 修改结束 ====================👆
         }
 
         // 3.4 画三维坐标轴（x(m), y(m), z(m,down)）
@@ -2247,6 +2302,13 @@
 
         const axisGroup = new THREE.Group();
         scene.add(axisGroup);
+
+        // 👇========= 🌟 新增代码：将坐标系组暴露给全局，并记住用户的显隐状态 =========👇
+        window.gprAxesGroup = axisGroup;
+        if (window.isGridVisible === false) {
+            axisGroup.visible = false;
+        }
+        // 👆========================================================================👆
 
         const xLen = Math.max(bounds.maxX - bounds.minX, 0.01);
         const zLen = Math.max(bounds.maxZ - bounds.minZ, 0.01);

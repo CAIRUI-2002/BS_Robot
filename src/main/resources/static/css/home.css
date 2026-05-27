@@ -3451,3 +3451,81 @@ input[type="range"]::-webkit-slider-thumb {
 .mt-2 {
     margin-top: 15px !important;
 }
+
+/* ==========================================
+   🌟 新增：三维视图网格显隐按钮 (Cyber 风格)
+   ========================================== */
+.cyber-floating-btn {
+    position: absolute;
+    top: 10px;
+    /* 悬浮在右上角 */
+    right: 15px;
+    width: 34px;
+    /* 小巧精致 */
+    height: 34px;
+    background: rgba(5, 30, 50, 0.85);
+    border: 1px solid rgba(100, 180, 255, 0.6);
+    box-shadow: 0 0 10px rgba(0, 204, 255, 0.2);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 100;
+    /* 确保覆盖在画布上方 */
+    transition: all 0.3s ease;
+}
+
+/* 鼠标悬停的高亮效果 */
+.cyber-floating-btn:hover {
+    box-shadow: 0 0 15px rgba(0, 204, 255, 0.6);
+    background: rgba(10, 50, 80, 0.95);
+    border-color: #00ccff;
+    transform: scale(1.08);
+    /* 微微放大 */
+}
+
+/* 标志图标 */
+.cyber-floating-btn .btn-icon {
+    font-size: 18px;
+    transition: all 0.3s;
+}
+
+/* 悬浮提示框 (初始隐藏) */
+.cyber-floating-btn .btn-tooltip {
+    position: absolute;
+    right: 42px;
+    /* 紧贴在按钮的左侧 */
+    top: 50%;
+    transform: translateY(-50%);
+    background: rgba(5, 30, 50, 0.95);
+    border: 1px solid rgba(100, 180, 255, 0.6);
+    color: #eaf6ff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    white-space: nowrap;
+    pointer-events: none;
+    /* 防止遮挡鼠标事件 */
+    opacity: 0;
+    /* 默认透明 */
+    transition: opacity 0.3s ease;
+}
+
+/* 鼠标放上去才显示提示文字 */
+.cyber-floating-btn:hover .btn-tooltip {
+    opacity: 1;
+}
+
+/* 点击关闭网格后的【灰暗状态】 */
+.cyber-floating-btn.off-state {
+    border-color: rgba(150, 150, 150, 0.4);
+    box-shadow: none;
+    background: rgba(20, 20, 20, 0.6);
+}
+
+.cyber-floating-btn.off-state .btn-icon {
+    opacity: 0.5;
+    filter: grayscale(100%);
+    /* 让 emoji 变成灰色 */
+}
