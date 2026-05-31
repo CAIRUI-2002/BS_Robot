@@ -1537,6 +1537,12 @@ screen and (max-height: 800px) {
     /* 👈 建议加上这行，保证画面是以正中心为基准进行放大裁剪的 */
 }
 
+/* 仅针对“路径查找及故障定点”面板中的画面进行放大裁剪 */
+#pathFaultPanel .stream-img {
+    object-fit: cover;
+    transform: scale(1.25);
+}
+
 /* 视频左上角的标签浮层 */
 .video-label-overlay {
     position: absolute;
@@ -1601,17 +1607,15 @@ screen and (max-height: 800px) {
    管线仪仪表盘样式
    ========================================= */
 
-/* 上半部分 (实景抓拍区) - 自动占满所有剩余空间 */
+/* 下半部分 (实景抓拍区) - 自动占满所有剩余空间 */
 .pipeline-upper {
     width: 100%;
-    /* ✅ 核心修改：明确指定宽度 100% */
     border-bottom: 1px dashed #444;
     display: flex;
     flex-direction: column;
-    flex: 1;
-    /* 👈 核心：允许上部区域自动向下延伸，填满空白 */
+    flex: 1 !important;
+    /* 👈 核心修改：占据 1 份高度 */
     min-height: 0;
-    /* 👈 核心：防止内容溢出 */
     padding: 10px 12px;
     box-sizing: border-box;
     overflow: hidden;
@@ -3225,16 +3229,15 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* 2. 右侧视频流：上下排列样式 */
 .pf-video-vertical {
-    flex: 0 0 220px;
-    /* 固定视频区域的总高度，可根据实际需求微调 */
+    flex: 6 !important;
+    /* 👈 核心修改：占据 6 份高度 */
     display: flex;
     flex-direction: column;
-    /* 上下排列 */
     width: 100%;
     border-bottom: 1px dashed #444;
-    /* 与下方图片区做分隔 */
     background: #000;
     box-sizing: border-box;
+    min-height: 0;
 }
 
 .pf-video-vertical .video-box {
@@ -3276,11 +3279,15 @@ input[type="range"]::-webkit-slider-thumb {
     background-color: #1a1a1a;
     width: 100%;
 
-    /* 👇 新增这两行修复高度溢出问题 👇 */
-    height: auto !important;
-    /* 强行覆盖掉第865行的 height: 100% */
+    /* 🔒 核心修改：锁定 100% 撑满父级，不允许上下塌陷留白 */
+    height: 100% !important;
     min-height: 0 !important;
-    /* 允许弹性容器收缩，防止被内部视频/图片撑爆 */
+    /* 保持不变：允许内部组件在必要时收缩，防止溢出 */
+}
+
+/* 💡 同步追加：强行覆盖父级的居中拉伸表现，确保完全贴合 */
+.pf-side>#pipelineDataArea {
+    align-self: stretch;
 }
 
 /* 2. 新型独立转向控制区域样式 */
