@@ -3536,3 +3536,100 @@ input[type="range"]::-webkit-slider-thumb {
     filter: grayscale(100%);
     /* 让 emoji 变成灰色 */
 }
+
+/* ================================
+   巡检结果保存悬浮按钮
+   ================================ */
+.inspection-save-fab {
+    position: absolute;
+    right: 18px;
+    bottom: 18px;
+    z-index: 1200;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #ffd700;
+    background: linear-gradient(180deg, rgba(255, 204, 0, 0.95), rgba(160, 105, 0, 0.95));
+    color: #fff;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 0 12px rgba(255, 215, 0, 0.65);
+}
+
+.inspection-save-fab:hover {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+}
+
+/* ================================
+   顶部巡检结果下拉面板
+   ================================ */
+.inspect-result-dropdown {
+    position: absolute;
+    top: 70px;
+    right: 28px;
+    width: 360px;
+    max-height: 420px;
+    z-index: 3000;
+    background: rgba(5, 20, 35, 0.96);
+    border: 1px solid rgba(0, 229, 255, 0.55);
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.75), 0 0 14px rgba(0, 229, 255, 0.35);
+    overflow: hidden;
+}
+
+.inspect-result-title {
+    height: 38px;
+    line-height: 38px;
+    padding: 0 14px;
+    font-size: 14px;
+    font-weight: bold;
+    color: #00e5ff;
+    background: linear-gradient(90deg, #0b4a7c, #132f4a);
+    border-bottom: 1px solid rgba(0, 229, 255, 0.25);
+}
+
+.inspect-history-list {
+    padding: 8px;
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.inspect-empty {
+    padding: 18px 8px;
+    text-align: center;
+    color: rgba(234, 246, 255, 0.45);
+    font-size: 13px;
+}
+
+.inspect-history-item {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 8px;
+    padding: 9px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(120, 200, 255, 0.28);
+    background: rgba(10, 60, 90, 0.55);
+    color: #eaf6ff;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s;
+}
+
+.inspect-history-item:hover {
+    background: rgba(0, 150, 255, 0.38);
+    border-color: #00e5ff;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.35);
+}
+
+.inspect-history-name {
+    font-size: 13px;
+    font-weight: bold;
+    color: #ffffff;
+}
+
+.inspect-history-meta {
+    margin-top: 4px;
+    font-size: 11px;
+    color: #a8e0ff;
+}

@@ -164,6 +164,127 @@
         statusSpan.classList.remove("error", "success");
         if (type) statusSpan.classList.add(type);
     }
+
+    // ==========================================
+    // ✅ 巡检结果正式 B/S 部署接口
+    // ==========================================
+    const INSPECTION_API = {
+        uploadImage: "/api/inspection/images/upload-base64",
+        saveResult: "/api/inspection/results",
+        listResults: "/api/inspection/results?limit=5",
+        detail: (id) => "/api/inspection/results/" + encodeURIComponent(id)
+    };
+
+    function getFullImageUrl(url) {
+        if (!url) return "/img/placeholder.png";
+        if (url.startsWith("http://") || url.startsWith("https://")) return url;
+        if (url.startsWith("/")) return url;
+        return "/" + url;
+    }
+
+    function ensureFaultImageItem(faultId) {
+        if (!window.faultImagesMap) {
+            window.faultImagesMap = new Map();
+        }
+
+        if (!window.faultImagesMap.has(faultId)) {
+            window.faultImagesMap.set(faultId, {
+                left: "",
+                right: "",
+                front: "",
+                back: ""
+            });
+        }
+
+        return window.faultImagesMap.get(faultId);
+    }
+
+    async function uploadFaultImageBase64(faultId, direction, imageBase64) {
+        if (!imageBase64) return "";
+
+        // 已经是 URL 的，不重复上传
+        if (
+            !imageBase64.startsWith("data:") &&
+            (
+                imageBase64.startsWith("/") ||
+                imageBase64.startsWith("http://") ||
+                imageBase64.startsWith("https://")
+            )
+        ) {
+            return imageBase64;
+        }
+
+        const res = await fetch(INSPECTION_API.uploadImage, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                faultId: faultId,
+                direction: direction,
+                imageBase64: imageBase64
+            })
+        });
+
+        if (!res.ok) {
+            throw new Error("图片上传失败：" + res.status);
+        }
+
+        const data = await res.json();
+
+        if (!data.url) {
+            throw new Error("后端未返回图片 URL");
+        }
+
+        return data.url;
+    }
+
+    function setFaultImageUrl(faultId, direction, url) {
+        const imgs = ensureFaultImageItem(faultId);
+        imgs[direction] = url;
+        return imgs;
+    }
+
+    function updateCaptureImageUI(direction, url) {
+        const idMap = {
+            front: ["imgCaptureFront", "dispCaptureFront"],
+            back: ["imgCaptureBack", "dispCaptureBack"],
+            left: ["imgCaptureLeft", "dispCaptureLeft"],
+            right: ["imgCaptureRight", "dispCaptureRight"]
+        };
+
+        const ids = idMap[direction] || [];
+        ids.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.src = getFullImageUrl(url);
+            }
+        });
+    }
+
+    function showFaultImagesInModal(imgs) {
+        const safeImgs = imgs || {};
+
+        updateCaptureImageUI("front", safeImgs.front || "");
+        updateCaptureImageUI("back", safeImgs.back || "");
+        updateCaptureImageUI("left", safeImgs.left || "");
+        updateCaptureImageUI("right", safeImgs.right || "");
+
+        const modal = document.getElementById("captureImageModal");
+        if (modal) {
+            modal.style.display = "block";
+        }
+    }
+
+    async function bindCapturedImageToFault(faultId, direction, imageBase64) {
+        const imageUrl = await uploadFaultImageBase64(faultId, direction, imageBase64);
+        setFaultImageUrl(faultId, direction, imageUrl);
+        updateCaptureImageUI(direction, imageUrl);
+        console.log(`✅ ${direction} 实景已上传后端并绑定 URL：`, imageUrl);
+        return imageUrl;
+    }
+
+
     // ==========================================
     // ✅ 新增：精确计算滑块 Thumb 实时偏移量的浮动标签函数
     // ==========================================
@@ -742,6 +863,8 @@
             scrollToMain();
         }
 
+        window.switchMainPanel = switchMainPanel;
+
         function scrollToMain() {
             const mainArea = $("mainArea");
             if (mainArea) mainArea.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -754,7 +877,16 @@
 
         // 绑定新增的“巡检结果”按钮
         const btnInspectResult = $("btnInspectResult");
-        if (btnInspectResult) btnInspectResult.addEventListener("click", () => switchMainPanel('inspectResult'));
+        if (btnInspectResult) {
+            btnInspectResult.addEventListener("click", function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (window.toggleInspectionHistoryDropdown) {
+                    window.toggleInspectionHistoryDropdown();
+                }
+            });
+        }
 
         // 绑定左侧系统栏“设备”按钮
         if (btnShowArm) {
@@ -2789,12 +2921,11 @@
                             window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                         }
                         // 绑定右侧图片
-                        window.faultImagesMap.get(faultId).right = data.image;
-                        console.log("✅ 右侧实景绑定成功！");
-
-                        // 🌟 修复：立即更新右侧 UI
-                        const imgEl = document.getElementById('dispCaptureRight');
-                        if (imgEl) imgEl.src = data.image;
+                        bindCapturedImageToFault(faultId, "right", data.image)
+                            .catch(err => {
+                                console.error("右侧图片上传或绑定失败:", err);
+                                alert("右侧图片上传失败：" + err.message);
+                            });
                     }
                 })
                 .catch(err => console.error("右侧抓拍失败:", err));
@@ -2857,12 +2988,11 @@
                             window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                         }
                         // 绑定左侧图片
-                        window.faultImagesMap.get(faultId).left = data.image;
-                        console.log("✅ 左侧实景绑定成功！");
-
-                        // 🌟 修复：立即更新左侧 UI
-                        const imgEl = document.getElementById('dispCaptureLeft');
-                        if (imgEl) imgEl.src = data.image;
+                        bindCapturedImageToFault(faultId, "left", data.image)
+                            .catch(err => {
+                                console.error("左侧图片上传或绑定失败:", err);
+                                alert("左侧图片上传失败：" + err.message);
+                            });
                     }
                 })
                 .catch(err => console.error("左侧抓拍失败:", err));
@@ -2906,11 +3036,11 @@
                     if (!window.faultImagesMap.has(faultId)) {
                         window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                     }
-                    window.faultImagesMap.get(faultId).front = data.front;
-
-                    const imgEl = document.getElementById('dispCaptureFront');
-                    if (imgEl) imgEl.src = data.front;
-                    console.log("✅ 前方实景绑定成功！");
+                    bindCapturedImageToFault(faultId, "back", data.rear)
+                        .catch(err => {
+                            console.error("后方图片上传或绑定失败:", err);
+                            alert("后方图片上传失败：" + err.message);
+                        });
                 } else {
                     console.error("前方抓拍失败，未获取到图像数据");
                 }
@@ -2938,11 +3068,11 @@
                     if (!window.faultImagesMap.has(faultId)) {
                         window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
                     }
-                    window.faultImagesMap.get(faultId).back = data.rear;
-
-                    const imgEl = document.getElementById('dispCaptureBack');
-                    if (imgEl) imgEl.src = data.rear;
-                    console.log("✅ 后方实景绑定成功！");
+                    bindCapturedImageToFault(faultId, "back", data.rear)
+                        .catch(err => {
+                            console.error("后方图片上传或绑定失败:", err);
+                            alert("后方图片上传失败：" + err.message);
+                        });
                 } else {
                     console.error("后方抓拍失败，未获取到图像数据");
                 }
@@ -4178,6 +4308,364 @@
         let currentCableMesh = null;
         let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
 
+        // ==========================================
+        // ✅ 正式 B/S：巡检结果保存与历史回显
+        // 只保存路径点、破损点坐标、图片 URL，不保存点云
+        // ==========================================
+        function plainCablePoint(p) {
+            return {
+                x: Number(p.x),
+                y: Number(p.y),
+                z: Number(p.z ?? 0.08),
+                depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
+            };
+        }
+
+        function vectorCablePoint(p) {
+            const v = new THREE.Vector3(
+                Number(p.x),
+                Number(p.y),
+                Number(p.z ?? 0.08)
+            );
+
+            v.userData = {
+                depth: p.depth ?? null
+            };
+
+            return v;
+        }
+
+        function disposeObject3D(obj) {
+            obj.traverse(child => {
+                if (child.geometry) child.geometry.dispose();
+
+                if (child.material) {
+                    if (child.material.map) child.material.map.dispose();
+                    child.material.dispose();
+                }
+            });
+        }
+
+        function clearThreeGroup(group) {
+            group.children.slice().forEach(child => {
+                group.remove(child);
+                disposeObject3D(child);
+            });
+        }
+
+        function drawCablePathFromPoints(points) {
+            if (!points || points.length < 2) return;
+
+            if (currentCableMesh) {
+                cableGroup.remove(currentCableMesh);
+                disposeObject3D(currentCableMesh);
+                currentCableMesh = null;
+            }
+
+            const curve = new THREE.CatmullRomCurve3(points);
+            const tube = new THREE.TubeGeometry(
+                curve,
+                Math.max(points.length * 8, 16),
+                0.03,
+                8,
+                false
+            );
+
+            currentCableMesh = new THREE.Mesh(tube, cableMat);
+            cableGroup.add(currentCableMesh);
+        }
+
+        function createFaultMarkerFromHistory(fault) {
+            const faultId = fault.faultId || fault.id || ("fault_" + Date.now());
+
+            const faultGroup = new THREE.Group();
+
+            faultGroup.position.set(
+                Number(fault.x),
+                Number(fault.y),
+                Number(fault.z ?? 0.08)
+            );
+
+            faultGroup.userData.faultId = faultId;
+
+            const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
+            const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+            faultGroup.add(faultMesh);
+
+            const canvas = document.createElement("canvas");
+            canvas.width = 128;
+            canvas.height = 128;
+
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, 128, 128);
+            ctx.font = "bold 90px Arial";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = "#ffdd00";
+            ctx.shadowColor = "#ff0000";
+            ctx.shadowBlur = 15;
+            ctx.fillText("⚡", 64, 64);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMat = new THREE.SpriteMaterial({
+                map: texture,
+                transparent: true,
+                depthTest: false
+            });
+
+            const lightningSprite = new THREE.Sprite(spriteMat);
+            lightningSprite.scale.set(0.6, 0.6, 1);
+            lightningSprite.position.set(0, 0, 0.3);
+            faultGroup.add(lightningSprite);
+
+            faultMarkerGroup.add(faultGroup);
+
+            return faultGroup;
+        }
+
+        async function normalizeImagesToUrls(faultId, imgs) {
+            const safeImgs = imgs || {};
+            const result = {
+                left: safeImgs.left || "",
+                right: safeImgs.right || "",
+                front: safeImgs.front || "",
+                back: safeImgs.back || ""
+            };
+
+            for (const direction of ["left", "right", "front", "back"]) {
+                const val = result[direction];
+
+                if (val && val.startsWith("data:")) {
+                    result[direction] = await uploadFaultImageBase64(faultId, direction, val);
+                    setFaultImageUrl(faultId, direction, result[direction]);
+                }
+            }
+
+            return result;
+        }
+
+        async function collectCurrentInspectionPayload() {
+            const cablePath = Array.isArray(window.savedCablePath)
+                ? window.savedCablePath.map(plainCablePoint)
+                : [];
+
+            if (cablePath.length < 2) {
+                throw new Error("当前没有有效的黄色电缆路径，无法保存巡检结果。");
+            }
+
+            const faults = [];
+
+            for (const group of faultMarkerGroup.children) {
+                const faultId = group.userData?.faultId;
+                if (!faultId) continue;
+
+                const imgs = window.faultImagesMap && window.faultImagesMap.has(faultId)
+                    ? window.faultImagesMap.get(faultId)
+                    : { left: "", right: "", front: "", back: "" };
+
+                const imageUrls = await normalizeImagesToUrls(faultId, imgs);
+
+                faults.push({
+                    faultId: faultId,
+                    x: Number(group.position.x),
+                    y: Number(group.position.y),
+                    z: Number(group.position.z ?? 0.08),
+                    images: {
+                        left: imageUrls.left || "",
+                        right: imageUrls.right || "",
+                        front: imageUrls.front || "",
+                        back: imageUrls.back || ""
+                    }
+                });
+            }
+
+            const now = new Date();
+
+            return {
+                name: "巡检结果 " + now.toLocaleString(),
+                savedAt: now.toISOString(),
+                cablePath: cablePath,
+                faults: faults
+            };
+        }
+
+        async function saveCurrentInspectionResultToServer() {
+            const btn = document.getElementById("btnSaveInspectionResult");
+            const oldText = btn ? btn.textContent : "";
+
+            try {
+                if (btn) {
+                    btn.disabled = true;
+                    btn.textContent = "⏳ 保存中...";
+                }
+
+                const payload = await collectCurrentInspectionPayload();
+
+                const res = await fetch(INSPECTION_API.saveResult, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!res.ok) {
+                    throw new Error("保存巡检结果失败：" + res.status);
+                }
+
+                await res.json().catch(() => null);
+
+                alert("✅ 巡检结果已保存到机器狗主机 MySQL 中，仅保留最近五次。");
+
+                if (window.renderInspectionHistoryList) {
+                    window.renderInspectionHistoryList();
+                }
+
+            } catch (err) {
+                console.error("保存巡检结果失败：", err);
+                alert("❌ " + err.message);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = oldText || "💾 保存巡检结果";
+                }
+            }
+        }
+
+        async function loadInspectionResultFromServer(id) {
+            try {
+                const res = await fetch(INSPECTION_API.detail(id));
+
+                if (!res.ok) {
+                    throw new Error("读取巡检历史失败：" + res.status);
+                }
+
+                const record = await res.json();
+
+                if (window.switchMainPanel) {
+                    window.switchMainPanel("pathFault");
+                }
+
+                clearThreeGroup(cableGroup);
+                clearThreeGroup(faultMarkerGroup);
+                clearThreeGroup(redCableGroup);
+
+                currentCableMesh = null;
+
+                const points = (record.cablePath || []).map(vectorCablePoint);
+
+                window.savedCablePath = points;
+
+                drawCablePathFromPoints(points);
+
+                if (!window.faultImagesMap) {
+                    window.faultImagesMap = new Map();
+                }
+
+                window.faultImagesMap.clear();
+
+                (record.faults || []).forEach(fault => {
+                    const group = createFaultMarkerFromHistory(fault);
+                    const faultId = group.userData.faultId;
+
+                    window.faultImagesMap.set(faultId, {
+                        left: fault.images?.left || "",
+                        right: fault.images?.right || "",
+                        front: fault.images?.front || "",
+                        back: fault.images?.back || ""
+                    });
+                });
+
+                window.lastFaultMarker =
+                    faultMarkerGroup.children[faultMarkerGroup.children.length - 1] || null;
+
+                const dropdown = document.getElementById("inspectResultDropdown");
+                if (dropdown) dropdown.classList.add("hidden");
+
+                setStatus("✅ 已加载历史巡检结果：" + (record.name || ""), "success");
+
+            } catch (err) {
+                console.error("加载历史巡检结果失败：", err);
+                alert("❌ " + err.message);
+            }
+        }
+
+        window.renderInspectionHistoryList = async function () {
+            const listEl = document.getElementById("inspectHistoryList");
+            if (!listEl) return;
+
+            listEl.innerHTML = `<div class="inspect-empty">正在读取巡检历史...</div>`;
+
+            try {
+                const res = await fetch(INSPECTION_API.listResults);
+
+                if (!res.ok) {
+                    throw new Error("读取巡检历史失败：" + res.status);
+                }
+
+                const history = await res.json();
+
+                if (!Array.isArray(history) || history.length === 0) {
+                    listEl.innerHTML = `<div class="inspect-empty">暂无保存记录</div>`;
+                    return;
+                }
+
+                listEl.innerHTML = "";
+
+                history.slice(0, 5).forEach((item, index) => {
+                    const btn = document.createElement("button");
+                    btn.className = "inspect-history-item";
+                    btn.type = "button";
+
+                    const timeText = item.savedAt
+                        ? new Date(item.savedAt).toLocaleString()
+                        : "--";
+
+                    const faultCount = item.faultCount ?? 0;
+                    const pathCount = item.pathPointCount ?? 0;
+
+                    btn.innerHTML = `
+                <div class="inspect-history-name">${index + 1}. ${item.name || "巡检结果"}</div>
+                <div class="inspect-history-meta">
+                    保存时间：${timeText}｜路径点：${pathCount}｜破损点：${faultCount}
+                </div>
+            `;
+
+                    btn.onclick = () => loadInspectionResultFromServer(item.id);
+
+                    listEl.appendChild(btn);
+                });
+
+            } catch (err) {
+                console.error("读取巡检历史失败：", err);
+                listEl.innerHTML = `<div class="inspect-empty">读取失败，请检查后端接口</div>`;
+            }
+        };
+
+        window.toggleInspectionHistoryDropdown = function () {
+            const dropdown = document.getElementById("inspectResultDropdown");
+            if (!dropdown) return;
+
+            window.renderInspectionHistoryList();
+            dropdown.classList.toggle("hidden");
+        };
+
+        const btnSaveInspectionResult = document.getElementById("btnSaveInspectionResult");
+        if (btnSaveInspectionResult) {
+            btnSaveInspectionResult.onclick = saveCurrentInspectionResultToServer;
+        }
+
+        document.addEventListener("click", function (e) {
+            const dropdown = document.getElementById("inspectResultDropdown");
+            const btn = document.getElementById("btnInspectResult");
+
+            if (!dropdown || dropdown.classList.contains("hidden")) return;
+            if (dropdown.contains(e.target) || btn?.contains(e.target)) return;
+
+            dropdown.classList.add("hidden");
+        });
+
         // E. 网格与交互
         const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);
         gridHelper.rotation.x = Math.PI / 2;
@@ -4562,27 +5050,9 @@
 
 
                     // ✅ 核心：更新右上角固定的实景抓拍预留区
-                    const imgLeft = document.getElementById('dispCaptureLeft');
-                    const imgRight = document.getElementById('dispCaptureRight');
-                    const imgFront = document.getElementById('dispCaptureFront');
-                    const imgBack = document.getElementById('dispCaptureBack');
-
-                    if (imgLeft && imgRight && imgFront && imgBack) {
-                        if (clickedFaultId && window.faultImagesMap && window.faultImagesMap.has(clickedFaultId)) {
-                            // 存在抓拍图片 -> 读取并显示 4 个方向
-                            const imgs = window.faultImagesMap.get(clickedFaultId);
-
-                            if (imgs.left) imgLeft.src = imgs.left; else imgLeft.removeAttribute('src');
-                            if (imgs.right) imgRight.src = imgs.right; else imgRight.removeAttribute('src');
-                            if (imgs.front) imgFront.src = imgs.front; else imgFront.removeAttribute('src');
-                            if (imgs.back) imgBack.src = imgs.back; else imgBack.removeAttribute('src');
-                        } else {
-                            // 无抓拍记录 -> 清空图片
-                            imgLeft.removeAttribute('src');
-                            imgRight.removeAttribute('src');
-                            imgFront.removeAttribute('src');
-                            imgBack.removeAttribute('src');
-                        }
+                    if (clickedFaultId && window.faultImagesMap && window.faultImagesMap.has(clickedFaultId)) {
+                        const imgs = window.faultImagesMap.get(clickedFaultId);
+                        showFaultImagesInModal(imgs);
                     }
                     return;
                 }

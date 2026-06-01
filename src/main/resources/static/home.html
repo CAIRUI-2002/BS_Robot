@@ -61,6 +61,13 @@
             </div>
         </header>
 
+        <div id="inspectResultDropdown" class="inspect-result-dropdown hidden">
+            <div class="inspect-result-title">📋 近五次巡检结果</div>
+            <div id="inspectHistoryList" class="inspect-history-list">
+                <div class="inspect-empty">暂无保存记录</div>
+            </div>
+        </div>
+
         <div class="layout">
             <aside class="left-panel">
 
@@ -357,6 +364,9 @@
                                 <div id="realtimeGpsOverlay" class="realtime-gps-overlay">
                                     🛰️ RTK: <span id="realtimeGpsText">等待定位...</span>
                                 </div>
+                                <button id="btnSaveInspectionResult" class="inspection-save-fab">
+                                    💾 保存巡检结果
+                                </button>
                                 <div class="floating-compass">
                                     <div class="compass-container">
                                         <div id="arrowRight" class="arrow-icon side-arrow">▶</div>
