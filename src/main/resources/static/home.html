@@ -191,16 +191,22 @@
                                 <span class="btn-tooltip">隐藏/显示网格刻度线</span>
                             </div>
 
-                            <div id="carJoystickPanel" class="floating-joystick">
-                                <button id="btnSendFaultToCar" class="action-btn-small"
-                                    style="width: 100%; margin-bottom: 8px; background: linear-gradient(180deg, #e6a23c, #d35400); border-color: #d35400;">
-                                    📍 发送破损点坐标
+                            <div class="crawler-control-stack">
+                                <button id="btnLoadCurrentPointCloudMap" class="action-btn-small crawler-action-btn">
+                                    🗺️ 加载当前点云地图
                                 </button>
-                                <div class="joystick-title">🚀 履带车控制</div>
-                                <div class="joystick-base" id="carJoystickBase">
-                                    <div class="joystick-stick" id="carJoystickStick"></div>
+
+                                <div id="carJoystickPanel" class="floating-joystick">
+                                    <button id="btnSendFaultToCar" class="action-btn-small crawler-action-btn">
+                                        📍 发送破损点坐标
+                                    </button>
+
+                                    <div class="joystick-title">🚀 履带车控制</div>
+                                    <div class="joystick-base" id="carJoystickBase">
+                                        <div class="joystick-stick" id="carJoystickStick"></div>
+                                    </div>
+                                    <div class="joystick-status" id="carJoystickStatus">停止</div>
                                 </div>
-                                <div class="joystick-status" id="carJoystickStatus">停止</div>
                             </div>
                         </div>
                     </div>

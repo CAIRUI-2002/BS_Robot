@@ -3633,3 +3633,93 @@ input[type="range"]::-webkit-slider-thumb {
     font-size: 11px;
     color: #a8e0ff;
 }
+
+/* ==========================================
+   ✅ 三维重建页：加载当前点云地图按钮
+   ========================================== */
+
+/* 让履带车控制面板在新容器内正常排列，不再自己 absolute 定位 */
+.crawler-control-stack .floating-joystick {
+    position: static;
+    width: 130px;
+    align-self: center;
+}
+
+/* 三维重建页右侧：履带车按钮 + 控制面板外层容器 */
+.crawler-control-stack {
+    position: absolute;
+    right: 22px;
+    bottom: 22px;
+    width: 150px;
+    /* 原来 176px，缩小 */
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    /* 原来 10px，缩小间距 */
+}
+
+/* 让履带车控制面板在外层容器内排列 */
+.crawler-control-stack .floating-joystick {
+    position: static;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* 加载当前点云地图、发送破损点坐标统一按钮样式 */
+.crawler-action-btn {
+    width: 100%;
+    min-height: 34px;
+    /* 原来 48px，缩小 */
+    margin: 0;
+    padding: 5px 8px;
+    /* 原来 8px 10px，缩小 */
+    box-sizing: border-box;
+
+    background: linear-gradient(180deg, #e6a23c, #d35400) !important;
+    border: 1px solid #d35400 !important;
+    border-radius: 4px;
+
+    color: #ffffff !important;
+    font-size: 12px;
+    /* 原来 13px，缩小 */
+    font-weight: bold;
+    line-height: 1.25;
+    text-align: center;
+    cursor: pointer;
+
+    box-shadow: 0 0 6px rgba(230, 126, 0, 0.4);
+    transition: all 0.2s ease;
+}
+
+/* 发送破损点按钮与摇杆标题之间的距离 */
+#btnSendFaultToCar {
+    margin-bottom: 6px;
+    /* 原来 8px，缩小 */
+}
+
+/* 悬停效果 */
+.crawler-action-btn:hover {
+    filter: brightness(1.08);
+    box-shadow: 0 0 12px rgba(255, 150, 30, 0.75);
+}
+
+/* 点击效果 */
+.crawler-action-btn:active {
+    transform: translateY(1px);
+    filter: brightness(0.95);
+}
+
+/* 加载中状态 */
+.crawler-action-btn:disabled {
+    opacity: 0.7;
+    cursor: wait;
+}
+
+/* 加载成功后仍保持同类按钮风格，只轻微改为绿色提示 */
+.crawler-action-btn.loaded {
+    background: linear-gradient(180deg, #18a058, #0c6b3b) !important;
+    border-color: #18a058 !important;
+    box-shadow: 0 0 10px rgba(24, 160, 88, 0.65);
+}

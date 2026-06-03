@@ -165,6 +165,377 @@
         if (type) statusSpan.classList.add(type);
     }
 
+
+    // ==========================================
+    // ✅ 三维重建页：从“路径查找及故障定点”三维视图加载当前点云地图
+    // 说明：路径页采用 Z 轴向上，GPR 三维重建页采用 Y 轴向上，因此导入时统一做坐标变换：
+    //      路径页 (x, y, z)  ->  三维重建页 (x, z, y)
+    // ==========================================
+    function disposeThreeObjectForReuse(obj) {
+        if (!obj) return;
+
+        obj.traverse(child => {
+            if (child.geometry) {
+                child.geometry.dispose();
+            }
+
+            if (child.material) {
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                mats.forEach(mat => {
+                    if (!mat) return;
+                    if (mat.map) mat.map.dispose();
+                    mat.dispose();
+                });
+            }
+        });
+    }
+
+    function clearCurrentGprExternalMapLayer() {
+        if (window.gprScene && window.currentPcdGroup) {
+            window.gprScene.remove(window.currentPcdGroup);
+            disposeThreeObjectForReuse(window.currentPcdGroup);
+        } else if (window.gprScene && window.currentPcdMesh) {
+            window.gprScene.remove(window.currentPcdMesh);
+            disposeThreeObjectForReuse(window.currentPcdMesh);
+        }
+
+        window.currentPcdMesh = null;
+        window.currentPcdGroup = null;
+        window.currentImportedInspectionMapGroup = null;
+    }
+
+    function updateGprCameraByBox(box) {
+        if (!box || box.isEmpty() || !window.gprCamera) return;
+
+        if (typeof window.gprSetViewToBox === "function") {
+            window.gprSetViewToBox(box);
+            return;
+        }
+
+        const center = new THREE.Vector3();
+        const size = new THREE.Vector3();
+        box.getCenter(center);
+        box.getSize(size);
+
+        const span = Math.max(size.x, size.y, size.z, 1.0);
+        window.gprCamera.position.set(
+            center.x + span * 1.6,
+            center.y + span * 1.2,
+            center.z + span * 1.6
+        );
+        window.gprCamera.lookAt(center);
+        window.gprCamera.updateProjectionMatrix();
+    }
+
+    function ensureStandaloneGprSceneForMap() {
+        const container = $("threeContainer");
+        if (!container) {
+            throw new Error("未找到三维重建容器 threeContainer。");
+        }
+        if (typeof THREE === "undefined") {
+            throw new Error("three.js 未加载，无法创建三维场景。");
+        }
+
+        if (window.gprScene && window.gprRenderer && window.gprCamera) {
+            return;
+        }
+
+        if (window.gprAnimId) {
+            cancelAnimationFrame(window.gprAnimId);
+            window.gprAnimId = null;
+        }
+
+        if (window.gprRenderer) {
+            window.gprRenderer.dispose();
+            if (typeof window.gprRenderer.forceContextLoss === "function") {
+                window.gprRenderer.forceContextLoss();
+            }
+            window.gprRenderer = null;
+        }
+
+        container.innerHTML = "";
+
+        let width = container.clientWidth || 800;
+        let height = container.clientHeight || 500;
+        if (!container.clientWidth || !container.clientHeight) {
+            container.style.minWidth = "800px";
+            container.style.minHeight = "500px";
+        }
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
+
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(width, height);
+        container.appendChild(renderer.domElement);
+
+        const worldGrid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
+        worldGrid.position.y = 0;
+        scene.add(worldGrid);
+
+        // 简单方向参考：红 X、绿 Y(高度)、蓝 Z
+        const axes = new THREE.AxesHelper(3);
+        scene.add(axes);
+
+        let center = new THREE.Vector3(0, 0, 0);
+        let radius = 20;
+        let theta = Math.PI / 4;
+        let phi = Math.PI / 5;
+
+        function updateCamera() {
+            const x = center.x + radius * Math.cos(phi) * Math.cos(theta);
+            const y = center.y + radius * Math.sin(phi);
+            const z = center.z + radius * Math.cos(phi) * Math.sin(theta);
+            camera.position.set(x, y, z);
+            camera.lookAt(center);
+        }
+
+        window.gprSetViewToBox = function (box) {
+            if (!box || box.isEmpty()) return;
+            const size = new THREE.Vector3();
+            box.getCenter(center);
+            box.getSize(size);
+            const span = Math.max(size.x, size.y, size.z, 1.0);
+            radius = Math.max(span * 1.8, 5.0);
+            theta = Math.PI / 4;
+            phi = Math.PI / 5;
+            updateCamera();
+        };
+        updateCamera();
+
+        const dom = renderer.domElement;
+        let isRotating = false;
+        let isPanning = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        dom.addEventListener("mousedown", e => {
+            if (e.button === 0) {
+                isRotating = true;
+                isPanning = false;
+            } else if (e.button === 1) {
+                isPanning = true;
+                isRotating = false;
+            } else {
+                return;
+            }
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+
+        window.addEventListener("mouseup", () => {
+            isRotating = false;
+            isPanning = false;
+        });
+
+        dom.addEventListener("contextmenu", e => e.preventDefault());
+
+        dom.addEventListener("mousemove", e => {
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+
+            if (isRotating) {
+                theta += dx * 0.005;
+                phi += dy * 0.005;
+                phi = Math.max(0.1, Math.min(Math.PI - 0.1, phi));
+                updateCamera();
+            } else if (isPanning) {
+                const panSpeed = radius * 0.0015;
+                const dir = new THREE.Vector3();
+                camera.getWorldDirection(dir);
+                const up = new THREE.Vector3(0, 1, 0);
+                const right = new THREE.Vector3().crossVectors(dir, up).normalize().negate();
+                const camUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+                center.add(right.multiplyScalar(dx * panSpeed));
+                center.add(camUp.multiplyScalar(-dy * panSpeed));
+                updateCamera();
+            }
+
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+
+        dom.addEventListener("wheel", e => {
+            e.preventDefault();
+            radius *= e.deltaY > 0 ? 1.1 : 0.9;
+            radius = Math.max(2.0, Math.min(5000.0, radius));
+            updateCamera();
+        });
+
+        function resizeGprScene() {
+            const w = container.clientWidth || 800;
+            const h = container.clientHeight || 500;
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            renderer.setSize(w, h);
+        }
+        window.addEventListener("resize", resizeGprScene);
+        if (typeof ResizeObserver !== "undefined") {
+            const resizeObserver = new ResizeObserver(resizeGprScene);
+            resizeObserver.observe(container);
+        }
+
+        function animateStandaloneGprScene() {
+            window.gprAnimId = requestAnimationFrame(animateStandaloneGprScene);
+            if (window.currentActivePanel !== "gpr") return;
+            renderer.render(scene, camera);
+        }
+        animateStandaloneGprScene();
+
+        window.gprScene = scene;
+        window.gprCamera = camera;
+        window.gprRenderer = renderer;
+    }
+
+    function slamPointToGprVector(pt) {
+        return new THREE.Vector3(
+            Number(pt.x || 0),
+            Number(pt.z ?? 0.08),
+            Number(pt.y || 0)
+        );
+    }
+
+    function createGprFaultMarker(fault) {
+        const faultGroup = new THREE.Group();
+        const pos = slamPointToGprVector(fault);
+        faultGroup.position.copy(pos);
+        faultGroup.userData.faultId = fault.faultId || fault.id || "";
+
+        const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        faultGroup.add(sphere);
+
+        const canvas = document.createElement("canvas");
+        canvas.width = 128;
+        canvas.height = 128;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, 128, 128);
+        ctx.font = "bold 86px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#ffdd00";
+        ctx.shadowColor = "#ff0000";
+        ctx.shadowBlur = 14;
+        ctx.fillText("⚡", 64, 64);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false
+        }));
+        sprite.position.set(0, 0.45, 0);
+        sprite.scale.set(0.65, 0.65, 1);
+        faultGroup.add(sprite);
+
+        return faultGroup;
+    }
+
+    function loadCurrentPathFaultMapToGpr() {
+        const btn = $("btnLoadCurrentPointCloudMap");
+        const oldText = btn ? btn.textContent : "";
+
+        try {
+            if (btn) {
+                btn.disabled = true;
+                btn.classList.remove("loaded");
+                btn.textContent = "⏳ 正在加载地图...";
+            }
+
+            if (typeof window.exportCurrentPathFaultMapForGpr !== "function") {
+                throw new Error("路径查找及故障定点页面的三维地图尚未初始化，请先进入一次该页面。 ");
+            }
+
+            const snapshot = window.exportCurrentPathFaultMapForGpr();
+            const pointCount = snapshot?.pointCloud?.count || 0;
+            const cableCount = Array.isArray(snapshot?.cablePath) ? snapshot.cablePath.length : 0;
+            const faultCount = Array.isArray(snapshot?.faults) ? snapshot.faults.length : 0;
+
+            if (pointCount === 0 && cableCount < 2 && faultCount === 0) {
+                throw new Error("当前路径查找页面还没有可加载的点云地图、电缆路径或破损点。 ");
+            }
+
+            ensureStandaloneGprSceneForMap();
+            clearCurrentGprExternalMapLayer();
+
+            const group = new THREE.Group();
+            group.name = "当前点云地图_电缆路径_破损点";
+
+            if (pointCount > 0) {
+                const geom = new THREE.BufferGeometry();
+                geom.setAttribute("position", new THREE.BufferAttribute(snapshot.pointCloud.positions, 3));
+                geom.setAttribute("color", new THREE.BufferAttribute(snapshot.pointCloud.colors, 3));
+
+                const mat = new THREE.PointsMaterial({
+                    vertexColors: true,
+                    size: 0.035,
+                    sizeAttenuation: true
+                });
+
+                const points = new THREE.Points(geom, mat);
+                points.frustumCulled = false;
+                group.add(points);
+                window.currentPcdMesh = points;
+            }
+
+            if (cableCount >= 2) {
+                const cablePoints = snapshot.cablePath.map(slamPointToGprVector);
+                const cableCurve = new THREE.CatmullRomCurve3(cablePoints);
+                const cableTube = new THREE.TubeGeometry(
+                    cableCurve,
+                    Math.max(cablePoints.length * 8, 16),
+                    0.045,
+                    10,
+                    false
+                );
+                const cableMesh = new THREE.Mesh(
+                    cableTube,
+                    new THREE.MeshBasicMaterial({ color: 0xffff00 })
+                );
+                cableMesh.name = "当前黄色电缆路径";
+                group.add(cableMesh);
+            }
+
+            if (faultCount > 0) {
+                snapshot.faults.forEach(fault => {
+                    group.add(createGprFaultMarker(fault));
+                });
+            }
+
+            window.gprScene.add(group);
+            window.currentPcdGroup = group;
+            window.currentImportedInspectionMapGroup = group;
+
+            const box = new THREE.Box3().setFromObject(group);
+            updateGprCameraByBox(box);
+
+            setStatus(`✅ 当前点云地图已加载：点云 ${pointCount} 点，电缆路径 ${cableCount} 点，破损点 ${faultCount} 个。`, "success");
+
+            if (btn) {
+                btn.classList.add("loaded");
+                btn.textContent = "✅ 当前地图已加载";
+                setTimeout(() => {
+                    if (btn) btn.textContent = "🗺️ 加载当前点云地图";
+                }, 1800);
+            }
+
+        } catch (err) {
+            console.error("加载当前点云地图失败：", err);
+            alert("❌ " + err.message);
+            setStatus("加载当前点云地图失败：" + err.message, "error");
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                if (!btn.classList.contains("loaded")) {
+                    btn.textContent = oldText || "🗺️ 加载当前点云地图";
+                }
+            }
+        }
+    }
+
     // ==========================================
     // ✅ 巡检结果正式 B/S 部署接口
     // ==========================================
@@ -675,8 +1046,12 @@
 
         const btnStart = $("btnStartGpr");
         const btnLoadPcd = $("btnLoadPcd"); // 新增获取点云按钮
+        const btnLoadCurrentPointCloudMap = $("btnLoadCurrentPointCloudMap"); // ✅ 加载路径页当前点云地图
 
         if (btnStart) btnStart.addEventListener("click", startGprProcessing);
+        if (btnLoadCurrentPointCloudMap) {
+            btnLoadCurrentPointCloudMap.addEventListener("click", loadCurrentPathFaultMapToGpr);
+        }
 
         // 👇========= 新增：点云加载事件绑定 =========👇
         if (btnLoadPcd) {
@@ -701,12 +1076,8 @@
 
                 const loader = new THREE.PCDLoader();
                 loader.load(url, function (points) {
-                    // 如果之前已经加载过点云，先清除旧的
-                    if (window.currentPcdMesh) {
-                        window.gprScene.remove(window.currentPcdMesh);
-                        window.currentPcdMesh.geometry.dispose();
-                        window.currentPcdMesh.material.dispose();
-                    }
+                    // 如果之前已经加载过点云或当前地图，先清除旧的外部叠加层
+                    clearCurrentGprExternalMapLayer();
 
                     // 1. 点云材质与颜色设置
                     points.material.size = 0.05; // 根据视觉效果调节大小
@@ -755,6 +1126,7 @@
                     // 保存引用
                     window.currentPcdMesh = points;     // 保留网格引用用于清理内存
                     window.currentPcdGroup = pcdGroup;  // 保留容器引用用于键盘旋转控制
+                    window.currentImportedInspectionMapGroup = null;
 
                     setStatus("点云加载完成！", "success");
                 },
@@ -1796,6 +2168,11 @@
         // 清空旧内容
         container.innerHTML = "";
         annotation3DGroups = []; // ✅ 清空旧的标注组
+        window.currentPcdMesh = null;
+        window.currentPcdGroup = null;
+        window.currentImportedInspectionMapGroup = null;
+        window.gprCamera = null;
+        window.gprSetViewToBox = null;
 
         // 记录每个剖面的标注圆心和半径，用于后续用圆柱连接
         const segmentAnnoCenters = [];
@@ -1837,10 +2214,11 @@
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x000000); // ✅ 改为黑色背景
 
-        // 👇 新增这一行，把 scene 暴露到全局，让外部的点云加载函数能够获取到它
+        // 👇 把 GPR scene 暴露到全局，让外部点云地图加载函数能够获取到它
         window.gprScene = scene;
 
         const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+        window.gprCamera = camera;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(width, height);
@@ -2159,6 +2537,20 @@
             camera.position.set(x, y, z);
             camera.lookAt(center);
         }
+
+        // ✅ 供“加载当前点云地图”按钮在导入后自动拉近视角
+        window.gprSetViewToBox = function (box) {
+            if (!box || box.isEmpty()) return;
+            const size = new THREE.Vector3();
+            box.getCenter(center);
+            box.getSize(size);
+            const newSpan = Math.max(size.x, size.y, size.z, 1.0);
+            radius = Math.max(newSpan * 1.8, span * 0.8, 3.0);
+            theta = Math.PI / 4;
+            phi = Math.PI / 4;
+            updateCamera();
+        };
+
         updateCamera();
 
         // ========== 交互：左键旋转，中键平移，滚轮缩放 ==========
@@ -4307,6 +4699,94 @@
         let lastSignal = -1;
         let currentCableMesh = null;
         let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
+
+        // ==========================================
+        // ✅ 向三维重建页导出当前路径页三维地图快照
+        // 导出内容：历史点云 mapMesh + 黄色电缆路径 window.savedCablePath + 红色破损点 faultMarkerGroup
+        // 坐标转换在加载到 GPR 页面时执行。
+        // ==========================================
+        window.exportCurrentPathFaultMapForGpr = function () {
+            const posAttr = mapMesh.geometry.attributes.position;
+            const colAttr = mapMesh.geometry.attributes.color;
+            const srcPos = posAttr.array;
+            const srcCol = colAttr.array;
+
+            mapMesh.updateMatrixWorld(true);
+            const worldMatrix = mapMesh.matrixWorld;
+            const temp = new THREE.Vector3();
+
+            let validCount = 0;
+            for (let i = 0; i < srcPos.length; i += 3) {
+                const x = srcPos[i];
+                const y = srcPos[i + 1];
+                const z = srcPos[i + 2];
+                if (
+                    Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) &&
+                    Math.abs(x) < 9000 && Math.abs(y) < 9000 && Math.abs(z) < 9000
+                ) {
+                    validCount++;
+                }
+            }
+
+            const positions = new Float32Array(validCount * 3);
+            const colors = new Float32Array(validCount * 3);
+
+            let j = 0;
+            for (let i = 0; i < srcPos.length; i += 3) {
+                const x = srcPos[i];
+                const y = srcPos[i + 1];
+                const z = srcPos[i + 2];
+                if (
+                    !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) ||
+                    Math.abs(x) >= 9000 || Math.abs(y) >= 9000 || Math.abs(z) >= 9000
+                ) {
+                    continue;
+                }
+
+                // 路径页世界坐标：X/Y 为水平面，Z 为高度；GPR页：X/Z 为水平面，Y 为高度
+                temp.set(x, y, z).applyMatrix4(worldMatrix);
+                positions[j] = temp.x;
+                positions[j + 1] = temp.z;
+                positions[j + 2] = temp.y;
+
+                colors[j] = srcCol[i] ?? 1.0;
+                colors[j + 1] = srcCol[i + 1] ?? 1.0;
+                colors[j + 2] = srcCol[i + 2] ?? 1.0;
+                j += 3;
+            }
+
+            const cablePath = Array.isArray(window.savedCablePath)
+                ? window.savedCablePath.map(p => ({
+                    x: Number(p.x),
+                    y: Number(p.y),
+                    z: Number(p.z ?? 0.08),
+                    depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
+                }))
+                : [];
+
+            const faults = [];
+            const faultWorldPos = new THREE.Vector3();
+            faultMarkerGroup.children.forEach(group => {
+                group.updateMatrixWorld(true);
+                faultWorldPos.setFromMatrixPosition(group.matrixWorld);
+                faults.push({
+                    faultId: group.userData?.faultId || "",
+                    x: Number(faultWorldPos.x),
+                    y: Number(faultWorldPos.y),
+                    z: Number(faultWorldPos.z ?? 0.08)
+                });
+            });
+
+            return {
+                pointCloud: {
+                    positions,
+                    colors,
+                    count: validCount
+                },
+                cablePath,
+                faults
+            };
+        };
 
         // ==========================================
         // ✅ 正式 B/S：巡检结果保存与历史回显
