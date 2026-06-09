@@ -14,6 +14,8 @@
     // 它都会自动去连同一个 IP 的 8000 端口。
     const ARM_BACKEND_URL = "http://" + window.location.hostname + ":8080";
     const ARM_API_BASE = "http://10.21.31.104:5005";
+    // 机械臂末端摄像头 Flask 服务端口，跟随当前访问上位机的机器狗 IP。
+    const ARM_CAMERA_BASE = "http://" + (window.location.hostname || "10.21.31.104") + ":5001";
 
     // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
     window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
@@ -29,7 +31,7 @@
     // 对应 Python 代码中的核心参数
     const AUC_CONFIG = {
         SAMPLING_RATE: 10000,   // 采样率
-        PULSE_THRESHOLD: 500,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
+        PULSE_THRESHOLD: 800,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
         DISTANCE_MIN: 1000,     // 粗筛：最小脉冲间隔 (防止重复触发)
 
         // --- 核心判定参数 ---
@@ -163,6 +165,56 @@
         statusSpan.textContent = text || "";
         statusSpan.classList.remove("error", "success");
         if (type) statusSpan.classList.add(type);
+    }
+
+    // ==========================================
+    // ✅ 机械臂末端摄像头实时视频流
+    // ==========================================
+    function initArmEndCameraStream() {
+        const img = $("armEndCameraStream");
+        const placeholder = $("armEndCameraPlaceholder");
+        if (!img || !placeholder) return;
+
+        const streamUrl = ARM_CAMERA_BASE + "/arm_feed";
+        let retryTimer = null;
+
+        function showPlaceholder(text) {
+            img.style.display = "none";
+            placeholder.style.display = "block";
+            placeholder.innerHTML = `
+                <span style="font-size: 24px; display: block; margin-bottom: 8px;">📡</span>
+                ${text || "末端视频流未连接"}<br>
+                <span style="font-size: 11px; color: rgba(135, 200, 255, 0.25); font-family: monospace;">${streamUrl}</span>
+            `;
+        }
+
+        function connectStream() {
+            if (retryTimer) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
+
+            showPlaceholder("正在连接末端视频流...");
+
+            img.onload = function () {
+                placeholder.style.display = "none";
+                img.style.display = "block";
+            };
+
+            img.onerror = function () {
+                showPlaceholder("末端视频流连接失败，3秒后重试");
+                img.removeAttribute("src");
+                retryTimer = setTimeout(connectStream, 3000);
+            };
+
+            // 加时间戳避免浏览器缓存旧连接。
+            img.src = streamUrl + "?t=" + Date.now();
+        }
+
+        connectStream();
+
+        // 便于现场调试时在浏览器控制台手动重连：window.reconnectArmEndCameraStream()
+        window.reconnectArmEndCameraStream = connectStream;
     }
 
 
@@ -1331,6 +1383,9 @@
     // ==========================================
 
     document.addEventListener("DOMContentLoaded", function () {
+
+        // ✅ 启动机械臂末端摄像头实时视频流
+        initArmEndCameraStream();
 
         // ✅ 初始化所有浮动滑块的位置
         ['manualSpeedX', 'manualSpeedY', 'autoSpeedX', 'autoSpeedY'].forEach(id => {
@@ -3644,7 +3699,7 @@
         // 🌟 新增：在 1.5 秒时抓拍（此时机械臂已到达指定位置并稳定）
         setTimeout(() => {
             console.log("📸 正在提取右侧正上方画面...");
-            fetch("http://10.21.31.104:5001/api/capture_arm")
+            fetch(ARM_CAMERA_BASE + "/api/capture_arm")
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === "success") {
@@ -3711,7 +3766,7 @@
         // 🌟 新增：在 1.5 秒时抓拍
         setTimeout(() => {
             console.log("📸 正在提取左侧正上方画面...");
-            fetch("http://10.21.31.104:5001/api/capture_arm")
+            fetch(ARM_CAMERA_BASE + "/api/capture_arm")
                 .then(res => res.json())
                 .then(data => {
                     if (data.status === "success") {
