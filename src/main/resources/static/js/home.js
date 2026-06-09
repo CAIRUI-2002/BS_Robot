@@ -657,6 +657,346 @@
 
 
     // ==========================================
+    // ✅ 上位机规划履带小车矩形扫描范围与 Z 字形路径
+    // 说明：履带小车只接收规划好的 GPS 航点，不再自行生成扫描路径。
+    // ==========================================
+    const DEFAULT_SCAN_PARAMS = {
+        length: 2.2,
+        width: 1.2,
+        angleDeg: 30.0
+    };
+
+    function normalizeRad(rad) {
+        while (rad > Math.PI) rad -= 2 * Math.PI;
+        while (rad < -Math.PI) rad += 2 * Math.PI;
+        return rad;
+    }
+
+    function clampNumber(value, min, max, fallback) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.max(min, Math.min(max, n));
+    }
+
+    function openScanParamModal(defaults = DEFAULT_SCAN_PARAMS) {
+        const modal = document.getElementById("scanParamModal");
+        const inputL = document.getElementById("scanRectLengthInput");
+        const inputW = document.getElementById("scanRectWidthInput");
+        const inputA = document.getElementById("scanZAngleInput");
+        const btnOk = document.getElementById("btnScanParamConfirm");
+        const btnCancel = document.getElementById("btnScanParamCancel");
+        const btnClose = document.getElementById("btnScanParamClose");
+
+        if (!modal || !inputL || !inputW || !inputA || !btnOk) {
+            // 如果 HTML 没有同步更新，使用浏览器 prompt 兜底，避免功能完全不可用。
+            const l = prompt("矩形长度 L（米）", String(defaults.length ?? DEFAULT_SCAN_PARAMS.length));
+            if (l === null) return Promise.resolve(null);
+            const w = prompt("矩形宽度 W（米）", String(defaults.width ?? DEFAULT_SCAN_PARAMS.width));
+            if (w === null) return Promise.resolve(null);
+            const a = prompt("Z 字折线与矩形短边夹角（度）", String(defaults.angleDeg ?? DEFAULT_SCAN_PARAMS.angleDeg));
+            if (a === null) return Promise.resolve(null);
+            return Promise.resolve({
+                length: clampNumber(l, 0.2, 50, DEFAULT_SCAN_PARAMS.length),
+                width: clampNumber(w, 0.2, 20, DEFAULT_SCAN_PARAMS.width),
+                angleDeg: clampNumber(a, 5, 85, DEFAULT_SCAN_PARAMS.angleDeg)
+            });
+        }
+
+        inputL.value = String(defaults.length ?? DEFAULT_SCAN_PARAMS.length);
+        inputW.value = String(defaults.width ?? DEFAULT_SCAN_PARAMS.width);
+        inputA.value = String(defaults.angleDeg ?? DEFAULT_SCAN_PARAMS.angleDeg);
+
+        return new Promise(resolve => {
+            let resolved = false;
+
+            function close(value) {
+                if (resolved) return;
+                resolved = true;
+                modal.style.display = "none";
+                btnOk.onclick = null;
+                if (btnCancel) btnCancel.onclick = null;
+                if (btnClose) btnClose.onclick = null;
+                modal.onclick = null;
+                resolve(value);
+            }
+
+            btnOk.onclick = function () {
+                const params = {
+                    length: clampNumber(inputL.value, 0.2, 50, DEFAULT_SCAN_PARAMS.length),
+                    width: clampNumber(inputW.value, 0.2, 20, DEFAULT_SCAN_PARAMS.width),
+                    angleDeg: clampNumber(inputA.value, 5, 85, DEFAULT_SCAN_PARAMS.angleDeg)
+                };
+                DEFAULT_SCAN_PARAMS.length = params.length;
+                DEFAULT_SCAN_PARAMS.width = params.width;
+                DEFAULT_SCAN_PARAMS.angleDeg = params.angleDeg;
+                close(params);
+            };
+
+            if (btnCancel) btnCancel.onclick = () => close(null);
+            if (btnClose) btnClose.onclick = () => close(null);
+            modal.onclick = function (e) {
+                if (e.target === modal) close(null);
+            };
+
+            modal.style.display = "flex";
+            setTimeout(() => inputL.focus(), 30);
+        });
+    }
+
+    function getCableSlamYawAtFault(faultPos) {
+        if (!faultPos || !window.savedCablePath || window.savedCablePath.length < 2) {
+            return 0.0;
+        }
+
+        let bestYaw = 0.0;
+        let minDist = Infinity;
+        const fp = new THREE.Vector3(Number(faultPos.x), Number(faultPos.y), Number(faultPos.z ?? 0));
+
+        for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+            const p1 = window.savedCablePath[i];
+            const p2 = window.savedCablePath[i + 1];
+            const a = new THREE.Vector3(Number(p1.x), Number(p1.y), Number(p1.z ?? 0));
+            const b = new THREE.Vector3(Number(p2.x), Number(p2.y), Number(p2.z ?? 0));
+            const ab = new THREE.Vector3().subVectors(b, a);
+            const lenSq = ab.lengthSq();
+            if (lenSq < 1e-8) continue;
+
+            const t = Math.max(0, Math.min(1, new THREE.Vector3().subVectors(fp, a).dot(ab) / lenSq));
+            const proj = a.clone().add(ab.multiplyScalar(t));
+            const dist = fp.distanceTo(proj);
+
+            if (dist < minDist) {
+                minDist = dist;
+                bestYaw = Math.atan2(Number(p2.y) - Number(p1.y), Number(p2.x) - Number(p1.x));
+            }
+        }
+
+        return normalizeRad(bestYaw);
+    }
+
+    function slamYawToGeoYawRad(slamYaw) {
+        // SLAM 数学角：0=局部X正向；headingOffset 转为真实 ENU 数学角：0=东，90=北；
+        // 履带车 RTK 航向角约定：0=北，90=东，因此用 PI/2 - mathYaw 转换。
+        const mathGlobalYaw = normalizeRad(slamYaw + (window.headingOffset || 0));
+        return normalizeRad((Math.PI / 2) - mathGlobalYaw);
+    }
+
+    function localScanPointToSlam(center, slamYaw, lx, ly, z = 0.10) {
+        const cos = Math.cos(slamYaw);
+        const sin = Math.sin(slamYaw);
+        return {
+            x: Number(center.x) + lx * cos - ly * sin,
+            y: Number(center.y) + lx * sin + ly * cos,
+            z: Number(center.z ?? z)
+        };
+    }
+
+    function generateLocalZigzagPoints(length, width, angleDeg) {
+        const L = Math.max(0.2, Number(length));
+        const W = Math.max(0.2, Number(width));
+        const safeAngle = clampNumber(angleDeg, 5, 85, DEFAULT_SCAN_PARAMS.angleDeg);
+        const dxStep = Math.max(0.05, W * Math.tan(safeAngle * Math.PI / 180));
+        const endX = L / 2;
+
+        let x = -L / 2;
+        let y = W / 2;
+        let direction = -1;
+        const points = [{ x, y }];
+
+        while (x < endX - 1e-9 && points.length < 1000) {
+            const targetY = direction === -1 ? -W / 2 : W / 2;
+            const rawNextX = x + dxStep;
+
+            if (rawNextX >= endX) {
+                const ratio = (endX - x) / Math.max(rawNextX - x, 1e-9);
+                const clippedY = y + (targetY - y) * ratio;
+                points.push({ x: endX, y: clippedY });
+                break;
+            }
+
+            points.push({ x: rawNextX, y: targetY });
+            x = rawNextX;
+            y = targetY;
+            direction *= -1;
+        }
+
+        return points;
+    }
+
+    function buildUpperComputerScanPlan(faultSlamPos, params) {
+        const centerGps = window.slamToGps(faultSlamPos.x, faultSlamPos.y);
+        if (!centerGps) {
+            throw new Error("GPS 尚未标定完成，无法将扫描路径转换为经纬度。");
+        }
+
+        const slamYaw = getCableSlamYawAtFault(faultSlamPos);
+        const geoYawRad = slamYawToGeoYawRad(slamYaw);
+        const localZigzag = generateLocalZigzagPoints(params.length, params.width, params.angleDeg);
+
+        const rectangleLocal = [
+            { x: -params.length / 2, y: params.width / 2 },
+            { x: params.length / 2, y: params.width / 2 },
+            { x: params.length / 2, y: -params.width / 2 },
+            { x: -params.length / 2, y: -params.width / 2 },
+            { x: -params.length / 2, y: params.width / 2 }
+        ];
+
+        const zigzagSlam = localZigzag.map(p => localScanPointToSlam(faultSlamPos, slamYaw, p.x, p.y));
+        const rectangleSlam = rectangleLocal.map(p => localScanPointToSlam(faultSlamPos, slamYaw, p.x, p.y));
+
+        const waypoints = zigzagSlam.map((p, idx) => {
+            const gps = window.slamToGps(p.x, p.y);
+            if (!gps) throw new Error("GPS 标定失效，无法转换第 " + (idx + 1) + " 个航点。");
+            return {
+                seq: idx + 1,
+                lat: Number(gps.lat.toFixed(8)),
+                lon: Number(gps.lon.toFixed(8)),
+                x: Number(p.x.toFixed(4)),
+                y: Number(p.y.toFixed(4))
+            };
+        });
+
+        return {
+            type: "scan_path",
+            taskId: "scan_" + Date.now(),
+            center: {
+                lat: Number(centerGps.lat.toFixed(8)),
+                lon: Number(centerGps.lon.toFixed(8)),
+                x: Number(faultSlamPos.x.toFixed(4)),
+                y: Number(faultSlamPos.y.toFixed(4)),
+                z: Number((faultSlamPos.z ?? 0.10).toFixed(4)),
+                yawRad: Number(geoYawRad.toFixed(6)),
+                yawDeg: Number((geoYawRad * 180 / Math.PI).toFixed(3)),
+                slamYawRad: Number(slamYaw.toFixed(6))
+            },
+            params: {
+                length: Number(params.length),
+                width: Number(params.width),
+                angleDeg: Number(params.angleDeg)
+            },
+            waypoints,
+            preview: {
+                rectangleSlam,
+                zigzagSlam
+            }
+        };
+    }
+
+    function clearGprScanPlanOverlay() {
+        if (window.gprScene && window.gprScanPlanGroup) {
+            window.gprScene.remove(window.gprScanPlanGroup);
+            disposeThreeObjectForReuse(window.gprScanPlanGroup);
+        }
+        window.gprScanPlanGroup = null;
+    }
+
+    function makeGprDashedLine(points, color, name) {
+        const geom = new THREE.BufferGeometry().setFromPoints(points.map(slamPointToGprVector));
+        const mat = new THREE.LineDashedMaterial({
+            color,
+            dashSize: 0.18,
+            gapSize: 0.12,
+            linewidth: 2,
+            depthTest: false
+        });
+        const line = new THREE.Line(geom, mat);
+        line.name = name;
+        line.computeLineDistances();
+        line.renderOrder = 20;
+        line.frustumCulled = false;
+        return line;
+    }
+
+    function addGprTextSprite(text, slamPoint) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 256;
+        canvas.height = 96;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.font = "bold 28px Microsoft YaHei, Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#ffffff";
+        ctx.shadowColor = "#00e5ff";
+        ctx.shadowBlur = 10;
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false
+        }));
+        const pos = slamPointToGprVector(slamPoint);
+        sprite.position.set(pos.x, pos.y + 0.35, pos.z);
+        sprite.scale.set(1.8, 0.68, 1);
+        sprite.renderOrder = 25;
+        return sprite;
+    }
+
+    function renderScanPlanOnGpr(plan) {
+        if (!plan || !plan.preview) return;
+        ensureStandaloneGprSceneForMap();
+
+        // 如果三维重建页还没加载当前点云地图，自动加载一次，保证矩形和 Z 字路线显示在同一地图中。
+        if (!window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
+            try {
+                loadCurrentPathFaultMapToGpr();
+            } catch (e) {
+                console.warn("⚠️ 自动加载当前点云地图失败，仅绘制扫描路径预览：", e);
+            }
+        }
+
+        clearGprScanPlanOverlay();
+
+        const group = new THREE.Group();
+        group.name = "上位机规划扫描范围与Z字路径";
+
+        const rect = makeGprDashedLine(plan.preview.rectangleSlam, 0x00e5ff, "扫描矩形范围");
+        const zigzag = makeGprDashedLine(plan.preview.zigzagSlam, 0xffa500, "Z字形扫描路径");
+        group.add(rect);
+        group.add(zigzag);
+
+        if (plan.preview.zigzagSlam.length > 0) {
+            group.add(addGprTextSprite("起点", plan.preview.zigzagSlam[0]));
+            group.add(addGprTextSprite("终点", plan.preview.zigzagSlam[plan.preview.zigzagSlam.length - 1]));
+        }
+
+        window.gprScene.add(group);
+        window.gprScanPlanGroup = group;
+
+        const box = new THREE.Box3().setFromObject(group);
+        if (box && !box.isEmpty()) {
+            updateGprCameraByBox(box);
+        }
+    }
+
+    async function sendScanPlanToCrawler(plan) {
+        const payload = {
+            type: "scan_path",
+            taskId: plan.taskId,
+            center: plan.center,
+            params: plan.params,
+            waypoints: plan.waypoints
+        };
+
+        const res = await fetch("/api/car/scan-path", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        const text = await res.text();
+        if (!res.ok || !/^success/i.test(text.trim())) {
+            throw new Error("后端返回：" + text);
+        }
+        return text;
+    }
+
+
+    // ==========================================
     // ✅ 新增：精确计算滑块 Thumb 实时偏移量的浮动标签函数
     // ==========================================
     window.updateFloatingThumb = function (inputEl, labelId) {
@@ -7370,72 +7710,62 @@
         base.addEventListener('pointerup', handlePointerUp);
         base.addEventListener('pointercancel', handlePointerUp);
         // ==========================================
-        // 新增：发送破损点数据给小车
+        // 修改：点击后先弹出扫描范围参数设置，再由上位机规划矩形范围与 Z 字形路径，最后发送完整航点给小车
         // ==========================================
         const btnSendFault = document.getElementById('btnSendFaultToCar');
         if (btnSendFault) {
-            btnSendFault.addEventListener('click', function () {
-                // 1. 状态校验
-                if (!window.lastFaultCablePos) {
-                    alert("⚠️ 尚未检测到有效破损点，无法发送！");
-                    return;
-                }
-                if (!window.isGpsCalibrated || !window.gpsAnchor) {
-                    alert("⚠️ GPS 尚未标定完成，无法计算真实经纬度！\n(可按 Shift+C 触发室内虚拟标定)");
-                    return;
-                }
-
-                // 2. 坐标转换 (SLAM -> GPS)
-                const faultGps = window.slamToGps(window.lastFaultCablePos.x, window.lastFaultCablePos.y);
-                if (!faultGps) return;
-
-                // 3. ✅ 计算整体朝向 (Yaw) 并适配地理坐标系
-                let geoGlobalYaw = 0.0; // 最终发给小车的地理角度
-                if (window.savedCablePath && window.savedCablePath.length > 1) {
-                    const pStart = window.savedCablePath[0];
-                    const pEnd = window.savedCablePath[window.savedCablePath.length - 1];
-
-                    const dx = pEnd.x - pStart.x;
-                    const dy = pEnd.y - pStart.y;
-                    const slamYaw = Math.atan2(dy, dx);
-
-                    // mathGlobalYaw 是数学坐标系下的角度 (0=东, 90=北)
-                    let mathGlobalYaw = slamYaw + window.headingOffset;
-
-                    // 🌟 核心修复：将 数学角度 转换回 地理导航角度 (0=北, 90=东)
-                    // 公式: Geo = 90度 - Math (弧度制下为 PI/2 - Math)
-                    geoGlobalYaw = (Math.PI / 2) - mathGlobalYaw;
-
-                    // 规范化角度到 -PI 到 PI 之间 (防止超过 180度 或低于 -180度)
-                    while (geoGlobalYaw > Math.PI) geoGlobalYaw -= 2 * Math.PI;
-                    while (geoGlobalYaw < -Math.PI) geoGlobalYaw += 2 * Math.PI;
-                }
-
-                // 4. ✅ 发送给 Java 后端，经纬度保留小数点后 8 位，使用地理角度
-                const url = `/api/car/target?lat=${faultGps.lat.toFixed(8)}&lon=${faultGps.lon.toFixed(8)}&yaw=${geoGlobalYaw.toFixed(4)}`;
-
+            btnSendFault.addEventListener('click', async function () {
                 const originText = btnSendFault.innerText;
-                btnSendFault.innerText = "⏳ 发送中...";
-                btnSendFault.disabled = true;
 
-                fetch(url)
-                    .then(res => res.text())
-                    .then(msg => {
-                        console.log(`📍 破损点下发成功: Lat=${faultGps.lat.toFixed(8)}, Lon=${faultGps.lon.toFixed(8)}, Yaw(Geo)=${geoGlobalYaw.toFixed(4)} rad`);
-                        btnSendFault.innerText = "✅ 发送成功";
-                        setTimeout(() => {
-                            btnSendFault.innerText = originText;
-                            btnSendFault.disabled = false;
-                        }, 2000);
-                    })
-                    .catch(err => {
-                        console.error("⚠️ 目标发送失败:", err);
-                        btnSendFault.innerText = "❌ 发送失败";
-                        setTimeout(() => {
-                            btnSendFault.innerText = originText;
-                            btnSendFault.disabled = false;
-                        }, 2000);
-                    });
+                try {
+                    // 1. 先弹出参数设置页面。
+                    //    这样即使当前上位机还没有破损点/电缆路径/GPS 标定数据，也可以预览弹窗显示效果。
+                    const params = await openScanParamModal(DEFAULT_SCAN_PARAMS);
+                    if (!params) return;
+
+                    // 2. 点击“确定”后，再进行有效数据校验。
+                    if (!window.lastFaultCablePos) {
+                        alert("⚠️ 尚未检测到有效破损点，无法发送！");
+                        return;
+                    }
+                    if (!window.isGpsCalibrated || !window.gpsAnchor) {
+                        alert("⚠️ GPS 尚未标定完成，无法计算真实经纬度！\n(可按 Shift+C 触发室内虚拟标定)");
+                        return;
+                    }
+                    if (!window.savedCablePath || window.savedCablePath.length < 2) {
+                        alert("⚠️ 尚未形成有效电缆路径，无法确定扫描矩形方向！");
+                        return;
+                    }
+
+                    btnSendFault.innerText = "⏳ 规划中...";
+                    btnSendFault.disabled = true;
+
+                    // 3. 上位机基于破损点、局部电缆切向和参数生成扫描路径
+                    const plan = buildUpperComputerScanPlan(window.lastFaultCablePos, params);
+
+                    // 4. 在三维重建页点云地图中绘制矩形范围和 Z 字形路径虚线
+                    renderScanPlanOnGpr(plan);
+
+                    btnSendFault.innerText = "⏳ 发送路径...";
+
+                    // 5. 发送完整航点给履带小车；小车不再自行规划扫描路径
+                    await sendScanPlanToCrawler(plan);
+
+                    console.log("📍 上位机规划扫描路径已下发：", plan);
+                    btnSendFault.innerText = `✅ 已发送${plan.waypoints.length}个航点`;
+                    setStatus(`✅ 已规划并下发履带小车扫描路径：L=${params.length}m，W=${params.width}m，夹角=${params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
+
+                } catch (err) {
+                    console.error("⚠️ 扫描路径规划或发送失败:", err);
+                    alert("❌ 扫描路径规划或发送失败：" + err.message);
+                    btnSendFault.innerText = "❌ 发送失败";
+                    setStatus("扫描路径规划或发送失败：" + err.message, "error");
+                } finally {
+                    setTimeout(() => {
+                        btnSendFault.innerText = originText;
+                        btnSendFault.disabled = false;
+                    }, 2000);
+                }
             });
         }
     })();

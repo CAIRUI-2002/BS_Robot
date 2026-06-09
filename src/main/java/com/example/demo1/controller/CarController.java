@@ -3,12 +3,17 @@ package com.example.demo1.controller;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -29,6 +34,7 @@ public class CarController {
 
     private DatagramSocket udpSocket;
     private InetAddress carAddress;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @PostConstruct
     public void init() {
@@ -99,4 +105,31 @@ public class CarController {
             return "error";
         }
     }
+
+    /**
+     * 新增：接收前端已经规划好的扫描路径并下发给履带小车。
+     * 履带小车只负责按 waypoints 执行导航、扫描和 GPR 数据采集，不再自行生成 Z 字形路径。
+     * API 路径: POST /api/car/scan-path
+     */
+    @PostMapping("/scan-path")
+    public String sendScanPath(@RequestBody Map<String, Object> body) {
+        if (udpSocket == null || carAddress == null) {
+            return "error: udp socket not initialized";
+        }
+
+        try {
+            body.put("type", "scan_path");
+            byte[] sendData = objectMapper.writeValueAsBytes(body);
+
+            DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, carAddress, carPort);
+            udpSocket.send(sendPacket);
+
+            System.out.println("🧭 已转发上位机规划扫描路径至履带车，UDP字节数=" + sendData.length);
+            return "success";
+        } catch (Exception e) {
+            System.err.println("⚠️ UDP 扫描路径下发失败: " + e.getMessage());
+            return "error: " + e.getMessage();
+        }
+    }
+
 }

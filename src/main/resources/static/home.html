@@ -716,6 +716,42 @@
         </div>
     </div>
 
+
+    <!-- 履带小车扫描范围参数设置弹窗：点击“发送破损点坐标”后弹出 -->
+    <div id="scanParamModal" class="cyber-modal-overlay scan-param-overlay" style="display: none;">
+        <div class="cyber-modal-content scan-param-content pointer-auto">
+            <div class="cyber-modal-header">
+                <span>🧭 履带小车扫描范围参数设置</span>
+                <button id="btnScanParamClose" class="close-btn">×</button>
+            </div>
+            <div class="cyber-modal-body scan-param-body">
+                <div class="scan-param-desc">
+                    设置完成后，上位机会在破损点周围生成矩形扫描范围和 Z 字形扫描路径，并将规划好的 GPS 航点发送给履带小车。
+                </div>
+
+                <label class="scan-param-row">
+                    <span>矩形长度 L（米）</span>
+                    <input id="scanRectLengthInput" type="number" min="0.2" max="50" step="0.1" value="2.2" />
+                </label>
+
+                <label class="scan-param-row">
+                    <span>矩形宽度 W（米）</span>
+                    <input id="scanRectWidthInput" type="number" min="0.2" max="20" step="0.1" value="1.2" />
+                </label>
+
+                <label class="scan-param-row">
+                    <span>Z 字折线与矩形短边夹角（度）</span>
+                    <input id="scanZAngleInput" type="number" min="5" max="85" step="1" value="30" />
+                </label>
+
+                <div class="scan-param-actions">
+                    <button id="btnScanParamCancel" class="scan-param-btn secondary">取消</button>
+                    <button id="btnScanParamConfirm" class="scan-param-btn primary">确定并规划</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div id="captureImageModal" class="cyber-modal-overlay non-blocking-overlay" style="display: none;">
         <div class="cyber-modal-content capture-modal-content pointer-auto">
             <div class="cyber-modal-header">

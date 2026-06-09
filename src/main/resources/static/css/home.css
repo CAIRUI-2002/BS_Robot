@@ -3723,3 +3723,97 @@ input[type="range"]::-webkit-slider-thumb {
     border-color: #18a058 !important;
     box-shadow: 0 0 10px rgba(24, 160, 88, 0.65);
 }
+
+/* ==========================================
+   履带小车扫描范围参数弹窗
+   ========================================== */
+.scan-param-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 3000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 8, 18, 0.58);
+    backdrop-filter: blur(2px);
+}
+
+.scan-param-content {
+    width: 430px;
+    max-width: calc(100vw - 32px);
+    background: rgba(4, 26, 50, 0.96);
+    border: 1px solid rgba(0, 229, 255, 0.72);
+    border-radius: 8px;
+    box-shadow: 0 0 24px rgba(0, 180, 255, 0.45), inset 0 0 18px rgba(0, 120, 255, 0.18);
+}
+
+.scan-param-body {
+    padding: 16px 18px 18px;
+}
+
+.scan-param-desc {
+    margin-bottom: 14px;
+    color: #a8e0ff;
+    font-size: 13px;
+    line-height: 1.65;
+}
+
+.scan-param-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin: 10px 0;
+    color: #eaf6ff;
+    font-size: 14px;
+}
+
+.scan-param-row input {
+    width: 120px;
+    height: 30px;
+    padding: 0 8px;
+    box-sizing: border-box;
+    color: #eaf6ff;
+    background: rgba(0, 12, 26, 0.88);
+    border: 1px solid rgba(120, 200, 255, 0.62);
+    border-radius: 4px;
+    outline: none;
+}
+
+.scan-param-row input:focus {
+    border-color: #00e5ff;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.45);
+}
+
+.scan-param-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.scan-param-btn {
+    min-width: 96px;
+    height: 32px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+.scan-param-btn.secondary {
+    color: #bfeaff;
+    background: rgba(4, 38, 70, 0.85);
+    border: 1px solid rgba(120, 200, 255, 0.55);
+}
+
+.scan-param-btn.primary {
+    color: #ffffff;
+    background: linear-gradient(180deg, #e6a23c, #d35400);
+    border: 1px solid #e6a23c;
+    box-shadow: 0 0 10px rgba(230, 162, 60, 0.42);
+}
+
+.scan-param-btn:hover {
+    filter: brightness(1.08);
+}
