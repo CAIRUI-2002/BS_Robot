@@ -3975,6 +3975,8 @@
 
         const ctx = canvas.getContext("2d");
         const Y_MAX = 4096; // ADC 12-bit
+        const EM_BASELINE = 2048;             // 电磁信号 ADC 中心基线
+        const EM_VISUAL_THRESHOLD_LIMIT = 1000; // 阈值虚线最大视觉位移：超过 1000 后虚线固定，改为压缩纵轴
 
         // --- 1. 数据存储 (保留双通道) ---
         let channel1Data = []; // 磁信号 (用于绘图)
@@ -4135,48 +4137,14 @@
             ctx.lineWidth = 1;
             ctx.beginPath(); ctx.moveTo(0, halfH); ctx.lineTo(w, halfH); ctx.stroke();
 
-            // ✅ 绘制 Ch1 (磁信号)
+            // ✅ 绘制 Ch1 (电磁信号)
             if (channel1Data && channel1Data.length > 0) {
-                drawChannel(channel1Data, 0, halfH, "#00ccff");
+                // 当电磁阈值 > 1000 时，仅压缩电磁信号纵轴；声信号保持原有显示方式。
+                drawChannel(channel1Data, 0, halfH, "#00ccff", {
+                    compressByPulseThreshold: true
+                });
 
-                // 👇 新增：绘制脉冲阈值上下限虚线刻度 (高亮增强版)
-                try {
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.setLineDash([5, 5]); // 虚线样式，间隔变大一点更清晰
-                    ctx.lineWidth = 1.5;     // 线条稍微加粗
-                    ctx.strokeStyle = "rgba(255, 165, 0, 0.9)"; // 亮橙色半透明边框
-
-                    const Y_MAX = 4096;
-                    const baseline = 2048; // 信号基线
-                    const threshold = AUC_CONFIG.PULSE_THRESHOLD;
-
-                    // 计算 Y 坐标
-                    const yTop = Math.round(halfH - ((baseline + threshold) / Y_MAX) * halfH);
-                    const yBottom = Math.round(halfH - ((baseline - threshold) / Y_MAX) * halfH);
-
-                    // 画上阈值线 (+界限)
-                    ctx.moveTo(0, yTop);
-                    ctx.lineTo(w, yTop);
-                    // 画下阈值线 (-界限)
-                    ctx.moveTo(0, yBottom);
-                    ctx.lineTo(w, yBottom);
-                    ctx.stroke();
-
-                    // 绘制数值文本
-                    ctx.fillStyle = "#FFA500";   // 纯橙色文字，更加醒目
-                    ctx.font = "bold 12px Consolas, monospace"; // 加粗等宽字体
-                    ctx.textAlign = "right";
-
-                    // 文字稍微偏移一点防止被虚线直接穿过，影响阅读
-                    ctx.fillText(`+${threshold}`, w - 10, yTop - 6);
-                    ctx.fillText(`-${threshold}`, w - 10, yBottom + 14);
-
-                    ctx.restore();
-                } catch (e) {
-                    console.error("阈值刻度绘制失败:", e);
-                }
-                // 👆 新增结束
+                drawPulseThresholdLines(0, halfH);
             }
 
             // ✅ 绘制 Ch2 (声信号 - 保持不变)
@@ -4241,8 +4209,90 @@
             ctx.fillText(`声波FFT: ${FFT_CONFIG.FREQ_MIN} - ${FFT_CONFIG.FREQ_MAX} Hz`, 5, topY + 15);
         }
 
-        // 通用单通道绘图函数 (✅ 保持不变)
-        function drawChannel(data, topY, height, color) {
+        // 获取电磁信号显示压缩比例：
+        // 阈值 <=1000：比例为 1，保持原始显示；
+        // 阈值 >1000：把真实电磁偏移按 1000 / 当前阈值压缩，让阈值虚线固定在 1000 的位置。
+        function getElectromagneticVisualScale() {
+            const threshold = Math.max(0, Number(AUC_CONFIG.PULSE_THRESHOLD) || 0);
+            if (threshold <= EM_VISUAL_THRESHOLD_LIMIT) {
+                return 1.0;
+            }
+            return EM_VISUAL_THRESHOLD_LIMIT / threshold;
+        }
+
+        function getDisplayedElectromagneticValue(rawValue) {
+            const scale = getElectromagneticVisualScale();
+            let val = Number(rawValue);
+
+            if (!Number.isFinite(val)) {
+                val = EM_BASELINE;
+            }
+
+            // 围绕 2048 基线压缩，而不是简单整体除以比例，避免基线漂移。
+            val = EM_BASELINE + (val - EM_BASELINE) * scale;
+
+            if (val > Y_MAX) val = Y_MAX;
+            if (val < 0) val = 0;
+            return val;
+        }
+
+        function valueToY(value, topY, height) {
+            let val = Number(value);
+            if (!Number.isFinite(val)) val = EM_BASELINE;
+            if (val > Y_MAX) val = Y_MAX;
+            if (val < 0) val = 0;
+
+            const normalized = val / Y_MAX;
+            return topY + (height - (normalized * height));
+        }
+
+        function drawPulseThresholdLines(topY, height) {
+            try {
+                ctx.save();
+                ctx.beginPath();
+                ctx.setLineDash([5, 5]);
+                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = "rgba(255, 165, 0, 0.9)";
+
+                const threshold = Math.max(0, Number(AUC_CONFIG.PULSE_THRESHOLD) || 0);
+                const lineThreshold = Math.min(threshold, EM_VISUAL_THRESHOLD_LIMIT);
+
+                // 阈值 <=1000：虚线跟随真实阈值；
+                // 阈值 >1000：虚线固定在 ±1000 的视觉位置。
+                const yTop = Math.round(valueToY(EM_BASELINE + lineThreshold, topY, height));
+                const yBottom = Math.round(valueToY(EM_BASELINE - lineThreshold, topY, height));
+
+                ctx.moveTo(0, yTop);
+                ctx.lineTo(canvas.width, yTop);
+                ctx.moveTo(0, yBottom);
+                ctx.lineTo(canvas.width, yBottom);
+                ctx.stroke();
+
+                ctx.setLineDash([]);
+                ctx.fillStyle = "#FFA500";
+                ctx.font = "bold 12px Consolas, monospace";
+                ctx.textAlign = "right";
+
+                // 文字仍显示真实阈值，便于现场确认当前算法判定阈值。
+                ctx.fillText(`+${threshold}`, canvas.width - 10, yTop - 6);
+                ctx.fillText(`-${threshold}`, canvas.width - 10, yBottom + 14);
+
+                if (threshold > EM_VISUAL_THRESHOLD_LIMIT) {
+                    const scale = getElectromagneticVisualScale();
+                    ctx.textAlign = "left";
+                    ctx.fillStyle = "rgba(255, 210, 90, 0.95)";
+                    ctx.font = "bold 11px Microsoft YaHei, Consolas, monospace";
+                    ctx.fillText(`电磁纵轴压缩 ×${scale.toFixed(2)}`, 8, topY + 34);
+                }
+
+                ctx.restore();
+            } catch (e) {
+                console.error("阈值刻度绘制失败:", e);
+            }
+        }
+
+        // 通用单通道绘图函数
+        function drawChannel(data, topY, height, color, options = {}) {
             ctx.strokeStyle = color;
             ctx.lineWidth = 1.5;
             ctx.beginPath();
@@ -4253,11 +4303,15 @@
             for (let i = 0; i < len; i++) {
                 const x = (i / len) * w;
                 let val = data[i];
-                if (val > Y_MAX) val = Y_MAX;
-                if (val < 0) val = 0;
 
-                const normalized = val / Y_MAX;
-                const y = topY + (height - (normalized * height));
+                if (options.compressByPulseThreshold) {
+                    val = getDisplayedElectromagneticValue(val);
+                } else {
+                    if (val > Y_MAX) val = Y_MAX;
+                    if (val < 0) val = 0;
+                }
+
+                const y = valueToY(val, topY, height);
 
                 if (i === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);

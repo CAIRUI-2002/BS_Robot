@@ -17,7 +17,7 @@ public class PipelineController {
     private VirtualGamepadService gamepadService;
 
     /**
-     * ✅ 树莓派调用的接口
+     * ✅ 调用的接口
      * URL: http://<电脑IP>:8080/api/pipeline/update?signal=1&depth=15
      */
     @GetMapping("/update")
