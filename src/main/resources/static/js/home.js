@@ -441,10 +441,13 @@
     }
 
     function slamPointToGprVector(pt) {
+        // 路径页坐标：X/Y 为水平面，Z 为高度。
+        // 三维重建页坐标：X/Z 为水平面，Y 为高度。
+        // 注意：单纯 (x, z, y) 会改变坐标系手性，表现为镜像；这里使用 -y 保持方向一致。
         return new THREE.Vector3(
             Number(pt.x || 0),
             Number(pt.z ?? 0.08),
-            Number(pt.y || 0)
+            -Number(pt.y || 0)
         );
     }
 
@@ -843,36 +846,56 @@
         };
     }
 
-    function generateLocalZigzagPoints(length, width, angleDeg) {
+    function generateLocalZigzagPlan(length, width, angleDeg) {
         const L = Math.max(0.2, Number(length));
         const W = Math.max(0.2, Number(width));
         const safeAngle = clampNumber(angleDeg, 5, 85, DEFAULT_SCAN_PARAMS.angleDeg);
         const dxStep = Math.max(0.05, W * Math.tan(safeAngle * Math.PI / 180));
-        const endX = L / 2;
 
-        let x = -L / 2;
+        // 原始矩形的起点和终点。后续只允许向前方自动延长终点，不改变起点位置，
+        // 避免破损点附近的扫描起始位置被整体平移。
+        const startX = -L / 2;
+        const requestedEndX = L / 2;
+
+        let x = startX;
         let y = W / 2;
         let direction = -1;
         const points = [{ x, y }];
 
-        while (x < endX - 1e-9 && points.length < 1000) {
+        // ✅ 优化点：不再把最后一条斜线裁剪到原始矩形终点。
+        // 当下一条完整 Z 字斜线会超过原始矩形长度时，直接让它完整走到对侧边，
+        // 并把矩形终点同步延长到这条完整斜线的末端。
+        while (points.length < 1000) {
             const targetY = direction === -1 ? -W / 2 : W / 2;
-            const rawNextX = x + dxStep;
+            const nextX = x + dxStep;
 
-            if (rawNextX >= endX) {
-                const ratio = (endX - x) / Math.max(rawNextX - x, 1e-9);
-                const clippedY = y + (targetY - y) * ratio;
-                points.push({ x: endX, y: clippedY });
-                break;
-            }
+            points.push({ x: nextX, y: targetY });
 
-            points.push({ x: rawNextX, y: targetY });
-            x = rawNextX;
+            x = nextX;
             y = targetY;
             direction *= -1;
+
+            if (x >= requestedEndX - 1e-9) {
+                break;
+            }
         }
 
-        return points;
+        const endX = Math.max(requestedEndX, x);
+        const effectiveLength = endX - startX;
+        const extensionLength = Math.max(0, endX - requestedEndX);
+
+        return {
+            points,
+            startX,
+            endX,
+            width: W,
+            requestedLength: L,
+            effectiveLength,
+            extensionLength,
+            dxStep,
+            angleDeg: safeAngle,
+            autoExtended: extensionLength > 1e-6
+        };
     }
 
     function buildUpperComputerScanPlan(faultSlamPos, params) {
@@ -883,14 +906,15 @@
 
         const slamYaw = getCableSlamYawAtFault(faultSlamPos);
         const geoYawRad = slamYawToGeoYawRad(slamYaw);
-        const localZigzag = generateLocalZigzagPoints(params.length, params.width, params.angleDeg);
+        const zigzagPlan = generateLocalZigzagPlan(params.length, params.width, params.angleDeg);
+        const localZigzag = zigzagPlan.points;
 
         const rectangleLocal = [
-            { x: -params.length / 2, y: params.width / 2 },
-            { x: params.length / 2, y: params.width / 2 },
-            { x: params.length / 2, y: -params.width / 2 },
-            { x: -params.length / 2, y: -params.width / 2 },
-            { x: -params.length / 2, y: params.width / 2 }
+            { x: zigzagPlan.startX, y: zigzagPlan.width / 2 },
+            { x: zigzagPlan.endX, y: zigzagPlan.width / 2 },
+            { x: zigzagPlan.endX, y: -zigzagPlan.width / 2 },
+            { x: zigzagPlan.startX, y: -zigzagPlan.width / 2 },
+            { x: zigzagPlan.startX, y: zigzagPlan.width / 2 }
         ];
 
         const zigzagSlam = localZigzag.map(p => localScanPointToSlam(faultSlamPos, slamYaw, p.x, p.y));
@@ -922,9 +946,15 @@
                 slamYawRad: Number(slamYaw.toFixed(6))
             },
             params: {
-                length: Number(params.length),
-                width: Number(params.width),
-                angleDeg: Number(params.angleDeg)
+                // length 为最终实际扫描矩形长度；requestedLength 为弹窗中用户输入的原始长度。
+                // 当最后一条 Z 字路线需要越过原始矩形边界才能画完整时，length 会自动延长。
+                length: Number(zigzagPlan.effectiveLength.toFixed(4)),
+                requestedLength: Number(zigzagPlan.requestedLength.toFixed(4)),
+                extensionLength: Number(zigzagPlan.extensionLength.toFixed(4)),
+                autoExtended: zigzagPlan.autoExtended,
+                width: Number(zigzagPlan.width.toFixed(4)),
+                angleDeg: Number(zigzagPlan.angleDeg.toFixed(3)),
+                stepX: Number(zigzagPlan.dxStep.toFixed(4))
             },
             waypoints,
             preview: {
@@ -2970,6 +3000,10 @@
         const spanY = bounds.maxY - bounds.minY;
         const span = Math.max(spanX, spanZ, spanY) || 1.0;
 
+        // 相机控制范围。默认跟随 GPR 剖面尺寸；当加载当前点云地图后，
+        // 由 gprSetViewToBox 更新为点云/电缆/破损点整体包围盒尺寸，避免拖拽和缩放被小剖面限制。
+        let controlSpan = span;
+
         let radius = span * 2.0;
         let theta = Math.PI / 4; // 绕 Y 轴
         let phi = Math.PI / 4;   // 仰角
@@ -2989,7 +3023,8 @@
             box.getCenter(center);
             box.getSize(size);
             const newSpan = Math.max(size.x, size.y, size.z, 1.0);
-            radius = Math.max(newSpan * 1.8, span * 0.8, 3.0);
+            controlSpan = newSpan;
+            radius = Math.max(newSpan * 1.8, 3.0);
             theta = Math.PI / 4;
             phi = Math.PI / 4;
             updateCamera();
@@ -3009,7 +3044,7 @@
             if (e.button === 0) {           // 左键旋转
                 isRotating = true;
                 isPanning = false;
-            } else if (e.button === 1) {    // 中键平移
+            } else if (e.button === 1 || e.button === 2) {    // 中键/右键平移
                 isPanning = true;
                 isRotating = false;
             } else {
@@ -3037,7 +3072,7 @@
                 phi = Math.max(eps, Math.min(Math.PI - eps, phi));
                 updateCamera();
             } else if (isPanning) {
-                const panSpeed = span * 0.002;
+                const panSpeed = Math.max(controlSpan, radius) * 0.002;
                 const dir = new THREE.Vector3();
                 camera.getWorldDirection(dir);
                 const up = new THREE.Vector3(0, 1, 0);
@@ -3057,7 +3092,7 @@
             e.preventDefault();
             const factor = e.deltaY > 0 ? 1.1 : 0.9;
             radius *= factor;
-            radius = Math.max(span * 0.5, Math.min(span * 5.0, radius));
+            radius = Math.max(controlSpan * 0.05, Math.min(controlSpan * 20.0, radius));
             updateCamera();
         });
 
@@ -4847,6 +4882,105 @@
         }
 
         // ==========================================
+        // ✅ 寻找破损点：以机器狗当前朝向决定电缆搜索方向
+        // 说明：savedCablePath 的绘制顺序可能是 A->B，但现场可以从 B 点朝 A 点开始寻找。
+        // 这里在点击“寻找破损点”瞬间，根据机器狗朝向与最近电缆切向的夹角，自动选择正向或反向搜索。
+        // ==========================================
+        function getClosestPathIndex2D(path, pose) {
+            if (!Array.isArray(path) || path.length === 0) return 0;
+
+            let closestIdx = 0;
+            let minD = Infinity;
+
+            for (let i = 0; i < path.length; i++) {
+                const d = Math.hypot(path[i].x - pose.x, path[i].y - pose.y);
+                if (d < minD) {
+                    minD = d;
+                    closestIdx = i;
+                }
+            }
+
+            return closestIdx;
+        }
+
+        function getPathTangent2D(path, idx) {
+            if (!Array.isArray(path) || path.length < 2) {
+                return { x: 1, y: 0 };
+            }
+
+            const safeIdx = Math.max(0, Math.min(path.length - 1, idx));
+            let prevIdx = safeIdx;
+            let nextIdx = safeIdx;
+
+            // 向前、向后各找一个有效点，避免相邻重复点导致方向向量为 0。
+            while (prevIdx > 0) {
+                const d = Math.hypot(path[safeIdx].x - path[prevIdx - 1].x, path[safeIdx].y - path[prevIdx - 1].y);
+                prevIdx--;
+                if (d > 0.03) break;
+            }
+            while (nextIdx < path.length - 1) {
+                const d = Math.hypot(path[nextIdx + 1].x - path[safeIdx].x, path[nextIdx + 1].y - path[safeIdx].y);
+                nextIdx++;
+                if (d > 0.03) break;
+            }
+
+            let dx = path[nextIdx].x - path[prevIdx].x;
+            let dy = path[nextIdx].y - path[prevIdx].y;
+            let len = Math.hypot(dx, dy);
+
+            if (len < 1e-6) {
+                if (safeIdx < path.length - 1) {
+                    dx = path[safeIdx + 1].x - path[safeIdx].x;
+                    dy = path[safeIdx + 1].y - path[safeIdx].y;
+                } else {
+                    dx = path[safeIdx].x - path[safeIdx - 1].x;
+                    dy = path[safeIdx].y - path[safeIdx - 1].y;
+                }
+                len = Math.hypot(dx, dy);
+            }
+
+            if (len < 1e-6) return { x: 1, y: 0 };
+            return { x: dx / len, y: dy / len };
+        }
+
+        function buildFaultSearchPathByRobotHeading(rawPath, robotPose) {
+            const cleanPath = (rawPath || [])
+                .map(p => ({ x: Number(p.x), y: Number(p.y) }))
+                .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+            if (cleanPath.length < 2) {
+                throw new Error("未检测到有效的电缆路径！请先进行自动巡线生成路径。");
+            }
+
+            const closestIdxInDrawPath = getClosestPathIndex2D(cleanPath, robotPose);
+            const tangent = getPathTangent2D(cleanPath, closestIdxInDrawPath);
+            const robotYaw = Number.isFinite(Number(robotPose.yaw)) ? Number(robotPose.yaw) : 0;
+            const robotForward = {
+                x: Math.cos(robotYaw),
+                y: Math.sin(robotYaw)
+            };
+
+            const headingDot = tangent.x * robotForward.x + tangent.y * robotForward.y;
+            const shouldReverse = headingDot < 0;
+            const pathPoints = shouldReverse ? cleanPath.slice().reverse() : cleanPath.slice();
+            const closestIdxInSearchPath = shouldReverse
+                ? pathPoints.length - 1 - closestIdxInDrawPath
+                : closestIdxInDrawPath;
+
+            console.log(
+                `🧭 [寻找破损点] 当前朝向判定：${shouldReverse ? "反向搜索(B→A)" : "正向搜索(A→B)"}`,
+                `headingDot=${headingDot.toFixed(3)}, closestIdx=${closestIdxInSearchPath}`
+            );
+
+            return {
+                pathPoints,
+                closestIdx: closestIdxInSearchPath,
+                isReversed: shouldReverse,
+                headingDot
+            };
+        }
+
+        // ==========================================
         // 0. 卡尔曼滤波与矩阵运算工具 (移植自 Python)
         // ==========================================
         const KalmanSmoother = {
@@ -5355,11 +5489,12 @@
                     continue;
                 }
 
-                // 路径页世界坐标：X/Y 为水平面，Z 为高度；GPR页：X/Z 为水平面，Y 为高度
+                // 路径页世界坐标：X/Y 为水平面，Z 为高度；GPR页：X/Z 为水平面，Y 为高度。
+                // 这里必须使用 -Y 作为 GPR 页 Z 轴，避免交换 Y/Z 后造成地图镜像。
                 temp.set(x, y, z).applyMatrix4(worldMatrix);
                 positions[j] = temp.x;
                 positions[j + 1] = temp.z;
-                positions[j + 2] = temp.y;
+                positions[j + 2] = -temp.y;
 
                 colors[j] = srcCol[i] ?? 1.0;
                 colors[j + 1] = srcCol[i + 1] ?? 1.0;
@@ -7116,52 +7251,60 @@
                 btnFault.style.color = "#ff4444";
                 btnFault.style.border = "1px solid #ff4444";
 
-                // === 核心算法：计算左右偏移 0.3m 的路径 ===
-                const pathPoints = window.savedCablePath.map(p => ({ x: p.x, y: p.y }));
+                // === 核心算法：以机器狗当前朝向决定寻找破损点的搜索方向 ===
+                // 说明：savedCablePath 的绘制顺序可能是 A->B，但现场可以从 B 点朝 A 点开始。
+                // 因此点击“寻找破损点”的瞬间，不再固定沿绘制方向，而是把机器狗车头朝向的那一侧作为电缆前方。
+                let searchInfo;
+                try {
+                    searchInfo = buildFaultSearchPathByRobotHeading(window.savedCablePath, currentRobotPose);
+                } catch (err) {
+                    alert("⚠️ " + err.message);
+                    stopNav(false);
+                    return;
+                }
+
+                const pathPoints = searchInfo.pathPoints;
                 const n = pathPoints.length;
                 const normals = [];
 
-                // 1. 求出路径上每个点的“向左”法向量
+                // 记录本次寻找方向，后面的红色破损点“单向推进锁”会用它来判断进度。
+                window.faultSearchReverse = searchInfo.isReversed;
+                window.faultSearchHeadingDot = searchInfo.headingDot;
+                window.faultSearchStartClosestIdx = searchInfo.closestIdx;
+
+                // 如果机器狗已经位于当前朝向对应的搜索终点附近，说明前方已经没有可寻找路径。
+                if (searchInfo.closestIdx >= n - 1) {
+                    alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
+                    stopNav(false);
+                    return;
+                }
+
+                // 1. 求出“已按机器狗朝向重排后的路径”上每个点的左法向量。
+                //    如果判定为反向搜索，pathPoints 已经被反转，所以后续所有距离积分和二分定位都会按 B->A 推进。
                 for (let i = 0; i < n; i++) {
-                    let dx, dy;
-                    // 用相邻点作差求切向量
-                    if (i === 0) {
-                        dx = pathPoints[1].x - pathPoints[0].x;
-                        dy = pathPoints[1].y - pathPoints[0].y;
-                    } else if (i === n - 1) {
-                        dx = pathPoints[n - 1].x - pathPoints[n - 2].x;
-                        dy = pathPoints[n - 1].y - pathPoints[n - 2].y;
-                    } else {
-                        dx = pathPoints[i + 1].x - pathPoints[i - 1].x;
-                        dy = pathPoints[i + 1].y - pathPoints[i - 1].y;
-                    }
-                    const len = Math.hypot(dx, dy);
-                    if (len > 0) { dx /= len; dy /= len; }
-
-                    // 将切向量 (dx, dy) 逆时针旋转 90 度得到向左的法向量 (-dy, dx)
-                    normals.push({ nx: -dy, ny: dx });
+                    const tangent = getPathTangent2D(pathPoints, i);
+                    normals.push({ nx: -tangent.y, ny: tangent.x });
                 }
 
-                // 2. 叉乘法：判断机器狗在电缆左侧还是右侧
-                const p0 = pathPoints[0];
-                const pNext = pathPoints[Math.min(5, n - 1)];
-                const dirX = pNext.x - p0.x;
-                const dirY = pNext.y - p0.y;
-                const rx = currentRobotPose.x - p0.x;
-                const ry = currentRobotPose.y - p0.y;
+                // 2. 判断机器狗位于当前搜索方向的左侧还是右侧。
+                //    注意这里不再使用电缆绘制起点 p0，而是使用离机器狗最近的电缆点，避免 B 点反向启动时误判。
+                const nearestCableIdx = Math.max(0, Math.min(n - 1, searchInfo.closestIdx));
+                const nearestCablePoint = pathPoints[nearestCableIdx];
+                const tangentAtRobot = getPathTangent2D(pathPoints, nearestCableIdx);
+                const rx = currentRobotPose.x - nearestCablePoint.x;
+                const ry = currentRobotPose.y - nearestCablePoint.y;
+                const cross = tangentAtRobot.x * ry - tangentAtRobot.y * rx;
 
-                // 计算 2D 叉积
-                const cross = dirX * ry - dirY * rx;
-                let offsetDist = 0.5; // 默认向左偏移 1.5m
+                let offsetDist = 0.5;
                 if (cross < 0) {
-                    offsetDist = -0.5; // 如果叉积小于0，说明在右侧，向右偏移 1.5m
-                    console.log("👉 机器狗位于电缆右侧，生成右侧 1.5m 平行路径");
+                    offsetDist = -0.5;
+                    console.log(`👉 [寻找破损点] 机器狗位于当前搜索方向右侧，生成右侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
                 } else {
-                    console.log("👈 机器狗位于电缆左侧，生成左侧 1.5m 平行路径");
+                    console.log(`👈 [寻找破损点] 机器狗位于当前搜索方向左侧，生成左侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
                 }
 
-                // 3. 生成平行偏移的新路径
-                let offsetPath = []; // ⚠️ 注意：这里将 const 改为 let
+                // 3. 生成平行偏移的新路径。
+                let offsetPath = [];
                 for (let i = 0; i < n; i++) {
                     offsetPath.push({
                         x: pathPoints[i].x + normals[i].nx * offsetDist,
@@ -7169,74 +7312,50 @@
                     });
                 }
 
-                // ===================================================
-                // ✅ [新增] 路径平滑处理 (滑动平均滤波)
-                // 消除法向量计算放大的微小毛刺，让机器狗运动更丝滑
-                // ===================================================
-                const SMOOTH_ITERATIONS = 8; // 平滑迭代次数 (建议值 5~10，越大越平滑)
+                // 4. 路径平滑处理，消除法向量计算放大的微小毛刺，让机器狗运动更丝滑。
+                const SMOOTH_ITERATIONS = 8;
                 for (let iter = 0; iter < SMOOTH_ITERATIONS; iter++) {
-                    let tempPath = [offsetPath[0]]; // 保留起点不动
+                    let tempPath = [offsetPath[0]];
                     for (let i = 1; i < offsetPath.length - 1; i++) {
-                        // 取前后各1个点和当前点，共3个点求重心平均值
                         tempPath.push({
                             x: (offsetPath[i - 1].x + offsetPath[i].x + offsetPath[i + 1].x) / 3.0,
                             y: (offsetPath[i - 1].y + offsetPath[i].y + offsetPath[i + 1].y) / 3.0
                         });
                     }
-                    tempPath.push(offsetPath[offsetPath.length - 1]); // 保留终点不动
+                    tempPath.push(offsetPath[offsetPath.length - 1]);
                     offsetPath = tempPath;
                 }
-                // ===================================================
 
-                window.offsetCablePath = offsetPath; // 存入全局供 TO_START 状态调用
+                window.offsetCablePath = offsetPath; // 存入全局供二分法与步进寻找使用
+                offsetPathDists = [];
 
-                // === 柔性并入逻辑 (以偏移路径为基准) ===
-                const op0 = offsetPath[0];
-                const odirX = offsetPath[Math.min(5, n - 1)].x - op0.x;
-                const odirY = offsetPath[Math.min(5, n - 1)].y - op0.y;
-                const orx = currentRobotPose.x - op0.x;
-                const ory = currentRobotPose.y - op0.y;
+                // === 柔性并入逻辑：从离机器狗最近的位置开始，沿“车头朝向对应的前方”搜索 ===
+                console.log("✅ 启用按车头方向的柔性平行并入 (Heading-Based Flexible Parallel Merge)...");
+                cableTrackingState = 'FOLLOWING';
 
-                const dotProduct = orx * odirX + ory * odirY;
-                const distToStart = Math.hypot(orx, ory);
-
-                const isBehindStart = (dotProduct < -0.1) && (distToStart > 1.0);
-
-                if (isBehindStart) {
-                    console.log("🚀 位于偏移路径起点后方，A* 导航至平行起点...");
-                    cableTrackingState = 'TO_START';
-                    const path = planPathAStar(currentRobotPose, op0);
-                    if (path) {
-                        navPath = path;
-                        startNav();
-                    } else {
-                        alert("⚠️ 无法规划路径到平行起点，尝试直接平行切入...");
-                        cableTrackingState = 'FOLLOWING';
-                        navPath = offsetPath;
-                        startNav();
+                let minD = Infinity;
+                let closestIdx = 0;
+                for (let i = 0; i < offsetPath.length; i++) {
+                    const d = Math.hypot(offsetPath[i].x - currentRobotPose.x, offsetPath[i].y - currentRobotPose.y);
+                    if (d < minD) {
+                        minD = d;
+                        closestIdx = i;
                     }
-                } else {
-                    console.log("✅ 启用柔性平行并入 (Flexible Parallel Merge)...");
-                    cableTrackingState = 'FOLLOWING';
-                    let minD = Infinity;
-                    let closestIdx = 0;
-                    for (let i = 0; i < offsetPath.length; i++) {
-                        const d = Math.hypot(offsetPath[i].x - currentRobotPose.x, offsetPath[i].y - currentRobotPose.y);
-                        if (d < minD) {
-                            minD = d;
-                            closestIdx = i;
-                        }
-                    }
-
-                    if (closestIdx >= offsetPath.length - 1) {
-                        alert("⚠️ 已经到达电缆终点附近！");
-                        stopNav(false);
-                        return;
-                    }
-
-                    navPath = offsetPath.slice(closestIdx);
-                    startNav();
                 }
+
+                if (closestIdx >= offsetPath.length - 1) {
+                    alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
+                    stopNav(false);
+                    return;
+                }
+
+                console.log(
+                    `📍 [寻找破损点] 并入索引: ${closestIdx}, 距离偏移路径: ${minD.toFixed(2)}m, ` +
+                    `搜索方向: ${searchInfo.isReversed ? "B→A/反向" : "A→B/正向"}`
+                );
+
+                navPath = offsetPath.slice(closestIdx);
+                startNav();
             };
         })();
 
@@ -7521,8 +7640,14 @@
                             // 1. 判定当前是否处于“二分法精确回退/寻找”阶段
                             const isBinaryRefining = (bsState === 'EVAL_WAIT' || bsState === 'MOVING');
 
-                            // 2. 如果是向前开荒，或者正在二分法精确定位，都允许画红点
-                            if (maxFaultIdx === -1 || closestIdx > maxFaultIdx || isBinaryRefining) {
+                            // 2. 将原始 savedCablePath 的索引换算为“本次搜索方向”上的进度索引。
+                            //    正向搜索时原索引越大表示越靠前；反向搜索时原索引越小才表示越靠前。
+                            const progressIdx = window.faultSearchReverse === true
+                                ? Math.max(0, (window.savedCablePath.length - 2) - closestIdx)
+                                : closestIdx;
+
+                            // 3. 如果是向前开荒，或者正在二分法精确定位，都允许画红点
+                            if (maxFaultIdx === -1 || progressIdx > maxFaultIdx || isBinaryRefining) {
 
                                 if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
                                     if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
@@ -7590,8 +7715,9 @@
                                     window.lastFaultCablePos = lastFaultCablePos; // 👈 新增这一行：将坐标暴露给全局 window
 
                                     // 🌟 核心修改：如果是二分定位阶段，千万不要更新 maxFaultIdx，防止把向后的索引锁死
+                                    // 正向/反向搜索都统一使用 progressIdx，避免 B 点朝 A 点搜索时被原始绘制索引拦截。
                                     if (!isBinaryRefining) {
-                                        maxFaultIdx = closestIdx;
+                                        maxFaultIdx = progressIdx;
                                     }
 
                                     if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
@@ -8048,7 +8174,11 @@
 
                     console.log("📍 上位机规划扫描路径已下发：", plan);
                     btnSendFault.innerText = `✅ 已发送${plan.waypoints.length}个航点`;
-                    setStatus(`✅ 已规划并下发履带小车扫描路径：L=${params.length}m，W=${params.width}m，夹角=${params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
+
+                    const extendTip = plan.params.autoExtended
+                        ? `，末段自动延长 ${plan.params.extensionLength}m，实际L=${plan.params.length}m`
+                        : "";
+                    setStatus(`✅ 已规划并下发履带小车扫描路径：设置L=${plan.params.requestedLength}m${extendTip}，W=${plan.params.width}m，夹角=${plan.params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
 
                 } catch (err) {
                     console.error("⚠️ 扫描路径规划或发送失败:", err);
