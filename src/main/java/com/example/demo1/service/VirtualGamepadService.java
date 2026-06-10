@@ -6,8 +6,10 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -19,6 +21,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import com.example.demo1.model.CablePoint;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -47,19 +50,70 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
     // ✅ 新增：自动巡线相关参数
     private boolean isAutoTracking = false; // 是否开启自动巡线
-    private int pipelineSignal = 0;         // 管线仪信号: 0=中, 1=右, 2=左
+    private int pipelineSignal = 0;         // 管线仪信号: 0=中, 1=向右找线, 2=向左找线
     private long lastSignalTime = 0;        // 上次收到信号的时间 (用于超时安全保护)
 
     // ✅ [修改点 1] 新增：自动巡线速度设置 (默认值)
     // 这些值现在可以由前端滑条通过 setAutoSpeeds 动态修改
     private float autoForwardSpeed = 0.2f;
-    private float autoStrafeSpeed = 0.2f;
+    private float autoStrafeSpeed = 0.2f;  // S 型巡线摆动强度；前端 autoSpeedY 滑条会更新这个值
 
-    // ✅ [新增] 终极 S 型巡线：姿态状态机与弯道补偿控制变量
+    // ✅ 新增：管线仪罗盘角度闭环参数
+    // 角度约定：90°=机器狗朝向与电缆朝向一致；>90°=车头偏电缆左侧；<90°=车头偏电缆右侧
+    private volatile Float cableAngleDeg = null;
+    private long lastAngleTime = 0L;
+    private float lastAngleErrorDeg = 0.0f;
+    private long lastAngleControlTime = 0L;
+
+    private static final float TARGET_CABLE_ANGLE_DEG = 90.0f;
+    private static final float ANGLE_DEADBAND_DEG = 3.0f;   // 小角度死区，防止抖动
+    private static final float ANGLE_KP = 0.55f;            // S 型巡线角度修正增益，现场可调
+    private static final float ANGLE_KD = 0.02f;            // S 型巡线角度阻尼，现场可调
+    private static final float MAX_YAW_CMD = 0.75f;         // 自动巡线最大偏航角速度
+    private static final float MAX_AUTO_STRAFE = 0.35f;     // 前端摆动强度最大值
+    private static final long PIPELINE_TIMEOUT_MS = 1000;   // 管线仪数据超时保护
+    private static final long ANGLE_TIMEOUT_MS = 1000;      // 罗盘角度数据超时保护
+    private static final long S_SWEEP_PERIOD_MS = 2600;     // S 型摆动周期，越大越丝滑
+    private static final long CENTER_LOST_MS = 1800;        // 超过该时间未压中电缆，认为需要扩大搜索
+    private static final float MIN_AUTO_FORWARD_SPEED = 0.08f;
+    private static final float S_BASE_YAW = 0.22f;
+    private static final float S_CORNER_YAW = 0.48f;
+    private static final float SIGNAL_YAW_BIAS = 0.18f;
+    private static final float CORNER_SIGNAL_YAW_BIAS = 0.30f;
+    private static final float YAW_SMOOTHING = 0.22f;
+    private static final float VY_SMOOTHING = 0.25f;
+    private static final float PATH_TURN_ENTER_DEG = 46.0f;
+    private static final float PATH_TURN_SUPPORT_DEG = 32.0f;
+    private static final float PATH_TURN_EXIT_DEG = 18.0f;
+    private static final float MAX_POINT_TURN_DEG = 18.0f;
+    private static final float MAX_SIGNAL_FUTURE_BIAS_DEG = 16.0f;
+    private static final long SIGNAL_FUTURE_BIAS_MS = 1800L;
+    private static final long CORNER_MODE_MIN_DWELL_MS = 2200L;
+    private static final long CORNER_STRAFE_PERIOD_MS = 1800L;
+    private static final float MIN_CORNER_STRAFE = 0.10f;
+
+    // ✅ S 型巡线状态
     private int currentPosture = 0;       // 0=初始平行/未知, 1=车头已偏右, 2=车头已偏左
     private long turnEndTime = 0;         // 记录本次转向结束的时间戳
     private int currentTurnDirection = 0; // 当前正在执行的转向：1(右), 2(左), 0(无/直行)
     private long lastCrossTime = 0;       // 记录上一次成功跨越(收到0)或调整姿态的时间
+    private long autoTrackStartTime = 0L;
+    private long lastCenterHitTime = 0L;
+    private long lastSignalDirectionTime = 0L;
+    private int lastSignalDirection = 0;
+    private float lastAutoYawCmd = 0.0f;
+    private float lastAutoVyCmd = 0.0f;
+    private boolean autoCornerStrafeMode = false;
+    private long lastAutoModeSwitchTime = 0L;
+    private int lastSignalForPrediction = -1;
+    private long signalStableSince = 0L;
+    private volatile float predictedCableYawDeg = Float.NaN;
+    private volatile float pathTurnDeg = 0.0f;
+    private volatile float signalFutureBiasDeg = 0.0f;
+    private volatile float cornerConfidence = 0.0f;
+    private volatile boolean predictedCornerArea = false;
+    private volatile int syncedCablePathPointCount = 0;
+    private volatile long lastPathPredictionTime = 0L;
     
     // ⚡ 核心参数调优
     private static final long BASE_TURN_MS = 1000;   // 基础 1x 转向时间 (约代表 30°)
@@ -86,7 +140,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     /**
      * ✅ [修改点 2] 新增：设置自动巡线速度 (供 Controller 调用)
      * @param vx 前进速度
-     * @param vy 横移速度
+     * @param vy S 型摆动强度
      */
     public void setAutoSpeeds(float vx, float vy) {
         this.autoForwardSpeed = vx;
@@ -94,19 +148,126 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         System.out.println("⚙️ [后端] 自动巡线速度更新: Forward=" + vx + ", Strafe=" + vy);
     }
 
+    public void updateCablePathPrediction(List<CablePoint> path) {
+        if (path == null || path.size() < 4) {
+            this.syncedCablePathPointCount = path == null ? 0 : path.size();
+            this.pathTurnDeg = 0.0f;
+            this.cornerConfidence = 0.0f;
+            this.predictedCornerArea = false;
+            return;
+        }
+
+        List<CablePoint> valid = new ArrayList<>();
+        for (CablePoint p : path) {
+            if (p == null || p.getX() == null || p.getY() == null) {
+                continue;
+            }
+            double x = p.getX();
+            double y = p.getY();
+            if (!Double.isNaN(x) && !Double.isNaN(y) && !Double.isInfinite(x) && !Double.isInfinite(y)) {
+                valid.add(p);
+            }
+        }
+
+        int n = valid.size();
+        this.syncedCablePathPointCount = n;
+        if (n < 4) {
+            this.pathTurnDeg = 0.0f;
+            this.cornerConfidence = 0.0f;
+            this.predictedCornerArea = false;
+            return;
+        }
+
+        List<Float> segmentYaws = new ArrayList<>();
+        int from = Math.max(0, n - 18);
+        for (int i = from; i < n - 1; i++) {
+            CablePoint a = valid.get(i);
+            CablePoint b = valid.get(i + 1);
+            double dx = b.getX() - a.getX();
+            double dy = b.getY() - a.getY();
+            if (Math.hypot(dx, dy) >= 0.04) {
+                segmentYaws.add(yawDeg(a, b));
+            }
+        }
+
+        if (segmentYaws.size() < 3) {
+            this.pathTurnDeg = 0.0f;
+            this.cornerConfidence = 0.0f;
+            this.predictedCornerArea = false;
+            return;
+        }
+
+        float limitedContinuousTurn = 0.0f;
+        float smoothedYaw = segmentYaws.get(0);
+        int validTurnSteps = 0;
+        for (int i = 1; i < segmentYaws.size(); i++) {
+            float rawStepTurn = angleDiffDeg(segmentYaws.get(i), segmentYaws.get(i - 1));
+            float limitedStepTurn = clamp(rawStepTurn, -MAX_POINT_TURN_DEG, MAX_POINT_TURN_DEG);
+            limitedContinuousTurn += limitedStepTurn;
+            smoothedYaw += angleDiffDeg(segmentYaws.get(i), smoothedYaw) * 0.35f;
+            validTurnSteps++;
+        }
+
+        int earlyCount = Math.min(4, segmentYaws.size());
+        int lateStart = Math.max(0, segmentYaws.size() - earlyCount);
+        float earlyYaw = averageYawDeg(segmentYaws, 0, earlyCount);
+        float lateYaw = averageYawDeg(segmentYaws, lateStart, segmentYaws.size());
+        float windowTurn = Math.abs(angleDiffDeg(lateYaw, earlyYaw));
+        float maxPlausibleTurn = Math.max(PATH_TURN_ENTER_DEG, validTurnSteps * MAX_POINT_TURN_DEG);
+        // 小弧度长弯不能靠逐段累加直接判成 90 度大转角；以窗口首尾方向为主，
+        // 只保留少量连续转向贡献，用于真实圆角刚进入时的提前感知。
+        float continuousTurnHint = Math.abs(limitedContinuousTurn) * 0.35f;
+        float physicallyPlausibleTurn = Math.min(Math.max(windowTurn, continuousTurnHint), maxPlausibleTurn);
+        float signalBias = estimateSignalFutureBiasDeg();
+        float futureYaw = smoothedYaw + signalBias;
+
+        this.signalFutureBiasDeg = signalBias;
+        this.predictedCableYawDeg = normalizeDeg(futureYaw);
+        this.pathTurnDeg = physicallyPlausibleTurn;
+        this.cornerConfidence = clamp((physicallyPlausibleTurn - 18.0f) / 52.0f, 0.0f, 1.0f);
+        this.predictedCornerArea = physicallyPlausibleTurn >= 35.0f && n >= 8;
+        this.lastPathPredictionTime = System.currentTimeMillis();
+    }
+
     /**
      * 接收管线仪数据的接口 (供 Controller 调用)
-     * @param signal 0=正中, 1=电缆在左(需左移), 2=电缆在右(需右移)
+     * @param signal 0=正中，1=向右找线，2=向左找线
+     * @param depth 管线仪深度，可为空
+     * @param angleDeg 管线仪罗盘角度；90°=对齐，>90°=车头偏左，<90°=车头偏右
      */
-    public void updatePipelineSignal(int signal, Float depth) { // 修改方法签名
+    public void updatePipelineSignal(int signal, Float depth, Float angleDeg) {
         this.pipelineSignal = signal;
-        this.lastSignalTime = System.currentTimeMillis(); // 更新心跳时间
+        long now = System.currentTimeMillis();
+        this.lastSignalTime = now;
+        if (signal != this.lastSignalForPrediction) {
+            this.lastSignalForPrediction = signal;
+            this.signalStableSince = now;
+        }
+
+        // 角度做一次轻量低通滤波，避免视觉识别偶发跳变直接造成机器狗抖动
+        if (angleDeg != null && !Float.isNaN(angleDeg) && angleDeg >= 0.0f && angleDeg <= 180.0f) {
+            if (this.cableAngleDeg == null) {
+                this.cableAngleDeg = angleDeg;
+            } else {
+                this.cableAngleDeg = this.cableAngleDeg * 0.70f + angleDeg * 0.30f;
+            }
+            this.lastAngleTime = now;
+        }
 
         // 推送到 /topic/pipeline，将单值改为对象
         if (template != null) {
             Map<String, Object> payload = new HashMap<>();
             payload.put("signal", signal);
-            payload.put("depth", depth); // 如果没有深度，这里会是 null
+            payload.put("depth", depth);
+            payload.put("angle", this.cableAngleDeg);
+            payload.put("rawAngle", angleDeg);
+            payload.put("predictedYaw", this.predictedCableYawDeg);
+            payload.put("pathTurnDeg", this.pathTurnDeg);
+            payload.put("signalFutureBiasDeg", this.signalFutureBiasDeg);
+            payload.put("cornerConfidence", this.cornerConfidence);
+            payload.put("cornerArea", this.predictedCornerArea);
+            payload.put("cornerStrafeMode", this.autoCornerStrafeMode);
+            payload.put("pathPointCount", this.syncedCablePathPointCount);
             template.convertAndSend("/topic/pipeline", (Object) payload);
         }
     }
@@ -121,10 +282,21 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             this.currentPosture = 0; 
             this.currentTurnDirection = 0;
             this.turnEndTime = 0;
-            this.lastCrossTime = System.currentTimeMillis(); // 启动时初始化跨越时间
+            long now = System.currentTimeMillis();
+            this.lastCrossTime = now; // 启动时初始化跨越时间
+            this.autoTrackStartTime = now;
+            this.lastCenterHitTime = now;
+            this.lastSignalDirectionTime = now;
+            this.lastSignalDirection = 0;
+            this.lastAutoYawCmd = 0.0f;
+            this.lastAutoVyCmd = 0.0f;
+            this.autoCornerStrafeMode = false;
+            this.lastAutoModeSwitchTime = now;
+            this.lastAngleControlTime = 0L;
+            this.lastAngleErrorDeg = 0.0f;
 
             updateCommand(0, 0, 0, 0, 3); 
-            System.out.println("🚀 终极 S 型自动巡线已启动 (带弯道补偿)");
+            System.out.println("🚀 自动巡线已启动：S 型前进扫描 + 90度圆角扩大搜索");
         } else {
             // 关闭时，速度归零
             this.vx = 0;
@@ -175,6 +347,70 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         sendJsonCommand(100, 100, null);
     }
 
+    private float clamp(float v, float min, float max) {
+        return Math.max(min, Math.min(max, v));
+    }
+
+    private float yawDeg(CablePoint a, CablePoint b) {
+        double dx = b.getX() - a.getX();
+        double dy = b.getY() - a.getY();
+        return (float) Math.toDegrees(Math.atan2(dy, dx));
+    }
+
+    private float angleDiffDeg(float a, float b) {
+        float diff = a - b;
+        while (diff > 180.0f) diff -= 360.0f;
+        while (diff < -180.0f) diff += 360.0f;
+        return diff;
+    }
+
+    private float averageYawDeg(List<Float> yaws, int startInclusive, int endExclusive) {
+        double sx = 0.0;
+        double sy = 0.0;
+        for (int i = startInclusive; i < endExclusive; i++) {
+            double rad = Math.toRadians(yaws.get(i));
+            sx += Math.cos(rad);
+            sy += Math.sin(rad);
+        }
+        return (float) Math.toDegrees(Math.atan2(sy, sx));
+    }
+
+    private float normalizeDeg(float deg) {
+        while (deg > 180.0f) deg -= 360.0f;
+        while (deg < -180.0f) deg += 360.0f;
+        return deg;
+    }
+
+    private float estimateSignalFutureBiasDeg() {
+        long now = System.currentTimeMillis();
+        boolean signalFresh = now - lastSignalTime <= PIPELINE_TIMEOUT_MS;
+        boolean directionFresh = now - lastSignalDirectionTime <= SIGNAL_FUTURE_BIAS_MS;
+        int signalForBias = pipelineSignal != 0 ? pipelineSignal : (directionFresh ? lastSignalDirection : 0);
+
+        if (!signalFresh || signalForBias == 0) {
+            return 0.0f;
+        }
+
+        float stableRatio = clamp((now - signalStableSince) / (float) SIGNAL_FUTURE_BIAS_MS, 0.35f, 1.0f);
+        if (signalForBias == 1) {
+            return -MAX_SIGNAL_FUTURE_BIAS_DEG * stableRatio;
+        }
+        if (signalForBias == 2) {
+            return MAX_SIGNAL_FUTURE_BIAS_DEG * stableRatio;
+        }
+        return 0.0f;
+    }
+
+    private float smoothYaw(float targetYaw) {
+        this.lastAutoYawCmd += (targetYaw - this.lastAutoYawCmd) * YAW_SMOOTHING;
+        return this.lastAutoYawCmd;
+    }
+
+    private float smoothVy(float targetVy) {
+        this.lastAutoVyCmd += (targetVy - this.lastAutoVyCmd) * VY_SMOOTHING;
+        return this.lastAutoVyCmd;
+    }
+
     /**
      * 运动控制循环 (20Hz)
      * 负责计算并发送当前的速度参数
@@ -190,96 +426,153 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         float finalYaw = 0;
 
         if (isAutoTracking) {
-            // --- A. 自动巡线逻辑 (姿态记忆 + 1x/2x折返 + 3秒弯道补偿) ---
+            // --- A. S 型自动巡线：持续前进，通过平滑偏航摆动扫线 ---
+            long now = System.currentTimeMillis();
 
-            // 1. 安全保护：如果超过 2秒 没收到信号，自动停车
-            if (System.currentTimeMillis() - lastSignalTime > 2000) {
-                finalVx = 0;
-                finalVy = 0;
-                finalYaw = 0;
-                currentTurnDirection = 0; 
+            // 1. 管线仪信号超时保护：超过 1 秒没有新数据，立即停车
+            if (now - lastSignalTime > PIPELINE_TIMEOUT_MS) {
+                finalVx = 0.0f;
+                finalVy = 0.0f;
+                finalYaw = 0.0f;
+                this.lastAutoYawCmd = 0.0f;
             } else {
-                long currentTime = System.currentTimeMillis();
-
-                // 2. 状态机判断 (仅在非转向期间接收新指令)
-                if (currentTime >= turnEndTime) {
-                    
-                    if (pipelineSignal == 0) {
-                        // 在正上方：刷新跨越时间，不改变姿态，利用惯性冲到另一边
-                        lastCrossTime = currentTime;
-                        
-                    } else if (pipelineSignal == 1) { // 需向右走
-                        if (currentPosture == 0) {
-                            // [起步切入] 平行状态 -> 向右转 1x 时间 (约 30°)
-                            currentTurnDirection = 1;
-                            turnEndTime = currentTime + BASE_TURN_MS;
-                            currentPosture = 1;
-                            lastCrossTime = currentTime;
-                            System.out.println("🔄 [起步] 向右转 1x 角度");
-                            
-                        } else if (currentPosture == 2) {
-                            // [S型折返] 当前偏左 -> 需要转 2x 时间才能变成偏右 (约 60°)
-                            currentTurnDirection = 1;
-                            turnEndTime = currentTime + (BASE_TURN_MS * 2); 
-                            currentPosture = 1;
-                            lastCrossTime = currentTime;
-                            System.out.println("🔄 [折返] 向右转 2x 角度 (抵消左偏+建立右偏)");
-                            
-                        } else if (currentPosture == 1) {
-                            // 已经偏右，但如果超过 3 秒未跨越中心线，说明遇到急弯
-                            if (currentTime - lastCrossTime > CURVE_TIMEOUT_MS) {
-                                currentTurnDirection = 1;
-                                turnEndTime = currentTime + BASE_TURN_MS; // 追加 1x 角度
-                                lastCrossTime = currentTime; // 刷新时间，防止连续追加
-                                System.out.println("⚠️ [弯道补偿] 3秒未跨越，追加向右转 1x 角度");
-                            }
-                        }
-                        
-                    } else if (pipelineSignal == 2) { // 需向左走
-                        if (currentPosture == 0) {
-                            // [起步切入] 平行状态 -> 向左转 1x 时间 (约 30°)
-                            currentTurnDirection = 2;
-                            turnEndTime = currentTime + BASE_TURN_MS;
-                            currentPosture = 2;
-                            lastCrossTime = currentTime;
-                            System.out.println("🔄 [起步] 向左转 1x 角度");
-                            
-                        } else if (currentPosture == 1) {
-                            // [S型折返] 当前偏右 -> 需要转 2x 时间才能变成偏左 (约 60°)
-                            currentTurnDirection = 2;
-                            turnEndTime = currentTime + (BASE_TURN_MS * 2); 
-                            currentPosture = 2;
-                            lastCrossTime = currentTime;
-                            System.out.println("🔄 [折返] 向左转 2x 角度 (抵消右偏+建立左偏)");
-                            
-                        } else if (currentPosture == 2) {
-                            // 已经偏左，检查 3 秒急弯补偿
-                            if (currentTime - lastCrossTime > CURVE_TIMEOUT_MS) {
-                                currentTurnDirection = 2;
-                                turnEndTime = currentTime + BASE_TURN_MS; // 追加 1x 角度
-                                lastCrossTime = currentTime; // 刷新时间
-                                System.out.println("⚠️ [弯道补偿] 3秒未跨越，追加向左转 1x 角度");
-                            }
-                        }
-                    }
+                // 2. 记录最近一次压中中心线和左右方向；圆角处通常会长时间压不中中心线
+                if (pipelineSignal == 0) {
+                    lastCenterHitTime = now;
+                } else if (pipelineSignal == 1 || pipelineSignal == 2) {
+                    lastSignalDirection = pipelineSignal;
+                    lastSignalDirectionTime = now;
                 }
 
-                // 3. 执行运动控制
-                finalVx = this.autoForwardSpeed; // 基础状态始终保持前进
-                finalVy = 0;                     // 彻底关闭横移
+                // 3. 罗盘角度只做柔性修正，不再硬闭环；让机器狗边前进边摆动探测
+                boolean angleFresh = (this.cableAngleDeg != null) && (now - lastAngleTime <= ANGLE_TIMEOUT_MS);
+                float absAngleErrorDeg = 0.0f;
+                float angleYawTrim = 0.0f;
 
-                // 检查定时器，执行具体的转向动作
-                if (currentTime < turnEndTime) {
-                    finalVx = this.autoForwardSpeed * 0.8f; // 转向时稍微减速增加抓地力
-                    if (currentTurnDirection == 1) {
-                        finalYaw = -this.autoStrafeSpeed; // 向右角速度
-                    } else if (currentTurnDirection == 2) {
-                        finalYaw = this.autoStrafeSpeed;  // 向左角速度
+                if (angleFresh) {
+                    float angleErrorDeg = this.cableAngleDeg - TARGET_CABLE_ANGLE_DEG;
+
+                    // 小角度死区，避免 88~92° 附近反复抖动
+                    if (Math.abs(angleErrorDeg) < ANGLE_DEADBAND_DEG) {
+                        angleErrorDeg = 0.0f;
                     }
+
+                    long dtMs = (lastAngleControlTime > 0L) ? Math.max(now - lastAngleControlTime, 20L) : 50L;
+                    float dt = dtMs / 1000.0f;
+
+                    float dErrorDeg = (angleErrorDeg - lastAngleErrorDeg) / dt;
+                    lastAngleErrorDeg = angleErrorDeg;
+                    lastAngleControlTime = now;
+
+                    float errorRad = (float) Math.toRadians(angleErrorDeg);
+                    float dErrorRad = (float) Math.toRadians(dErrorDeg);
+
+                    // 注意符号：angleErrorDeg > 0 表示车头偏左，需要右转；本机右转 Yaw 为负
+                    angleYawTrim = clamp(-(ANGLE_KP * errorRad + ANGLE_KD * dErrorRad), -0.28f, 0.28f);
+                    absAngleErrorDeg = Math.abs(angleErrorDeg);
+                }
+
+                // 4. 融合路径预测与当前管线仪状态，判断是否进入大转角区域
+                boolean centerLost = now - lastCenterHitTime > CENTER_LOST_MS;
+                boolean pathPredictionFresh = now - lastPathPredictionTime <= 3000L;
+                boolean pathPredictsCorner = pathPredictionFresh && pathTurnDeg >= PATH_TURN_ENTER_DEG;
+                boolean pathPredictsSupportedTurn = pathPredictionFresh && pathTurnDeg >= PATH_TURN_SUPPORT_DEG;
+                boolean pathPredictsStraight = pathPredictionFresh && pathTurnDeg <= PATH_TURN_EXIT_DEG;
+                boolean oneSideSignalLong = pipelineSignal != 0 && now - signalStableSince > 1500L;
+                boolean signalSupportsTurn = oneSideSignalLong && Math.abs(signalFutureBiasDeg) >= 12.0f;
+                boolean angleShowsCorner = angleFresh && absAngleErrorDeg > 34.0f;
+                boolean strongAngleCorner = angleFresh && absAngleErrorDeg > 42.0f;
+                boolean nearStraight = pathPredictionFresh
+                        && pathTurnDeg <= PATH_TURN_EXIT_DEG
+                        && (!angleFresh || absAngleErrorDeg <= 24.0f)
+                        && !centerLost;
+                boolean likelyCorner = pathPredictsCorner
+                        || (pathPredictsSupportedTurn && signalSupportsTurn && (centerLost || angleShowsCorner))
+                        || (pathPredictsSupportedTurn && cornerConfidence >= 0.45f && (centerLost || strongAngleCorner))
+                        || (!pathPredictionFresh && centerLost && strongAngleCorner);
+
+                boolean canSwitchMode = now - lastAutoModeSwitchTime >= CORNER_MODE_MIN_DWELL_MS;
+                boolean shouldExitCornerMode = autoCornerStrafeMode
+                        && canSwitchMode
+                        && nearStraight
+                        && !oneSideSignalLong
+                        && Math.abs(signalFutureBiasDeg) < 10.0f
+                        && (!angleFresh || absAngleErrorDeg <= 22.0f);
+                boolean shouldEnterCornerMode = !autoCornerStrafeMode
+                        && canSwitchMode
+                        && !nearStraight
+                        && likelyCorner;
+
+                if (shouldEnterCornerMode) {
+                    autoCornerStrafeMode = true;
+                    lastAutoModeSwitchTime = now;
+                    System.out.println("🟡 自动巡线切换：大转角横移前进模式");
+                } else if (shouldExitCornerMode) {
+                    autoCornerStrafeMode = false;
+                    lastAutoModeSwitchTime = now;
+                    System.out.println("🟢 自动巡线切换：S 型丝滑前进模式");
+                }
+
+                if (autoCornerStrafeMode) {
+                    this.cornerConfidence = Math.max(this.cornerConfidence, 0.75f);
+                }
+                this.predictedCornerArea = autoCornerStrafeMode || likelyCorner;
+
+                // 5. 根据模式生成速度：直线/小弧度走 S 型，大转角走横移前进
+                float sweepStrength = clamp(this.autoStrafeSpeed, 0.0f, MAX_AUTO_STRAFE);
+                int activeDirection = pipelineSignal;
+                if (activeDirection == 0 && now - lastSignalDirectionTime < CENTER_LOST_MS) {
+                    activeDirection = lastSignalDirection;
+                }
+
+                if (autoCornerStrafeMode) {
+                    float strafeCmd = Math.max(MIN_CORNER_STRAFE, sweepStrength);
+                    float targetVy;
+                    if (activeDirection == 1) {
+                        targetVy = -strafeCmd;     // 向右横移找线
+                    } else if (activeDirection == 2) {
+                        targetVy = strafeCmd;      // 向左横移找线
+                    } else {
+                        double strafePhase = ((now - autoTrackStartTime) % CORNER_STRAFE_PERIOD_MS) / (double) CORNER_STRAFE_PERIOD_MS;
+                        targetVy = (float) Math.sin(strafePhase * Math.PI * 2.0) * strafeCmd;
+                    }
+
+                    finalVy = smoothVy(clamp(targetVy, -MAX_AUTO_STRAFE, MAX_AUTO_STRAFE));
+                    finalYaw = smoothYaw(clamp(angleYawTrim * 0.55f, -0.32f, 0.32f));
                 } else {
-                    // 时间到了：角速度归零，机器狗带着已建立的偏角保持纯直行
-                    finalYaw = 0;
-                    currentTurnDirection = 0; 
+                    float baseSweepYaw = S_BASE_YAW + sweepStrength;
+                    double phase = ((now - autoTrackStartTime) % S_SWEEP_PERIOD_MS) / (double) S_SWEEP_PERIOD_MS;
+                    float sWaveYaw = (float) Math.sin(phase * Math.PI * 2.0) * baseSweepYaw;
+
+                    float signalBias = 0.0f;
+                    if (activeDirection == 1) {
+                        signalBias = -SIGNAL_YAW_BIAS;
+                    } else if (activeDirection == 2) {
+                        signalBias = SIGNAL_YAW_BIAS;
+                    }
+
+                    finalVy = smoothVy(0.0f);
+                    finalYaw = smoothYaw(clamp(sWaveYaw + signalBias + angleYawTrim, -MAX_YAW_CMD, MAX_YAW_CMD));
+                }
+
+                // 6. 自适应前进速度：始终保留前进底速，圆角时慢走扩大探测时间
+                float baseForward = this.autoForwardSpeed <= 0.01f
+                        ? 0.0f
+                        : Math.max(this.autoForwardSpeed, MIN_AUTO_FORWARD_SPEED);
+                if (!angleFresh) {
+                    finalVx = baseForward * 0.65f;
+                } else if (autoCornerStrafeMode && absAngleErrorDeg > 45.0f) {
+                    finalVx = baseForward * 0.35f;
+                } else if (autoCornerStrafeMode) {
+                    finalVx = baseForward * 0.50f;
+                } else if (absAngleErrorDeg > 45.0f) {
+                    finalVx = baseForward * 0.45f;
+                } else if (absAngleErrorDeg > 25.0f) {
+                    finalVx = baseForward * 0.65f;
+                } else if (absAngleErrorDeg > 10.0f) {
+                    finalVx = baseForward * 0.82f;
+                } else {
+                    finalVx = baseForward;
                 }
             }
         } else {

@@ -1112,6 +1112,36 @@
             .catch(err => console.error("速度更新失败:", err));
     };
 
+    let lastCablePathPredictionSyncAt = 0;
+    let lastCablePathPredictionSyncCount = 0;
+    window.syncCablePathPrediction = function (force = false) {
+        const path = window.savedCablePath;
+        if (!Array.isArray(path) || path.length < 4) return;
+
+        const now = Date.now();
+        if (!force && now - lastCablePathPredictionSyncAt < 1000 && path.length === lastCablePathPredictionSyncCount) {
+            return;
+        }
+
+        lastCablePathPredictionSyncAt = now;
+        lastCablePathPredictionSyncCount = path.length;
+
+        const recentPath = path.slice(-80).map(p => ({
+            x: Number(p.x),
+            y: Number(p.y),
+            z: Number(p.z ?? 0.08),
+            depth: p.userData && p.userData.depth !== undefined ? p.userData.depth : null
+        })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+        if (recentPath.length < 4) return;
+
+        fetch('/api/pipeline/path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(recentPath)
+        }).catch(err => console.warn("电缆走向预测路径同步失败:", err));
+    };
+
     // ==========================================
     // 核心：基于 Radix-2 的轻量级快速傅里叶变换 (FFT)
     // ==========================================
@@ -2136,11 +2166,30 @@
                     var data = JSON.parse(message.body);
                     var signal = data.signal !== undefined ? data.signal : parseInt(message.body);
                     var depth = data.depth !== undefined ? data.depth : null;
+                    var angle = data.angle !== undefined ? data.angle : null;
+                    var prediction = {
+                        yaw: data.predictedYaw,
+                        pathTurnDeg: data.pathTurnDeg,
+                        signalFutureBiasDeg: data.signalFutureBiasDeg,
+                        cornerConfidence: data.cornerConfidence,
+                        cornerArea: data.cornerArea,
+                        cornerStrafeMode: data.cornerStrafeMode,
+                        pathPointCount: data.pathPointCount
+                    };
 
                     updatePipelineDisplay(signal);
 
                     // 存入全局变量
                     window.g_pipelineSignal = signal;
+                    window.g_pipelineAngle = angle;
+                    window.g_pipelinePrediction = prediction;
+
+                    // 可选：如果页面后续添加了 id="pipelineAngleValue" 的元素，这里会自动显示罗盘角度
+                    const angleEl = document.getElementById('pipelineAngleValue');
+                    if (angleEl && angle !== null && angle !== undefined) {
+                        angleEl.textContent = Number(angle).toFixed(1) + '°';
+                        angleEl.style.color = Math.abs(Number(angle) - 90) <= 3 ? '#00ff00' : '#ffcc00';
+                    }
 
                     // ✅ 废弃卡尔曼滤波：上位机仅在突变时发深度，用全局变量接住，等待 3D 引擎回溯绑定
                     if (depth !== null) {
@@ -5148,6 +5197,120 @@
         let lastSignal = -1;
         let currentCableMesh = null;
         let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
+        const PIPELINE_FEATURE_SIDE_OFFSET_M = 0.16; // 特征点允许保留较明显的左右定位
+        const PIPELINE_TRACK_SIDE_OFFSET_M = 0.07;   // 连续补点只作轻微修正，避免把 1/2 信号画成锯齿线
+
+        function isValidCablePos(pos) {
+            return pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) && pos.x !== -999;
+        }
+
+        function normalizeAngleRad(rad) {
+            while (rad > Math.PI) rad -= Math.PI * 2;
+            while (rad < -Math.PI) rad += Math.PI * 2;
+            return rad;
+        }
+
+        function blendYawRad(a, b, bWeight) {
+            const aWeight = 1 - bWeight;
+            return Math.atan2(
+                Math.sin(a) * aWeight + Math.sin(b) * bWeight,
+                Math.cos(a) * aWeight + Math.cos(b) * bWeight
+            );
+        }
+
+        function smoothCableDisplayPoints(points) {
+            if (!points || points.length < 5) return points;
+            const smoothed = points.map((p) => p.clone());
+
+            for (let pass = 0; pass < 2; pass++) {
+                for (let i = 1; i < smoothed.length - 1; i++) {
+                    const prev = smoothed[i - 1];
+                    const curr = smoothed[i];
+                    const next = smoothed[i + 1];
+                    const source = points[i]?.userData?.source;
+                    const keepCurrent = source === "feature" ? 0.72 : 0.58;
+                    const neighbor = (1 - keepCurrent) * 0.5;
+                    curr.x = prev.x * neighbor + curr.x * keepCurrent + next.x * neighbor;
+                    curr.y = prev.y * neighbor + curr.y * keepCurrent + next.y * neighbor;
+                }
+            }
+
+            return smoothed;
+        }
+
+        function getRecentCableYawRad() {
+            if (cablePoints.length >= 2) {
+                const p2 = cablePoints[cablePoints.length - 1];
+                for (let i = cablePoints.length - 2; i >= 0; i--) {
+                    const p1 = cablePoints[i];
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    if (Math.hypot(dx, dy) > 0.08) {
+                        return Math.atan2(dy, dx);
+                    }
+                }
+            }
+
+            const pred = window.g_pipelinePrediction;
+            if (pred && Number.isFinite(Number(pred.yaw))) {
+                return Number(pred.yaw) * Math.PI / 180;
+            }
+
+            return window.currentRobotPose && Number.isFinite(window.currentRobotPose.yaw)
+                ? window.currentRobotPose.yaw
+                : 0;
+        }
+
+        function estimateCablePointFromRobotSignal(px, py, sig, prediction, mode) {
+            const robotYaw = window.currentRobotPose && Number.isFinite(window.currentRobotPose.yaw)
+                ? window.currentRobotPose.yaw
+                : 0;
+            const headingX = Math.cos(robotYaw);
+            const headingY = Math.sin(robotYaw);
+            const rightX = headingY;
+            const rightY = -headingX;
+
+            const sideBase = mode === "feature" ? PIPELINE_FEATURE_SIDE_OFFSET_M : PIPELINE_TRACK_SIDE_OFFSET_M;
+            let sideOffset = 0;
+            if (sig === 1) sideOffset = sideBase;       // 电缆在右侧，向右找线
+            else if (sig === 2) sideOffset = -sideBase; // 电缆在左侧，向左找线
+
+            const measured = new THREE.Vector3(
+                px + rightX * sideOffset,
+                py + rightY * sideOffset,
+                0.08
+            );
+
+            if (mode === "feature" || !isValidCablePos(lastCablePos)) {
+                return measured;
+            }
+
+            let predictedYaw = getRecentCableYawRad();
+            if (prediction && Number.isFinite(Number(prediction.yaw))) {
+                predictedYaw = blendYawRad(predictedYaw, Number(prediction.yaw) * Math.PI / 180, 0.45);
+            }
+
+            const dirX = Math.cos(predictedYaw);
+            const dirY = Math.sin(predictedYaw);
+            const dx = measured.x - lastCablePos.x;
+            const dy = measured.y - lastCablePos.y;
+            const along = dx * dirX + dy * dirY;
+            const stepLimit = mode === "dense" ? 0.10 : 0.24;
+            const step = Math.max(0.05, Math.min(Math.abs(along), stepLimit));
+            const sign = along >= 0 ? 1 : -1;
+            const predicted = new THREE.Vector3(
+                lastCablePos.x + dirX * step * sign,
+                lastCablePos.y + dirY * step * sign,
+                0.08
+            );
+
+            const measuredWeight = mode === "dense" ? 0.22 : 0.12;
+            return new THREE.Vector3(
+                predicted.x * (1 - measuredWeight) + measured.x * measuredWeight,
+                predicted.y * (1 - measuredWeight) + measured.y * measuredWeight,
+                0.08
+            );
+        }
 
         // ==========================================
         // ✅ 向三维重建页导出当前路径页三维地图快照
@@ -6736,7 +6899,7 @@
                         }
 
                         // 4. 核心：调用卡尔曼滤波平滑算法，计算渲染曲线
-                        let displayPoints = KalmanSmoother.smooth(cablePoints);
+                        let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
 
                         // 将深度属性同步传导至平滑点
                         for (let i = 0; i < displayPoints.length; i++) {
@@ -6745,9 +6908,10 @@
 
                         // 5. 挂载到全局变量，激活随后的柔性并入跟踪算法 (Flexible Merge)
                         window.savedCablePath = displayPoints;
+                        window.syncCablePathPrediction?.(true);
 
                         // 6. 构造 CatmullRom 连续曲线并在 3D Scene 中生成黄色粗线条管线
-                        const curve = new THREE.CatmullRomCurve3(displayPoints);
+                        const curve = new THREE.CatmullRomCurve3(displayPoints, false, 'centripetal', 0.35);
                         const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
                         currentCableMesh = new THREE.Mesh(tube, cableMat); // 复用自带的黄色材质 cableMat
                         cableGroup.add(currentCableMesh);
@@ -7477,6 +7641,7 @@
                 // =========================================================
                 // 增加判断条件：如果是手动绘制模式，则绕过信号特征检测，直接绘制
                 const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
+                const pipelinePrediction = window.g_pipelinePrediction || {};
                 let isFeaturePoint = false;
 
                 // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
@@ -7493,24 +7658,44 @@
                     isFeaturePoint = true;
                 }
 
+                // 补点时不能直接记录机器狗中心点，否则小弧度直线段会被画成机器狗轨迹。
+                // 先用管线仪信号估计电缆相对机器狗的位置，再沿已知/预测电缆方向向前延伸。
+                const isCornerPredictionActive = !!(
+                    pipelinePrediction.cornerStrafeMode ||
+                    pipelinePrediction.cornerArea ||
+                    Number(pipelinePrediction.pathTurnDeg || 0) >= 24
+                );
+                const hasValidPipelineSignal = sig === 0 || sig === 1 || sig === 2;
+                const shouldDensifyCablePoint = isAutoTracking && isCornerPredictionActive && hasValidPipelineSignal;
+                const canGapFillCablePoint = isAutoTracking && hasValidPipelineSignal && !isFeaturePoint;
+
                 // =========================================================
                 // ✅✅✅ [修改] 电缆路径绘制逻辑 (兼容自动特征点与纯手动记录)
                 // =========================================================
 
                 // 触发条件 1：处于自动巡线模式，且检测到了管线仪特征点
-                const isAutoRecording = isFeaturePoint && isAutoTracking;
+                const isAutoRecording = (isFeaturePoint || shouldDensifyCablePoint || canGapFillCablePoint) && isAutoTracking;
 
                 // 触发条件 2：用户开启了纯手动绘制模式
                 const isManualRecording = typeof isManualDrawingCable !== 'undefined' && isManualDrawingCable;
 
                 // 只要满足上述任意一种记录条件，且当前没有在执行跟踪或寻找任务
                 if ((isAutoRecording || isManualRecording) && !isCableTrackingMode && !isFaultFindingMode) {
-                    const dist = currentPos.distanceTo(lastCablePos);
-                    if (dist > 0.1) {
-                        const cablePt = new THREE.Vector3(px, py, 0.08);
+                    const autoRecordMode = isFeaturePoint ? "feature" : (shouldDensifyCablePoint ? "dense" : "gap");
+                    const candidateCablePt = isManualRecording && !isAutoRecording
+                        ? new THREE.Vector3(px, py, 0.08)
+                        : estimateCablePointFromRobotSignal(px, py, sig, pipelinePrediction, autoRecordMode);
+                    const dist = candidateCablePt.distanceTo(lastCablePos);
+                    const minCablePointDist = isFeaturePoint ? 0.1 : (shouldDensifyCablePoint ? 0.05 : 0.35);
+                    if (dist > minCablePointDist) {
+                        const cablePt = candidateCablePt;
 
                         // 🛡️ 严格保留你原本的初始化方式，确保完美兼容你的“区间回溯绑定”逻辑
-                        cablePt.userData = { depth: null };
+                        cablePt.userData = {
+                            depth: null,
+                            source: isManualRecording && !isAutoRecording ? "manual" : autoRecordMode,
+                            signal: sig
+                        };
 
                         cablePoints.push(cablePt);
                         lastCablePos = cablePt;
@@ -7528,7 +7713,7 @@
                             }
 
                             // 调用卡尔曼平滑 (你的原有代码完全不需要动)
-                            let displayPoints = KalmanSmoother.smooth(cablePoints);
+                            let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
 
                             // 将原始点的深度属性同步给平滑后的显示点
                             for (let i = 0; i < displayPoints.length; i++) {
@@ -7536,9 +7721,10 @@
                             }
 
                             window.savedCablePath = displayPoints;
+                            window.syncCablePathPrediction?.();
 
                             // 绘制平滑曲线
-                            const curve = new THREE.CatmullRomCurve3(displayPoints);
+                            const curve = new THREE.CatmullRomCurve3(displayPoints, false, 'centripetal', 0.35);
                             const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
                             currentCableMesh = new THREE.Mesh(tube, cableMat);
                             cableGroup.add(currentCableMesh);
