@@ -254,6 +254,7 @@
         window.currentPcdMesh = null;
         window.currentPcdGroup = null;
         window.currentImportedInspectionMapGroup = null;
+        window.gprHasInspectionMapLayerLoaded = false;
     }
 
     function updateGprCameraByBox(box) {
@@ -563,6 +564,8 @@
             window.gprScene.add(group);
             window.currentPcdGroup = group;
             window.currentImportedInspectionMapGroup = group;
+            window.gprHasInspectionMapLayerLoaded = true;
+            window.latestImportedInspectionMapSnapshot = snapshot;
 
             const box = new THREE.Box3().setFromObject(group);
             updateGprCameraByBox(box);
@@ -1018,6 +1021,13 @@
 
     function renderScanPlanOnGpr(plan) {
         if (!plan || !plan.preview) return;
+
+        // 保存最近一次由上位机规划的扫描路径。
+        // 后续点击“开始处理”生成多个 GPR 剖面时，会优先用这条 Z 字路径来摆放剖面，
+        // 从而让地下剖面直接落到点云地图中规划好的扫描区域下面。
+        window.currentGprScanPlan = plan;
+        window.currentGprScanPlanSavedAt = Date.now();
+
         ensureStandaloneGprSceneForMap();
 
         // 如果三维重建页还没加载当前点云地图，自动加载一次，保证矩形和 Z 字路线显示在同一地图中。
@@ -1582,6 +1592,7 @@
                     window.currentPcdMesh = points;     // 保留网格引用用于清理内存
                     window.currentPcdGroup = pcdGroup;  // 保留容器引用用于键盘旋转控制
                     window.currentImportedInspectionMapGroup = null;
+                    window.gprHasInspectionMapLayerLoaded = false;
 
                     setStatus("点云加载完成！", "success");
                 },
@@ -2472,6 +2483,121 @@
                 console.error(err);
                 setStatus("处理失败：" + err.message, "error");
             });
+
+    }
+
+    // ==========================================
+    // ✅ 三维重建页：按已规划的点云地图 Z 字路径融合摆放 GPR 剖面
+    // 说明：
+    // 1. 有“当前点云地图”且已经规划过扫描路径时，GPR 剖面沿规划的 zigzagSlam 逐段落位；
+    // 2. 没有当前点云地图或没有规划路径时，不改动后端原始 geometry，保持原来的展示效果。
+    // ==========================================
+    function hasUsableGprScanPlanForFusion() {
+        const plan = window.currentGprScanPlan;
+        const zigzag = plan?.preview?.zigzagSlam;
+
+        return !!(
+            window.gprHasInspectionMapLayerLoaded &&
+            plan &&
+            Array.isArray(zigzag) &&
+            zigzag.length >= 2
+        );
+    }
+
+    function getGprPlanLegCount() {
+        const zigzag = window.currentGprScanPlan?.preview?.zigzagSlam;
+        return Array.isArray(zigzag) ? Math.max(0, zigzag.length - 1) : 0;
+    }
+
+    function cloneNumberArray(arr, fallbackLen, fallbackStep = 1) {
+        if (Array.isArray(arr) && arr.length === fallbackLen) {
+            return arr.map(v => Number(v));
+        }
+        return Array.from({ length: fallbackLen }, (_, i) => i * fallbackStep);
+    }
+
+    function rescaleUAxisToLineLength(sourceUAxis, cols, lineLength) {
+        const fallback = Array.from({ length: cols }, (_, i) => i);
+        const rawU = (Array.isArray(sourceUAxis) && sourceUAxis.length === cols)
+            ? sourceUAxis.map(v => Number(v))
+            : fallback;
+
+        if (cols <= 1) return [0];
+
+        let uMin = rawU[0];
+        let uMax = rawU[rawU.length - 1];
+
+        if (!Number.isFinite(uMin) || !Number.isFinite(uMax) || Math.abs(uMax - uMin) < 1e-9) {
+            uMin = 0;
+            uMax = cols - 1;
+        }
+
+        const span = uMax - uMin;
+        return rawU.map(u => ((u - uMin) / span) * lineLength);
+    }
+
+    function createPlannedSegmentGeometry(seg, segIndex, mat) {
+        if (!hasUsableGprScanPlanForFusion()) return null;
+
+        const zigzag = window.currentGprScanPlan.preview.zigzagSlam;
+        if (!Array.isArray(zigzag) || segIndex >= zigzag.length - 1) return null;
+
+        const p0 = slamPointToGprVector(zigzag[segIndex]);
+        const p1 = slamPointToGprVector(zigzag[segIndex + 1]);
+
+        const dx = p1.x - p0.x;
+        const dz = p1.z - p0.z;
+        const lineLength = Math.hypot(dx, dz);
+        if (!Number.isFinite(lineLength) || lineLength <= 1e-6) return null;
+
+        const rows = mat?.length || 0;
+        const cols = mat?.[0]?.length || 0;
+        if (rows <= 0 || cols <= 0) return null;
+
+        const srcGeo = seg.geometry || {};
+        const phiRad = Math.atan2(dz, dx);
+
+        return {
+            ...srcGeo,
+            startX: p0.x,
+            startY: p0.z,
+            phiRad: phiRad,
+            uAxis: rescaleUAxisToLineLength(srcGeo.uAxis, cols, lineLength),
+            zAxis: cloneNumberArray(srcGeo.zAxis, rows, 0.02),
+            _fromPlannedScanPath: true,
+            _plannedLegIndex: segIndex,
+            _plannedLegLength: lineLength
+        };
+    }
+
+    function getPlannedGprPathBottomPoints(maxDepth) {
+        if (!hasUsableGprScanPlanForFusion()) return null;
+
+        const zigzag = window.currentGprScanPlan.preview.zigzagSlam;
+        if (!Array.isArray(zigzag) || zigzag.length < 2) return null;
+
+        return zigzag.map(p => {
+            const v = slamPointToGprVector(p);
+            return new THREE.Vector3(v.x, -maxDepth, v.z);
+        });
+    }
+
+    function reloadInspectionMapAndScanPlanAfterGprRender(usePlannedLayout) {
+        if (!usePlannedLayout) return;
+
+        try {
+            // GPR 处理会重建 threeContainer 和 WebGL 场景，因此这里需要把点云地图、电缆路径、
+            // 破损点以及规划矩形/Z 字虚线重新叠加到新场景中。
+            if (typeof loadCurrentPathFaultMapToGpr === "function") {
+                loadCurrentPathFaultMapToGpr();
+            }
+
+            if (window.currentGprScanPlan && typeof renderScanPlanOnGpr === "function") {
+                renderScanPlanOnGpr(window.currentGprScanPlan);
+            }
+        } catch (e) {
+            console.warn("⚠️ GPR 剖面已按规划路径生成，但重新叠加点云地图/规划线失败：", e);
+        }
     }
 
     // 渲染一次完整结果：填充下拉框 + 默认显示第 1 段 + 画 Z 字 3D
@@ -2626,6 +2752,12 @@
         const segments = result.segments || [];
         if (!segments.length) return;
 
+        const usePlannedLayout = hasUsableGprScanPlanForFusion();
+        const plannedLegCount = getGprPlanLegCount();
+        if (usePlannedLayout && plannedLegCount !== segments.length) {
+            console.warn(`⚠️ GPR剖面数量(${segments.length})与规划Z字路径线段数量(${plannedLegCount})不一致，超出部分将保持后端原始geometry。`);
+        }
+
         // 👇 1. 新增：彻底销毁旧的 WebGL 上下文和动画循环
         if (window.gprAnimId) {
             cancelAnimationFrame(window.gprAnimId);
@@ -2645,6 +2777,8 @@
         window.currentPcdMesh = null;
         window.currentPcdGroup = null;
         window.currentImportedInspectionMapGroup = null;
+        // 注意：不要在这里清空 gprHasInspectionMapLayerLoaded。
+        // 如果本次处理前已经加载过当前点云地图，下面会在新场景中自动重新加载并融合显示。
         window.gprCamera = null;
         window.gprSetViewToBox = null;
 
@@ -2720,7 +2854,8 @@
         // 3.1 逐段构建 Z 字平面
         segments.forEach((seg, segIndex) => {
             const mat = useMigrated ? seg.migratedData : seg.rawData;
-            const geo = seg.geometry;
+            const plannedGeo = createPlannedSegmentGeometry(seg, segIndex, mat);
+            const geo = plannedGeo || seg.geometry || {};
             if (!mat || !geo) return;
 
             // 记录该段最大深度
@@ -2955,18 +3090,25 @@
         }
 
         // 3.3 路径折线（放在底部）
-        if (Array.isArray(result.pathX) && Array.isArray(result.pathY) &&
+        const plannedPathPoints = getPlannedGprPathBottomPoints(maxDepth);
+        const bottomPathPoints = [];
+
+        if (plannedPathPoints && plannedPathPoints.length >= 2) {
+            bottomPathPoints.push(...plannedPathPoints);
+        } else if (Array.isArray(result.pathX) && Array.isArray(result.pathY) &&
             result.pathX.length === result.pathY.length) {
 
             const n = result.pathX.length;
-            const points = [];
             for (let i = 0; i < n; i++) {
                 const x = result.pathX[i];  // x 方向（m）
                 const z = result.pathY[i];  // 横向（m）
                 const y = -maxDepth;        // 底部（最大深度处）
-                points.push(new THREE.Vector3(x, y, z));
+                bottomPathPoints.push(new THREE.Vector3(x, y, z));
             }
-            const pathGeom = new THREE.BufferGeometry().setFromPoints(points);
+        }
+
+        if (bottomPathPoints.length >= 2) {
+            const pathGeom = new THREE.BufferGeometry().setFromPoints(bottomPathPoints);
             const pathMat = new THREE.LineBasicMaterial({ color: 0xffffff });
 
             // 👇==================== 🌟 修改开始 ====================👇
@@ -3031,6 +3173,12 @@
         };
 
         updateCamera();
+
+        if (usePlannedLayout) {
+            reloadInspectionMapAndScanPlanAfterGprRender(true);
+            const usedLegs = Math.min(segments.length, plannedLegCount);
+            setStatus(`✅ GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。`, "success");
+        }
 
         // ========== 交互：左键旋转，中键平移，滚轮缩放 ==========
 
@@ -6498,7 +6646,7 @@
                         if (currentDist >= bsTargetDist) {
                             // 到达最新的 2m 节点，立即停车并开始 20 秒倒计时
                             bsState = 'STEP_WAIT';
-                            bsWaitEndTime = Date.now() + 20000; // 等待 20 秒
+                            bsWaitEndTime = Date.now() + 30000; // 等待 20 秒
                             window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
                             sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
                             console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 20 秒检测信号...`);
@@ -6693,7 +6841,7 @@
                 if (Math.abs(distError) < 0.1 || isOvershot) {
                     sendMoveCommand(0, 0, 0, 0.0, 0.0, true); // 停车
                     bsState = 'EVAL_WAIT';
-                    bsWaitEndTime = Date.now() + 20000; // 等待 20秒
+                    bsWaitEndTime = Date.now() + 30000; // 等待 20秒
 
                     window.bsInitialMoveDir = undefined; // 重置方向锁
                     // ✅ 修复 2：到达目标点时，强制清空移动过程中可能积攒的“脏信号”

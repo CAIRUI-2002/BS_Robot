@@ -25,7 +25,7 @@ public class CarController {
     // 履带小车连接机器狗 WiFi 后分配的 IP 地址
     // 建议在 application.yml / application.properties 中配置 car.udp.ip=192.168.x.x
     // 如果没有配置，默认使用 192.168.123.161（请自行修改为你小车的实际 IP）
-    @Value("${car.udp.ip:10.21.41.65}") 
+    @Value("${car.udp.ip:10.21.31.65}") 
     private String carIp;
 
     // 与 Python 脚本中 UDP_PORT 对应的端口
@@ -71,9 +71,13 @@ public class CarController {
             byte[] sendData = jsonCmd.getBytes("UTF-8");
 
             DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, carAddress, carPort);
-            udpSocket.send(sendPacket);
-            
-            return "success";
+            System.out.println("🎮 [HTTP->UDP] 收到履带车摇杆指令: x=" + x + ", y=" + y);
+System.out.println("🎮 [HTTP->UDP] 正在发送到履带车: " + carIp + ":" + carPort + " 数据=" + jsonCmd);
+
+udpSocket.send(sendPacket);
+
+System.out.println("✅ [HTTP->UDP] UDP发送完成");
+return "success";
         } catch (Exception e) {
             System.err.println("⚠️ UDP 指令下发小车失败: " + e.getMessage());
             return "error";
