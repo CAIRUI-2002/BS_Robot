@@ -55,8 +55,8 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
     // ✅ [修改点 1] 新增：自动巡线速度设置 (默认值)
     // 这些值现在可以由前端滑条通过 setAutoSpeeds 动态修改
-    private float autoForwardSpeed = 0.2f;
-    private float autoStrafeSpeed = 0.2f;  // S 型巡线摆动强度；前端 autoSpeedY 滑条会更新这个值
+    private float autoForwardSpeed = 0.4f;
+    private float autoStrafeSpeed = 0.4f;  // S 型巡线摆动强度；前端 autoSpeedY 滑条会更新这个值
 
     // ✅ 新增：管线仪罗盘角度闭环参数
     // 角度约定：90°=机器狗朝向与电缆朝向一致；>90°=车头偏电缆左侧；<90°=车头偏电缆右侧
@@ -91,6 +91,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private static final long CORNER_MODE_MIN_DWELL_MS = 2200L;
     private static final long CORNER_STRAFE_PERIOD_MS = 1800L;
     private static final float MIN_CORNER_STRAFE = 0.10f;
+    private static final boolean ENABLE_CORNER_STRAFE_MODE = false; // 当前巡线仅保留 S 型前进，不输出左右横移速度
 
     // ✅ S 型巡线状态
     private int currentPosture = 0;       // 0=初始平行/未知, 1=车头已偏右, 2=车头已偏左
@@ -266,7 +267,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             payload.put("signalFutureBiasDeg", this.signalFutureBiasDeg);
             payload.put("cornerConfidence", this.cornerConfidence);
             payload.put("cornerArea", this.predictedCornerArea);
-            payload.put("cornerStrafeMode", this.autoCornerStrafeMode);
+            payload.put("cornerStrafeMode", ENABLE_CORNER_STRAFE_MODE && this.autoCornerStrafeMode);
             payload.put("pathPointCount", this.syncedCablePathPointCount);
             template.convertAndSend("/topic/pipeline", (Object) payload);
         }
@@ -296,7 +297,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             this.lastAngleErrorDeg = 0.0f;
 
             updateCommand(0, 0, 0, 0, 3); 
-            System.out.println("🚀 自动巡线已启动：S 型前进扫描 + 90度圆角扩大搜索");
+            System.out.println("🚀 自动巡线已启动：仅 S 型前进扫描（左右横移已禁用）");
         } else {
             // 关闭时，速度归零
             this.vx = 0;
@@ -492,13 +493,15 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                         || (!pathPredictionFresh && centerLost && strongAngleCorner);
 
                 boolean canSwitchMode = now - lastAutoModeSwitchTime >= CORNER_MODE_MIN_DWELL_MS;
-                boolean shouldExitCornerMode = autoCornerStrafeMode
+                boolean shouldExitCornerMode = ENABLE_CORNER_STRAFE_MODE
+                        && autoCornerStrafeMode
                         && canSwitchMode
                         && nearStraight
                         && !oneSideSignalLong
                         && Math.abs(signalFutureBiasDeg) < 10.0f
                         && (!angleFresh || absAngleErrorDeg <= 22.0f);
-                boolean shouldEnterCornerMode = !autoCornerStrafeMode
+                boolean shouldEnterCornerMode = ENABLE_CORNER_STRAFE_MODE
+                        && !autoCornerStrafeMode
                         && canSwitchMode
                         && !nearStraight
                         && likelyCorner;
@@ -513,19 +516,24 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                     System.out.println("🟢 自动巡线切换：S 型丝滑前进模式");
                 }
 
-                if (autoCornerStrafeMode) {
+                if (!ENABLE_CORNER_STRAFE_MODE) {
+                    autoCornerStrafeMode = false;
+                }
+
+                boolean cornerStrafeActive = ENABLE_CORNER_STRAFE_MODE && autoCornerStrafeMode;
+                if (cornerStrafeActive) {
                     this.cornerConfidence = Math.max(this.cornerConfidence, 0.75f);
                 }
-                this.predictedCornerArea = autoCornerStrafeMode || likelyCorner;
+                this.predictedCornerArea = likelyCorner;
 
-                // 5. 根据模式生成速度：直线/小弧度走 S 型，大转角走横移前进
+                // 5. 当前版本禁用巡线横移：直线、小弧度和大转角都使用 S 型前进扫描
                 float sweepStrength = clamp(this.autoStrafeSpeed, 0.0f, MAX_AUTO_STRAFE);
                 int activeDirection = pipelineSignal;
                 if (activeDirection == 0 && now - lastSignalDirectionTime < CENTER_LOST_MS) {
                     activeDirection = lastSignalDirection;
                 }
 
-                if (autoCornerStrafeMode) {
+                if (cornerStrafeActive) {
                     float strafeCmd = Math.max(MIN_CORNER_STRAFE, sweepStrength);
                     float targetVy;
                     if (activeDirection == 1) {
@@ -561,9 +569,9 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                         : Math.max(this.autoForwardSpeed, MIN_AUTO_FORWARD_SPEED);
                 if (!angleFresh) {
                     finalVx = baseForward * 0.65f;
-                } else if (autoCornerStrafeMode && absAngleErrorDeg > 45.0f) {
+                } else if (cornerStrafeActive && absAngleErrorDeg > 45.0f) {
                     finalVx = baseForward * 0.35f;
-                } else if (autoCornerStrafeMode) {
+                } else if (cornerStrafeActive) {
                     finalVx = baseForward * 0.50f;
                 } else if (absAngleErrorDeg > 45.0f) {
                     finalVx = baseForward * 0.45f;

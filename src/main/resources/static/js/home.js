@@ -5480,7 +5480,9 @@
         let currentCableMesh = null;
         let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
         const PIPELINE_FEATURE_SIDE_OFFSET_M = 0.16; // 特征点允许保留较明显的左右定位
-        const PIPELINE_TRACK_SIDE_OFFSET_M = 0.07;   // 连续补点只作轻微修正，避免把 1/2 信号画成锯齿线
+        const PIPELINE_TRACK_SIDE_OFFSET_M = 0.10;   // S 型巡线时连续补点需要更多利用 1/2 信号，避免黄线被旧方向拖偏
+        const MAX_CABLE_POINT_TURN_DEG = 22;         // 单个近距离采样点不允许出现不符合电缆物理特性的巨大折角
+        let lastSignalPose = null;
 
         function isValidCablePos(pos) {
             return pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) && pos.x !== -999;
@@ -5500,17 +5502,37 @@
             );
         }
 
-        function smoothCableDisplayPoints(points) {
+        function getWindowTurnDeg(points, idx, span = 3) {
+            if (!points || idx - span < 0 || idx + span >= points.length) return 0;
+
+            const prev = points[idx - span];
+            const curr = points[idx];
+            const next = points[idx + span];
+            const inDx = curr.x - prev.x;
+            const inDy = curr.y - prev.y;
+            const outDx = next.x - curr.x;
+            const outDy = next.y - curr.y;
+            if (Math.hypot(inDx, inDy) < 0.08 || Math.hypot(outDx, outDy) < 0.08) return 0;
+
+            const inYaw = Math.atan2(inDy, inDx);
+            const outYaw = Math.atan2(outDy, outDx);
+            return Math.abs(normalizeAngleRad(outYaw - inYaw)) * 180 / Math.PI;
+        }
+
+        function smoothCableDisplayPoints(points, sourcePoints = points) {
             if (!points || points.length < 5) return points;
             const smoothed = points.map((p) => p.clone());
 
-            for (let pass = 0; pass < 2; pass++) {
+            for (let pass = 0; pass < 3; pass++) {
                 for (let i = 1; i < smoothed.length - 1; i++) {
                     const prev = smoothed[i - 1];
                     const curr = smoothed[i];
                     const next = smoothed[i + 1];
-                    const source = points[i]?.userData?.source;
-                    const keepCurrent = source === "feature" ? 0.72 : 0.58;
+                    const source = sourcePoints[i]?.userData?.source;
+                    const windowTurnDeg = getWindowTurnDeg(sourcePoints, i, 3);
+                    const keepCurrent = source === "feature"
+                        ? 0.72
+                        : (source === "dense" ? (windowTurnDeg >= 32 ? 0.60 : 0.42) : 0.56);
                     const neighbor = (1 - keepCurrent) * 0.5;
                     curr.x = prev.x * neighbor + curr.x * keepCurrent + next.x * neighbor;
                     curr.y = prev.y * neighbor + curr.y * keepCurrent + next.y * neighbor;
@@ -5543,6 +5565,74 @@
                 : 0;
         }
 
+        function estimateCableYawFromInstrument(robotYaw) {
+            const angle = Number(window.g_pipelineAngle);
+            if (!Number.isFinite(angle)) return null;
+
+            // 后端控制中 angle > 90 表示车头偏左，需要向右修正；
+            // 换算到地图上，电缆切向约等于当前车头方向减去这个角度误差。
+            const angleErrorRad = (angle - 90) * Math.PI / 180;
+            return normalizeAngleRad(robotYaw - angleErrorRad);
+        }
+
+        function estimateCrossingCablePoint(px, py, sig) {
+            if (!lastSignalPose) return null;
+
+            const crossed = (lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1);
+            if (!crossed) return null;
+
+            // S 型巡线中，1/2 跳变说明机器狗刚跨过电缆；真实电缆更接近两帧机器人位置的中点，
+            // 不应使用当前帧的左/右偏移点，否则黄线方向会在跨越处被推歪。
+            if (Math.hypot(px - lastSignalPose.x, py - lastSignalPose.y) > 0.45) {
+                return null;
+            }
+
+            return new THREE.Vector3(
+                (lastSignalPose.x + px) * 0.5,
+                (lastSignalPose.y + py) * 0.5,
+                0.08
+            );
+        }
+
+        function limitCablePointTurn(candidate, mode) {
+            if (!candidate || cablePoints.length < 2 || !isValidCablePos(lastCablePos)) {
+                return candidate;
+            }
+
+            let prev = null;
+            for (let i = cablePoints.length - 2; i >= 0; i--) {
+                const p = cablePoints[i];
+                if (Math.hypot(lastCablePos.x - p.x, lastCablePos.y - p.y) > 0.07) {
+                    prev = p;
+                    break;
+                }
+            }
+            if (!prev) return candidate;
+
+            const inDx = lastCablePos.x - prev.x;
+            const inDy = lastCablePos.y - prev.y;
+            const outDx = candidate.x - lastCablePos.x;
+            const outDy = candidate.y - lastCablePos.y;
+            const inLen = Math.hypot(inDx, inDy);
+            const outLen = Math.hypot(outDx, outDy);
+            if (inLen < 0.07 || outLen < 0.04) return candidate;
+
+            const inYaw = Math.atan2(inDy, inDx);
+            const outYaw = Math.atan2(outDy, outDx);
+            const maxTurnDeg = mode === "dense" ? 28 : (mode === "feature" ? 24 : MAX_CABLE_POINT_TURN_DEG);
+            const maxTurn = maxTurnDeg * Math.PI / 180;
+            const turn = normalizeAngleRad(outYaw - inYaw);
+            if (Math.abs(turn) <= maxTurn) return candidate;
+
+            const limitedYaw = inYaw + Math.sign(turn) * maxTurn;
+            const limitedLen = Math.min(outLen, mode === "dense" ? 0.20 : 0.28);
+            return new THREE.Vector3(
+                lastCablePos.x + Math.cos(limitedYaw) * limitedLen,
+                lastCablePos.y + Math.sin(limitedYaw) * limitedLen,
+                0.08
+            );
+        }
+
         function estimateCablePointFromRobotSignal(px, py, sig, prediction, mode) {
             const robotYaw = window.currentRobotPose && Number.isFinite(window.currentRobotPose.yaw)
                 ? window.currentRobotPose.yaw
@@ -5569,7 +5659,14 @@
 
             let predictedYaw = getRecentCableYawRad();
             if (prediction && Number.isFinite(Number(prediction.yaw))) {
-                predictedYaw = blendYawRad(predictedYaw, Number(prediction.yaw) * Math.PI / 180, 0.45);
+                const predictionWeight = mode === "dense" ? 0.18 : 0.25;
+                predictedYaw = blendYawRad(predictedYaw, Number(prediction.yaw) * Math.PI / 180, predictionWeight);
+            }
+
+            const instrumentYaw = estimateCableYawFromInstrument(robotYaw);
+            if (instrumentYaw !== null) {
+                const angleWeight = mode === "dense" ? 0.22 : 0.30;
+                predictedYaw = blendYawRad(predictedYaw, instrumentYaw, angleWeight);
             }
 
             const dirX = Math.cos(predictedYaw);
@@ -5577,7 +5674,7 @@
             const dx = measured.x - lastCablePos.x;
             const dy = measured.y - lastCablePos.y;
             const along = dx * dirX + dy * dirY;
-            const stepLimit = mode === "dense" ? 0.10 : 0.24;
+            const stepLimit = mode === "dense" ? 0.18 : 0.24;
             const step = Math.max(0.05, Math.min(Math.abs(along), stepLimit));
             const sign = along >= 0 ? 1 : -1;
             const predicted = new THREE.Vector3(
@@ -5586,7 +5683,7 @@
                 0.08
             );
 
-            const measuredWeight = mode === "dense" ? 0.22 : 0.12;
+            const measuredWeight = sig === 0 ? 0.42 : (mode === "dense" ? 0.46 : 0.28);
             return new THREE.Vector3(
                 predicted.x * (1 - measuredWeight) + measured.x * measuredWeight,
                 predicted.y * (1 - measuredWeight) + measured.y * measuredWeight,
@@ -7182,11 +7279,15 @@
                         }
 
                         // 4. 核心：调用卡尔曼滤波平滑算法，计算渲染曲线
-                        let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
+                        let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints), cablePoints);
 
                         // 将深度属性同步传导至平滑点
                         for (let i = 0; i < displayPoints.length; i++) {
-                            displayPoints[i].userData = { depth: cablePoints[i].userData.depth };
+                            displayPoints[i].userData = {
+                                depth: cablePoints[i].userData.depth,
+                                source: cablePoints[i].userData.source,
+                                signal: cablePoints[i].userData.signal
+                            };
                         }
 
                         // 5. 挂载到全局变量，激活随后的柔性并入跟踪算法 (Flexible Merge)
@@ -7956,9 +8057,13 @@
                 // 只要满足上述任意一种记录条件，且当前没有在执行跟踪或寻找任务
                 if ((isAutoRecording || isManualRecording) && !isCableTrackingMode && !isFaultFindingMode) {
                     const autoRecordMode = isFeaturePoint ? "feature" : (shouldDensifyCablePoint ? "dense" : "gap");
+                    const crossingCablePt = isFeaturePoint ? estimateCrossingCablePoint(px, py, sig) : null;
                     const candidateCablePt = isManualRecording && !isAutoRecording
                         ? new THREE.Vector3(px, py, 0.08)
-                        : estimateCablePointFromRobotSignal(px, py, sig, pipelinePrediction, autoRecordMode);
+                        : limitCablePointTurn(
+                            crossingCablePt || estimateCablePointFromRobotSignal(px, py, sig, pipelinePrediction, autoRecordMode),
+                            autoRecordMode
+                        );
                     const dist = candidateCablePt.distanceTo(lastCablePos);
                     const minCablePointDist = isFeaturePoint ? 0.1 : (shouldDensifyCablePoint ? 0.05 : 0.35);
                     if (dist > minCablePointDist) {
@@ -7987,11 +8092,15 @@
                             }
 
                             // 调用卡尔曼平滑 (你的原有代码完全不需要动)
-                            let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
+                            let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints), cablePoints);
 
                             // 将原始点的深度属性同步给平滑后的显示点
                             for (let i = 0; i < displayPoints.length; i++) {
-                                displayPoints[i].userData = { depth: cablePoints[i].userData.depth };
+                                displayPoints[i].userData = {
+                                    depth: cablePoints[i].userData.depth,
+                                    source: cablePoints[i].userData.source,
+                                    signal: cablePoints[i].userData.signal
+                                };
                             }
 
                             window.savedCablePath = displayPoints;
@@ -8004,6 +8113,9 @@
                             cableGroup.add(currentCableMesh);
                         }
                     }
+                }
+                if (hasValidPipelineSignal) {
+                    lastSignalPose = new THREE.Vector3(px, py, 0.08);
                 }
                 lastSignal = sig;
 
