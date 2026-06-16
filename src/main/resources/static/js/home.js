@@ -112,6 +112,18 @@
     let annotation3DGroups = [];     // 存储 3D 标注对象
     let gprResult = null;            // 缓存 GPR 结果
 
+    // ✅ GPR 标注校准持久化状态
+    // 说明：以“GPR 数据文件夹路径”为依据，把手动红圈、删除的自动红圈和彩色倾斜管道标注保存到机器狗主机的 GPR 数据文件夹中。
+    // 文件名固定为 gpr_annotation_calibration.json；下次再次处理同一个文件夹时，会由后端自动读取并恢复上次校准结果。
+    let currentGprFolderPath = "";
+    let currentGprAnnotationStorageKey = "";
+    const GPR_ANNOTATION_FILE_NAME = "gpr_annotation_calibration.json";
+    const GPR_ANNOTATION_API = {
+        load: (folderPath) => "/api/gpr/annotation?folderPath=" + encodeURIComponent(folderPath),
+        save: "/api/gpr/annotation",
+        remove: (folderPath) => "/api/gpr/annotation?folderPath=" + encodeURIComponent(folderPath)
+    };
+
     // ✅ 偏移后二维剖面手动标注相关状态
     let currentGprSegmentIndex = 0;
     let manualMigAnnotationMode = false;
@@ -123,6 +135,43 @@
     const MANUAL_MIG_ANNOTATION = {
         displayRadiusPx: 6,
         deleteHitRadiusPx: 18
+    };
+
+    // ✅ 倾斜/交叉管道彩色强制连接标注状态
+    // 说明：每次点击“倾斜管道”进入标注，都会开启一个新的管道组，自动换一种颜色。
+    // 同一组颜色的圆圈在相邻剖面之间会强制连接，不再受 maxZDiff / maxYDiff 阈值限制。
+    let forcedPipeAnnotationMode = false;
+    let activeForcedPipeGroupId = null;
+    let activeForcedPipeColorHex = 0x0099ff;
+    let activeForcedPipeColorCss = "#0099ff";
+    let activeForcedPipeColorName = "蓝色";
+    let forcedPipeGroupCounter = 0;
+    let forcedPipeAnnotationOrder = 0;
+    const forcedPipeAnnotationsBySegment = new Map(); // segIndex -> [{row,col,radius,pipeGroupId,pipeColorHex,...}]
+    const FORCED_PIPE_ANNOTATION = {
+        displayRadiusPx: 6,
+        deleteHitRadiusPx: 18,
+        colors: [
+            { hex: 0x0099ff, css: "#0099ff", name: "蓝色" },
+            { hex: 0x00ffcc, css: "#00ffcc", name: "青色" },
+            { hex: 0xffcc00, css: "#ffcc00", name: "黄色" },
+            { hex: 0xff66ff, css: "#ff66ff", name: "紫色" },
+            { hex: 0x00ff66, css: "#00ff66", name: "绿色" },
+            { hex: 0xff8800, css: "#ff8800", name: "橙色" }
+        ]
+    };
+
+    // ✅ 标注圆圈拖动相关状态
+    // 支持拖动对象：手动红圈、被拖动后转为手动红圈的自动识别红圈、倾斜管道彩色圆圈。
+    // 自动识别红圈本身每次会重新计算，因此拖动自动红圈时，会先将原自动红圈加入忽略列表，再生成一个可持久化的手动红圈。
+    let gprAnnotationDragState = null;
+    let gprAnnotationPointerDownState = null;
+    // ✅ 删除操作发生在 pointerdown 阶段，浏览器随后仍会触发 pointerup。
+    // 用该标记屏蔽本次 pointerup，避免右键/Ctrl/Shift 删除后又被当成“空白点击新增圆圈”。
+    let suppressNextMigAnnotationPointerUp = false;
+    const GPR_ANNOTATION_DRAG = {
+        startThresholdPx: 3,
+        refreshIntervalMs: 16
     };
 
     // ROS 机器人相关
@@ -159,6 +208,18 @@
     const LINK_CONFIG = {
         maxZDiff: 0.15,
         maxYDiff: 0.4
+    };
+
+    // ✅ 管道三维连接平滑配置
+    // 说明：相邻剖面圆圈连接时，若同一条管道跨越 3 个及以上剖面，
+    // 不再逐段生成硬直圆柱，而是根据多个圆心生成 Catmull-Rom 平滑管道。
+    const PIPE_SMOOTH_CONFIG = {
+        enabled: true,
+        minPointsForSmooth: 3,
+        curveType: "centripetal",
+        tension: 0.35,
+        tubularSegmentsPerSpan: 18,
+        radialSegments: 12
     };
 
     // ==========================================
@@ -1408,6 +1469,280 @@
     }
 
 
+
+    // ==========================================
+    // ✅ GPR 标注校准持久化工具函数
+    // ==========================================
+    function normalizeGprFolderPath(path) {
+        const normalized = String(path || "")
+            .trim()
+            .replace(/\\+/g, "/")
+            .replace(/\/+$/g, "");
+
+        // Windows 路径大小写不敏感，统一小写；Linux 路径保持原样，避免不同大小写目录被误认为同一个。
+        if (/^[a-zA-Z]:\//.test(normalized)) {
+            return normalized.toLowerCase();
+        }
+        return normalized;
+    }
+
+    function simpleHashForStorage(text) {
+        // FNV-1a 32bit，保留为旧版兼容工具；当前版本不再使用浏览器 localStorage 保存校准结果。
+        let hash = 2166136261;
+        const str = String(text || "");
+        for (let i = 0; i < str.length; i++) {
+            hash ^= str.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16).padStart(8, "0");
+    }
+
+    function getGprFolderAnnotationKey(folderPath) {
+        const normalized = normalizeGprFolderPath(folderPath || currentGprFolderPath);
+        if (!normalized) return "";
+        // 这里不再生成浏览器缓存 key，只作为日志/状态显示使用。
+        return normalized + "/" + GPR_ANNOTATION_FILE_NAME;
+    }
+
+    function getGprSegmentSignature(result) {
+        const segments = result && Array.isArray(result.segments) ? result.segments : [];
+        return {
+            segmentCount: segments.length,
+            segmentNames: segments.map((seg, idx) => String(seg.fileName || seg.name || ("segment_" + idx)))
+        };
+    }
+
+    function isSameGprSegmentSignature(savedSig, result) {
+        if (!savedSig) return true;
+        const currentSig = getGprSegmentSignature(result);
+        if (Number(savedSig.segmentCount) !== Number(currentSig.segmentCount)) return false;
+
+        const savedNames = Array.isArray(savedSig.segmentNames) ? savedSig.segmentNames : [];
+        const currentNames = Array.isArray(currentSig.segmentNames) ? currentSig.segmentNames : [];
+        // 只有两边都有文件名时才严格比对，避免后端没有 fileName 时误判。
+        if (savedNames.length === currentNames.length && savedNames.length > 0) {
+            for (let i = 0; i < savedNames.length; i++) {
+                if (String(savedNames[i] || "") && String(currentNames[i] || "") && savedNames[i] !== currentNames[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    function mapToStorageArray(map, type) {
+        const out = [];
+        map.forEach((value, key) => {
+            if (type === "set") {
+                out.push([Number(key), Array.from(value || [])]);
+            } else {
+                out.push([Number(key), Array.isArray(value) ? value : []]);
+            }
+        });
+        return out;
+    }
+
+    function restoreArrayMap(targetMap, entries, valueType) {
+        targetMap.clear();
+        if (!Array.isArray(entries)) return;
+
+        entries.forEach(item => {
+            if (!Array.isArray(item) || item.length < 2) return;
+            const key = Number(item[0]);
+            if (!Number.isFinite(key)) return;
+
+            if (valueType === "set") {
+                targetMap.set(key, new Set(Array.isArray(item[1]) ? item[1] : []));
+            } else {
+                targetMap.set(key, Array.isArray(item[1]) ? item[1] : []);
+            }
+        });
+    }
+
+    function recomputeForcedPipeCountersFromLoadedData() {
+        let maxGroupNo = 0;
+        let maxPipeOrder = -1;
+
+        forcedPipeAnnotationsBySegment.forEach(arr => {
+            if (!Array.isArray(arr)) return;
+            arr.forEach(item => {
+                const groupNo = Number(item.pipeGroupNo || 0);
+                if (Number.isFinite(groupNo)) maxGroupNo = Math.max(maxGroupNo, groupNo);
+                const pipeOrder = Number(item.pipeOrder || 0);
+                if (Number.isFinite(pipeOrder)) maxPipeOrder = Math.max(maxPipeOrder, pipeOrder);
+            });
+        });
+
+        forcedPipeGroupCounter = Math.max(forcedPipeGroupCounter || 0, maxGroupNo);
+        forcedPipeAnnotationOrder = Math.max(forcedPipeAnnotationOrder || 0, maxPipeOrder + 1);
+    }
+
+    function buildGprAnnotationCalibrationPayload(reason = "auto") {
+        const folderInput = $("folderPathInput");
+        const folderPath = normalizeGprFolderPath(currentGprFolderPath || (folderInput ? folderInput.value : ""));
+        if (!folderPath || !gprResult || !Array.isArray(gprResult.segments) || !gprResult.segments.length) return null;
+
+        currentGprFolderPath = folderPath;
+        currentGprAnnotationStorageKey = getGprFolderAnnotationKey(folderPath);
+
+        return {
+            version: 3,
+            savedAt: new Date().toISOString(),
+            reason,
+            folderPath,
+            storage: "gpr-folder",
+            annotationFileName: GPR_ANNOTATION_FILE_NAME,
+            signature: getGprSegmentSignature(gprResult),
+            manualMigAnnotationsBySegment: mapToStorageArray(manualMigAnnotationsBySegment, "array"),
+            ignoredAutoMigAnnotationsBySegment: mapToStorageArray(ignoredAutoMigAnnotationsBySegment, "set"),
+            forcedPipeAnnotationsBySegment: mapToStorageArray(forcedPipeAnnotationsBySegment, "array"),
+            forcedPipeGroupCounter,
+            forcedPipeAnnotationOrder
+        };
+    }
+
+    function saveGprAnnotationCalibration(reason = "auto") {
+        const payload = buildGprAnnotationCalibrationPayload(reason);
+        if (!payload) return false;
+
+        fetch(GPR_ANNOTATION_API.save, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                folderPath: payload.folderPath,
+                payload: payload
+            })
+        })
+            .then(res => {
+                if (!res.ok) {
+                    return res.text().then(text => {
+                        throw new Error(text || ("HTTP " + res.status));
+                    });
+                }
+                return res.json().catch(() => ({}));
+            })
+            .then(data => {
+                const filePath = data && data.filePath ? data.filePath : currentGprAnnotationStorageKey;
+                console.log("✅ GPR 标注校准已保存到机器狗主机文件夹：", filePath, reason);
+            })
+            .catch(e => {
+                console.warn("⚠️ GPR 标注校准保存到机器狗主机失败：", e);
+                setStatus("标注校准保存失败：请确认后端已加入 GprAnnotationController，且 GPR 数据文件夹可写。" + (e.message ? " " + e.message : ""), "error");
+            });
+
+        // 异步保存，先返回 true，避免影响标注交互流畅性。
+        return true;
+    }
+
+    async function loadGprAnnotationCalibration(result, folderPath) {
+        const normalizedFolder = normalizeGprFolderPath(folderPath || currentGprFolderPath || ($("folderPathInput") ? $("folderPathInput").value : ""));
+        currentGprFolderPath = normalizedFolder;
+        currentGprAnnotationStorageKey = getGprFolderAnnotationKey(normalizedFolder);
+
+        if (!normalizedFolder) {
+            return { loaded: false, reason: "empty-folder" };
+        }
+
+        let payload = null;
+        try {
+            const res = await fetch(GPR_ANNOTATION_API.load(normalizedFolder), {
+                method: "GET",
+                cache: "no-store"
+            });
+
+            if (!res.ok) {
+                const text = await res.text().catch(() => "");
+                console.warn("⚠️ 读取机器狗主机 GPR 标注校准失败：", res.status, text);
+                return { loaded: false, reason: "read-error" };
+            }
+
+            const data = await res.json();
+            if (!data || data.exists === false) {
+                return { loaded: false, reason: "not-found" };
+            }
+
+            payload = data.payload || data;
+        } catch (e) {
+            console.warn("⚠️ 读取机器狗主机 GPR 标注校准失败：", e);
+            return { loaded: false, reason: "read-error" };
+        }
+
+        try {
+            if (!isSameGprSegmentSignature(payload.signature, result)) {
+                console.warn("⚠️ 已找到该文件夹的历史标注，但剖面数量或文件名不一致，已跳过加载。", payload.signature, getGprSegmentSignature(result));
+                return { loaded: false, reason: "signature-mismatch" };
+            }
+
+            restoreArrayMap(manualMigAnnotationsBySegment, payload.manualMigAnnotationsBySegment, "array");
+            restoreArrayMap(ignoredAutoMigAnnotationsBySegment, payload.ignoredAutoMigAnnotationsBySegment, "set");
+            restoreArrayMap(forcedPipeAnnotationsBySegment, payload.forcedPipeAnnotationsBySegment, "array");
+
+            forcedPipeGroupCounter = Number(payload.forcedPipeGroupCounter || 0);
+            forcedPipeAnnotationOrder = Number(payload.forcedPipeAnnotationOrder || 0);
+            recomputeForcedPipeCountersFromLoadedData();
+
+            const manualCount = Array.from(manualMigAnnotationsBySegment.values()).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
+            const ignoredCount = Array.from(ignoredAutoMigAnnotationsBySegment.values()).reduce((sum, set) => sum + (set ? set.size : 0), 0);
+            const forcedCount = getTotalForcedPipeAnnotationCount();
+
+            console.log("✅ 已从机器狗主机 GPR 文件夹加载标注校准：", {
+                manualCount,
+                ignoredCount,
+                forcedCount,
+                file: currentGprAnnotationStorageKey
+            });
+
+            return {
+                loaded: true,
+                manualCount,
+                ignoredCount,
+                forcedCount,
+                savedAt: payload.savedAt || "",
+                filePath: currentGprAnnotationStorageKey
+            };
+        } catch (e) {
+            console.warn("⚠️ GPR 标注校准数据解析失败：", e);
+            return { loaded: false, reason: "parse-error" };
+        }
+    }
+
+    async function clearCurrentGprAnnotationCalibration() {
+        const folderInput = $("folderPathInput");
+        const folderPath = normalizeGprFolderPath(currentGprFolderPath || (folderInput ? folderInput.value : ""));
+        if (!folderPath) return;
+
+        if (!confirm("确定清除当前 GPR 文件夹中的历史标注校准文件吗？清除后会恢复为自动识别标注。")) {
+            return;
+        }
+
+        try {
+            const res = await fetch(GPR_ANNOTATION_API.remove(folderPath), { method: "DELETE" });
+            if (!res.ok) {
+                const text = await res.text().catch(() => "");
+                throw new Error(text || ("HTTP " + res.status));
+            }
+            console.log("✅ 已删除机器狗主机 GPR 文件夹中的标注校准文件：", getGprFolderAnnotationKey(folderPath));
+        } catch (e) {
+            console.warn("清除机器狗主机 GPR 标注校准失败：", e);
+            setStatus("清除标注校准失败：" + (e.message || e), "error");
+            return;
+        }
+
+        manualMigAnnotationsBySegment.clear();
+        ignoredAutoMigAnnotationsBySegment.clear();
+        forcedPipeAnnotationsBySegment.clear();
+        forcedPipeGroupCounter = 0;
+        forcedPipeAnnotationOrder = 0;
+
+        refreshCurrentMig2DCanvas();
+        if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
+            render3DZigzagAll(gprResult, true);
+        }
+        setStatus("已清除当前 GPR 文件夹中的历史标注校准文件，当前显示已恢复为自动识别结果。", "success");
+    }
+
     // ==========================================
     // ✅ 偏移后二维剖面：手动红圈标注工具函数
     // ==========================================
@@ -1482,6 +1817,51 @@
         return autoBlobs.concat(manualBlobs);
     }
 
+    function getForcedPipeAnnotations(segIndex) {
+        const key = Number(segIndex) || 0;
+        if (!forcedPipeAnnotationsBySegment.has(key)) {
+            forcedPipeAnnotationsBySegment.set(key, []);
+        }
+        return forcedPipeAnnotationsBySegment.get(key);
+    }
+
+    function getForcedPipeColorByGroupNo(groupNo) {
+        const colors = FORCED_PIPE_ANNOTATION.colors;
+        const idx = Math.max(0, (Number(groupNo) || 1) - 1) % colors.length;
+        return colors[idx];
+    }
+
+    function cloneForcedPipeAnnotation(item, forcedIndex = -1) {
+        const colorHex = Number.isFinite(Number(item.pipeColorHex)) ? Number(item.pipeColorHex) : 0x0099ff;
+        return {
+            row: Number(item.row),
+            col: Number(item.col),
+            radius: Number(item.radius),
+            width: Number(item.width || item.radius * 2),
+            height: Number(item.height || item.radius * 2),
+            manual: true,
+            source: "forcedPipe",
+            linkMode: "forced",
+            forcedIndex,
+            pipeGroupId: item.pipeGroupId || "forced_pipe_1",
+            pipeGroupNo: Number(item.pipeGroupNo || 1),
+            pipeColorHex: colorHex,
+            pipeColorCss: item.pipeColorCss || ("#" + colorHex.toString(16).padStart(6, "0")),
+            pipeColorName: item.pipeColorName || "彩色",
+            pipeOrder: Number(item.pipeOrder || 0)
+        };
+    }
+
+    function getForcedPipeAnnotationBlobs(segIndex) {
+        return getForcedPipeAnnotations(segIndex)
+            .map((item, idx) => cloneForcedPipeAnnotation(item, idx))
+            .filter(b => Number.isFinite(b.row) && Number.isFinite(b.col) && Number.isFinite(b.radius));
+    }
+
+    function getTotalForcedPipeAnnotationCount() {
+        return Array.from(forcedPipeAnnotationsBySegment.values()).reduce((sum, arr) => sum + arr.length, 0);
+    }
+
     function setAnnotationButtonState(enabled) {
         showAnnotation = !!enabled;
         const btnAnno = $("btnToggleAnnotation");
@@ -1518,12 +1898,39 @@
         }
     }
 
+    function updateForcedPipeAnnotationUI() {
+        const btn = $("btnForcedPipeAnnotation");
+        const view = $("mig2dView");
+
+        if (btn) {
+            btn.textContent = forcedPipeAnnotationMode ? "结束倾斜标注" : "倾斜管道";
+            btn.classList.toggle("active", forcedPipeAnnotationMode);
+            if (forcedPipeAnnotationMode) {
+                btn.style.borderColor = activeForcedPipeColorCss;
+                btn.style.boxShadow = `0 0 12px ${activeForcedPipeColorCss}`;
+            } else {
+                btn.style.borderColor = "";
+                btn.style.boxShadow = "";
+            }
+        }
+
+        if (view) {
+            view.classList.toggle("forced-pipe-annotation-active", forcedPipeAnnotationMode);
+        }
+    }
+
     function setManualMigAnnotationMode(enabled) {
         const nextEnabled = !!enabled;
 
         if (nextEnabled && (!gprResult || !Array.isArray(gprResult.segments) || !gprResult.segments.length)) {
             alert("请先点击“开始处理”并加载探地雷达剖面数据。 ");
             return;
+        }
+
+        if (nextEnabled && forcedPipeAnnotationMode) {
+            forcedPipeAnnotationMode = false;
+            activeForcedPipeGroupId = null;
+            updateForcedPipeAnnotationUI();
         }
 
         manualMigAnnotationMode = nextEnabled;
@@ -1533,15 +1940,57 @@
             // 手动标注时自动打开红圈显示，避免用户看不到自动红圈和新增红圈。
             setAnnotationButtonState(true);
             refreshCurrentMig2DCanvas();
-            setStatus("手动标注中：在偏移后二维剖面单击添加红圈；Ctrl+单击、Shift+单击或右键删除最近红圈（手动和自动均可删除）。", "success");
+            console.log("[GPR标注] 手动标注模式已开启");
         } else {
             refreshCurrentMig2DCanvas();
 
             // 结束标注后，立即重建 3D 红圈与相邻剖面管道连接。
             if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
                 render3DZigzagAll(gprResult, true);
+                saveGprAnnotationCalibration("manual-finish");
                 const totalManual = Array.from(manualMigAnnotationsBySegment.values()).reduce((sum, arr) => sum + arr.length, 0);
-                setStatus("手动标注结束。三维视图中的管道连接已按最新红圈更新，当前手动红圈 " + totalManual + " 个。", "success");
+                console.log("[GPR标注] 手动标注结束，当前手动红圈 " + totalManual + " 个");
+            }
+        }
+    }
+
+    function setForcedPipeAnnotationMode(enabled) {
+        const nextEnabled = !!enabled;
+
+        if (nextEnabled && (!gprResult || !Array.isArray(gprResult.segments) || !gprResult.segments.length)) {
+            alert("请先点击“开始处理”并加载探地雷达剖面数据。 ");
+            return;
+        }
+
+        if (nextEnabled) {
+            // 倾斜管道模式与普通红圈手动模式互斥，避免同一次点击同时创建两类圆圈。
+            manualMigAnnotationMode = false;
+            updateManualMigAnnotationUI();
+
+            forcedPipeGroupCounter += 1;
+            const colorItem = getForcedPipeColorByGroupNo(forcedPipeGroupCounter);
+            activeForcedPipeGroupId = "forced_pipe_" + forcedPipeGroupCounter;
+            activeForcedPipeColorHex = colorItem.hex;
+            activeForcedPipeColorCss = colorItem.css;
+            activeForcedPipeColorName = colorItem.name;
+        }
+
+        forcedPipeAnnotationMode = nextEnabled;
+        if (!forcedPipeAnnotationMode) {
+            activeForcedPipeGroupId = null;
+        }
+        updateForcedPipeAnnotationUI();
+
+        if (forcedPipeAnnotationMode) {
+            setAnnotationButtonState(true);
+            refreshCurrentMig2DCanvas();
+            console.log(`[GPR标注] 倾斜管道标注模式已开启，当前颜色：${activeForcedPipeColorName}`);
+        } else {
+            refreshCurrentMig2DCanvas();
+            if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
+                render3DZigzagAll(gprResult, true);
+                saveGprAnnotationCalibration("forced-pipe-finish");
+                console.log("[GPR标注] 倾斜管道标注结束，当前彩色圆圈 " + getTotalForcedPipeAnnotationCount() + " 个");
             }
         }
     }
@@ -1590,8 +2039,9 @@
             createdAt: Date.now()
         });
 
+        saveGprAnnotationCalibration("manual-add");
         refreshCurrentMig2DCanvas();
-        setStatus("已添加 1 个手动红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+        console.log("[GPR标注] 已添加 1 个手动红圈");
         return true;
     }
 
@@ -1602,7 +2052,7 @@
         const seg = gprResult && gprResult.segments ? gprResult.segments[currentGprSegmentIndex] : null;
         const candidates = getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true);
         if (!candidates.length) {
-            setStatus("当前剖面没有可删除的红圈。", "error");
+            console.log("[GPR标注] 当前剖面没有可删除的红圈");
             return false;
         }
 
@@ -1620,7 +2070,7 @@
         });
 
         if (!best || bestDist > MANUAL_MIG_ANNOTATION.deleteHitRadiusPx) {
-            setStatus("附近没有可删除的红圈。", "error");
+            console.log("[GPR标注] 附近没有可删除的红圈");
             return false;
         }
 
@@ -1629,25 +2079,275 @@
             const idx = Number(best.manualIndex);
             if (idx >= 0 && idx < arr.length) {
                 arr.splice(idx, 1);
+                saveGprAnnotationCalibration("manual-delete");
                 refreshCurrentMig2DCanvas();
-                setStatus("已删除最近的 1 个手动红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+                console.log("[GPR标注] 已删除最近的 1 个手动红圈");
                 return true;
             }
         }
 
         if (best.source === "auto" && best.autoKey) {
             getIgnoredAutoMigAnnotations(currentGprSegmentIndex).add(best.autoKey);
+            saveGprAnnotationCalibration("auto-ignore");
             refreshCurrentMig2DCanvas();
-            setStatus("已删除最近的 1 个自动识别红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+            console.log("[GPR标注] 已删除最近的 1 个自动识别红圈");
             return true;
         }
 
-        setStatus("删除失败：没有识别到红圈来源。", "error");
+        console.log("[GPR标注] 删除失败：没有识别到红圈来源");
         return false;
     }
 
-    function handleManualMigCanvasPointer(event) {
-        if (!manualMigAnnotationMode) return;
+    function addForcedPipeAnnotationAt(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info || !activeForcedPipeGroupId) return false;
+
+        const segIndex = currentGprSegmentIndex;
+        const col = Math.max(0, Math.min(info.cols - 1, canvasPoint.x * info.stepX));
+        const row = Math.max(0, Math.min(info.rows - 1, canvasPoint.y * info.stepY));
+
+        const pixelScale = Math.max(info.stepX, info.stepY, 1);
+        const matrixRadius = Math.max(
+            CONFIG.minRadius + 1,
+            FORCED_PIPE_ANNOTATION.displayRadiusPx * pixelScale - CONFIG.radiusPadding
+        );
+
+        getForcedPipeAnnotations(segIndex).push({
+            row,
+            col,
+            radius: matrixRadius,
+            width: matrixRadius * 2,
+            height: matrixRadius * 2,
+            manual: true,
+            pipeGroupId: activeForcedPipeGroupId,
+            pipeGroupNo: forcedPipeGroupCounter,
+            pipeColorHex: activeForcedPipeColorHex,
+            pipeColorCss: activeForcedPipeColorCss,
+            pipeColorName: activeForcedPipeColorName,
+            pipeOrder: forcedPipeAnnotationOrder++,
+            createdAt: Date.now()
+        });
+
+        saveGprAnnotationCalibration("forced-pipe-add");
+        refreshCurrentMig2DCanvas();
+        console.log(`[GPR标注] 已添加 1 个${activeForcedPipeColorName}倾斜管道圆圈`);
+        return true;
+    }
+
+    function removeNearestForcedPipeAnnotation(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info) return false;
+
+        const candidates = getForcedPipeAnnotationBlobs(currentGprSegmentIndex);
+        if (!candidates.length) {
+            console.log("[GPR标注] 当前剖面没有可删除的彩色倾斜管道圆圈");
+            return false;
+        }
+
+        let best = null;
+        let bestDist = Infinity;
+
+        candidates.forEach(item => {
+            const x = Number(item.col) / info.stepX;
+            const y = Number(item.row) / info.stepY;
+            const dist = Math.hypot(x - canvasPoint.x, y - canvasPoint.y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = item;
+            }
+        });
+
+        if (!best || bestDist > FORCED_PIPE_ANNOTATION.deleteHitRadiusPx) {
+            console.log("[GPR标注] 附近没有可删除的彩色圆圈");
+            return false;
+        }
+
+        const arr = getForcedPipeAnnotations(currentGprSegmentIndex);
+        const idx = Number(best.forcedIndex);
+        if (idx >= 0 && idx < arr.length) {
+            arr.splice(idx, 1);
+            saveGprAnnotationCalibration("forced-pipe-delete");
+            refreshCurrentMig2DCanvas();
+            console.log("[GPR标注] 已删除最近的 1 个彩色倾斜管道圆圈");
+            return true;
+        }
+
+        console.log("[GPR标注] 删除失败：没有识别到彩色圆圈来源");
+        return false;
+    }
+
+    function clampCanvasPointToMatrix(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info || !canvasPoint) return null;
+
+        return {
+            col: Math.max(0, Math.min(info.cols - 1, canvasPoint.x * info.stepX)),
+            row: Math.max(0, Math.min(info.rows - 1, canvasPoint.y * info.stepY))
+        };
+    }
+
+    function getNearestNormalMigAnnotationTarget(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info) return null;
+
+        const seg = gprResult && gprResult.segments ? gprResult.segments[currentGprSegmentIndex] : null;
+        const candidates = getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true);
+        if (!candidates.length) return null;
+
+        let best = null;
+        let bestDist = Infinity;
+
+        candidates.forEach(item => {
+            const x = Number(item.col) / info.stepX;
+            const y = Number(item.row) / info.stepY;
+            const dist = Math.hypot(x - canvasPoint.x, y - canvasPoint.y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = item;
+            }
+        });
+
+        if (!best || bestDist > MANUAL_MIG_ANNOTATION.deleteHitRadiusPx) return null;
+        return { item: best, distance: bestDist };
+    }
+
+    function getNearestForcedPipeAnnotationTarget(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info) return null;
+
+        const candidates = getForcedPipeAnnotationBlobs(currentGprSegmentIndex);
+        if (!candidates.length) return null;
+
+        let best = null;
+        let bestDist = Infinity;
+
+        candidates.forEach(item => {
+            const x = Number(item.col) / info.stepX;
+            const y = Number(item.row) / info.stepY;
+            const dist = Math.hypot(x - canvasPoint.x, y - canvasPoint.y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = item;
+            }
+        });
+
+        if (!best || bestDist > FORCED_PIPE_ANNOTATION.deleteHitRadiusPx) return null;
+        return { item: best, distance: bestDist };
+    }
+
+    function setMigAnnotationCursor(cursor) {
+        const canvas = $("mig2dCanvas");
+        if (canvas) canvas.style.cursor = cursor || "";
+    }
+
+    function updateManualAnnotationByDragState(canvasPoint) {
+        if (!gprAnnotationDragState) return false;
+
+        const matrixPoint = clampCanvasPointToMatrix(canvasPoint);
+        if (!matrixPoint) return false;
+
+        const segIndex = gprAnnotationDragState.segIndex;
+
+        if (gprAnnotationDragState.type === "manual") {
+            const arr = getManualMigAnnotations(segIndex);
+            const idx = gprAnnotationDragState.index;
+            if (idx < 0 || idx >= arr.length) return false;
+            arr[idx].row = matrixPoint.row;
+            arr[idx].col = matrixPoint.col;
+            arr[idx].updatedAt = Date.now();
+            return true;
+        }
+
+        if (gprAnnotationDragState.type === "forcedPipe") {
+            const arr = getForcedPipeAnnotations(segIndex);
+            const idx = gprAnnotationDragState.index;
+            if (idx < 0 || idx >= arr.length) return false;
+            arr[idx].row = matrixPoint.row;
+            arr[idx].col = matrixPoint.col;
+            arr[idx].updatedAt = Date.now();
+            return true;
+        }
+
+        return false;
+    }
+
+    function beginNormalMigAnnotationDrag(canvasPoint) {
+        const target = getNearestNormalMigAnnotationTarget(canvasPoint);
+        if (!target) return false;
+
+        const item = target.item;
+        const segIndex = currentGprSegmentIndex;
+
+        if (item.source === "manual") {
+            const idx = Number(item.manualIndex);
+            if (idx < 0) return false;
+            gprAnnotationDragState = {
+                type: "manual",
+                segIndex,
+                index: idx,
+                startedFromAuto: false,
+                startPoint: canvasPoint,
+                moved: false,
+                lastRefreshAt: 0
+            };
+            return true;
+        }
+
+        if (item.source === "auto" && item.autoKey) {
+            // 自动识别红圈无法直接改坐标。拖动时先屏蔽原自动红圈，再复制成手动红圈。
+            getIgnoredAutoMigAnnotations(segIndex).add(item.autoKey);
+
+            const arr = getManualMigAnnotations(segIndex);
+            arr.push({
+                row: Number(item.row),
+                col: Number(item.col),
+                radius: Number(item.radius),
+                width: Number(item.width || item.radius * 2),
+                height: Number(item.height || item.radius * 2),
+                manual: true,
+                draggedFromAuto: true,
+                originalAutoKey: item.autoKey,
+                createdAt: Date.now()
+            });
+
+            gprAnnotationDragState = {
+                type: "manual",
+                segIndex,
+                index: arr.length - 1,
+                startedFromAuto: true,
+                originalAutoKey: item.autoKey,
+                startPoint: canvasPoint,
+                moved: false,
+                lastRefreshAt: 0
+            };
+            return true;
+        }
+
+        return false;
+    }
+
+    function beginForcedPipeAnnotationDrag(canvasPoint) {
+        const target = getNearestForcedPipeAnnotationTarget(canvasPoint);
+        if (!target) return false;
+
+        const item = target.item;
+        const idx = Number(item.forcedIndex);
+        if (idx < 0) return false;
+
+        gprAnnotationDragState = {
+            type: "forcedPipe",
+            segIndex: currentGprSegmentIndex,
+            index: idx,
+            startPoint: canvasPoint,
+            moved: false,
+            lastRefreshAt: 0
+        };
+        return true;
+    }
+
+    function handleMigAnnotationPointerDown(event) {
+        if (!manualMigAnnotationMode && !forcedPipeAnnotationMode) return;
+
         event.preventDefault();
         event.stopPropagation();
 
@@ -1655,15 +2355,180 @@
         const pt = getCanvasContentPoint(canvas, event);
         if (!pt) return;
 
-        if (event.ctrlKey || event.metaKey || event.shiftKey || event.button === 2) {
-            removeNearestMigAnnotation(pt);
+        const isDeleteAction = event.ctrlKey || event.metaKey || event.shiftKey || event.button === 2;
+        if (isDeleteAction) {
+            if (forcedPipeAnnotationMode) {
+                removeNearestForcedPipeAnnotation(pt);
+            } else {
+                removeNearestMigAnnotation(pt);
+            }
+            gprAnnotationDragState = null;
+            gprAnnotationPointerDownState = null;
+            suppressNextMigAnnotationPointerUp = true;
+            return;
+        }
+
+        gprAnnotationPointerDownState = {
+            startPoint: pt,
+            latestPoint: pt,
+            moved: false
+        };
+
+        const started = forcedPipeAnnotationMode
+            ? beginForcedPipeAnnotationDrag(pt)
+            : beginNormalMigAnnotationDrag(pt);
+
+        if (started) {
+            if (canvas && typeof canvas.setPointerCapture === "function" && event.pointerId !== undefined) {
+                try { canvas.setPointerCapture(event.pointerId); } catch (e) { }
+            }
+            setMigAnnotationCursor("grabbing");
+        }
+    }
+
+    function handleMigAnnotationPointerMove(event) {
+        if (!manualMigAnnotationMode && !forcedPipeAnnotationMode) return;
+
+        const canvas = $("mig2dCanvas");
+        const pt = getCanvasContentPoint(canvas, event);
+        if (!pt) return;
+
+        if (!gprAnnotationDragState && !gprAnnotationPointerDownState) {
+            // 悬停到已有圆圈附近时给出 move 光标提示。
+            const hoverTarget = forcedPipeAnnotationMode
+                ? getNearestForcedPipeAnnotationTarget(pt)
+                : getNearestNormalMigAnnotationTarget(pt);
+            setMigAnnotationCursor(hoverTarget ? "grab" : "crosshair");
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (gprAnnotationPointerDownState) {
+            gprAnnotationPointerDownState.latestPoint = pt;
+            const d = Math.hypot(
+                pt.x - gprAnnotationPointerDownState.startPoint.x,
+                pt.y - gprAnnotationPointerDownState.startPoint.y
+            );
+            if (d >= GPR_ANNOTATION_DRAG.startThresholdPx) {
+                gprAnnotationPointerDownState.moved = true;
+            }
+        }
+
+        if (!gprAnnotationDragState) return;
+
+        const dragD = Math.hypot(pt.x - gprAnnotationDragState.startPoint.x, pt.y - gprAnnotationDragState.startPoint.y);
+        if (dragD >= GPR_ANNOTATION_DRAG.startThresholdPx) {
+            gprAnnotationDragState.moved = true;
+        }
+
+        if (!gprAnnotationDragState.moved) return;
+
+        if (updateManualAnnotationByDragState(pt)) {
+            const now = Date.now();
+            if (now - (gprAnnotationDragState.lastRefreshAt || 0) >= GPR_ANNOTATION_DRAG.refreshIntervalMs) {
+                gprAnnotationDragState.lastRefreshAt = now;
+                refreshCurrentMig2DCanvas();
+            }
+        }
+    }
+
+    function handleMigAnnotationPointerUp(event) {
+        if (!manualMigAnnotationMode && !forcedPipeAnnotationMode) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const canvas = $("mig2dCanvas");
+
+        // ✅ 右键 / Ctrl / Shift 删除已经在 pointerdown 中完成。
+        // pointerup 不应继续走“空白位置新增圆圈”的逻辑，否则会出现“右键删除后反而新增”的现象。
+        const isDeletePointerUp = suppressNextMigAnnotationPointerUp
+            || event.button === 2
+            || event.ctrlKey
+            || event.metaKey
+            || event.shiftKey;
+        if (isDeletePointerUp) {
+            suppressNextMigAnnotationPointerUp = false;
+            gprAnnotationDragState = null;
+            gprAnnotationPointerDownState = null;
+            setMigAnnotationCursor("crosshair");
+            return;
+        }
+
+        const pt = getCanvasContentPoint(canvas, event) || (gprAnnotationPointerDownState ? gprAnnotationPointerDownState.latestPoint : null);
+        const downState = gprAnnotationPointerDownState;
+        const dragState = gprAnnotationDragState;
+
+        if (canvas && typeof canvas.releasePointerCapture === "function" && event.pointerId !== undefined) {
+            try { canvas.releasePointerCapture(event.pointerId); } catch (e) { }
+        }
+
+        gprAnnotationPointerDownState = null;
+        setMigAnnotationCursor("crosshair");
+
+        if (!pt) {
+            gprAnnotationDragState = null;
+            return;
+        }
+
+        if (dragState) {
+            const reallyMoved = dragState.moved || (downState && downState.moved);
+
+            // 只是单击已有圆圈但没有拖动时，不改变标注。
+            // 如果这个圆圈原本是自动识别红圈，需要撤销 pointerdown 时创建的手动副本和忽略记录。
+            if (!reallyMoved) {
+                if (dragState.startedFromAuto && dragState.originalAutoKey) {
+                    const arr = getManualMigAnnotations(dragState.segIndex);
+                    if (dragState.index >= 0 && dragState.index < arr.length) {
+                        arr.splice(dragState.index, 1);
+                    }
+                    getIgnoredAutoMigAnnotations(dragState.segIndex).delete(dragState.originalAutoKey);
+                    refreshCurrentMig2DCanvas();
+                }
+                gprAnnotationDragState = null;
+                return;
+            }
+
+            updateManualAnnotationByDragState(pt);
+            gprAnnotationDragState = null;
+            saveGprAnnotationCalibration(dragState.type === "forcedPipe" ? "forced-pipe-drag" : "manual-drag");
+            refreshCurrentMig2DCanvas();
+            if (dragState.type === "forcedPipe") {
+                console.log("[GPR标注] 已拖动彩色倾斜管道圆圈");
+            } else if (dragState.startedFromAuto) {
+                console.log("[GPR标注] 已拖动自动识别红圈，并转换为可保存的手动红圈");
+            } else {
+                console.log("[GPR标注] 已拖动手动红圈");
+            }
+            return;
+        }
+
+        // 没有拖到已有圆圈时，短按空白位置仍按原逻辑新增圆圈。
+        if (downState && downState.moved) return;
+
+        if (forcedPipeAnnotationMode) {
+            addForcedPipeAnnotationAt(pt);
         } else {
             addManualMigAnnotationAt(pt);
         }
     }
 
+    function handleMigAnnotationPointerCancel(event) {
+        if (gprAnnotationDragState) {
+            saveGprAnnotationCalibration(gprAnnotationDragState.type === "forcedPipe" ? "forced-pipe-drag-cancel" : "manual-drag-cancel");
+            refreshCurrentMig2DCanvas();
+        }
+        gprAnnotationDragState = null;
+        gprAnnotationPointerDownState = null;
+        setMigAnnotationCursor("crosshair");
+    }
+
     function initManualMigAnnotationFeature() {
         const btn = $("btnManualMigAnnotation");
+        const btnForcedPipe = $("btnForcedPipeAnnotation");
+        const btnClearCalibration = $("btnClearGprAnnotationCalibration");
         const canvas = $("mig2dCanvas");
 
         if (btn) {
@@ -1672,15 +2537,34 @@
             });
         }
 
+        if (btnForcedPipe) {
+            btnForcedPipe.addEventListener("click", function () {
+                setForcedPipeAnnotationMode(!forcedPipeAnnotationMode);
+            });
+        }
+
+        if (btnClearCalibration) {
+            btnClearCalibration.addEventListener("click", clearCurrentGprAnnotationCalibration);
+        }
+
         if (canvas) {
-            canvas.addEventListener("click", handleManualMigCanvasPointer);
+            canvas.addEventListener("pointerdown", handleMigAnnotationPointerDown);
+            canvas.addEventListener("pointermove", handleMigAnnotationPointerMove);
+            canvas.addEventListener("pointerup", handleMigAnnotationPointerUp);
+            canvas.addEventListener("pointercancel", handleMigAnnotationPointerCancel);
+            canvas.addEventListener("pointerleave", function (event) {
+                if (gprAnnotationDragState) return;
+                setMigAnnotationCursor("");
+            });
             canvas.addEventListener("contextmenu", function (event) {
-                if (!manualMigAnnotationMode) return;
-                handleManualMigCanvasPointer(event);
+                if (!manualMigAnnotationMode && !forcedPipeAnnotationMode) return;
+                event.preventDefault();
+                event.stopPropagation();
             });
         }
 
         updateManualMigAnnotationUI();
+        updateForcedPipeAnnotationUI();
     }
 
     // SLAM 本地坐标 (x,y) 转 全局 GPS 经纬度 (lat,lon)
@@ -2034,9 +2918,16 @@
             btnAnno.addEventListener("click", function () {
                 const nextShow = !showAnnotation;
                 setAnnotationButtonState(nextShow);
-                if (!nextShow && manualMigAnnotationMode) {
-                    manualMigAnnotationMode = false;
-                    updateManualMigAnnotationUI();
+                if (!nextShow) {
+                    if (manualMigAnnotationMode) {
+                        manualMigAnnotationMode = false;
+                        updateManualMigAnnotationUI();
+                    }
+                    if (forcedPipeAnnotationMode) {
+                        forcedPipeAnnotationMode = false;
+                        activeForcedPipeGroupId = null;
+                        updateForcedPipeAnnotationUI();
+                    }
                 }
                 if (segmentSelect && !segmentSelect.disabled) {
                     const idx = parseInt(segmentSelect.value, 10);
@@ -2752,6 +3643,9 @@
             return;
         }
 
+        currentGprFolderPath = normalizeGprFolderPath(folderPath);
+        currentGprAnnotationStorageKey = getGprFolderAnnotationKey(currentGprFolderPath);
+
         setStatus("正在处理，请稍候……", null);
 
         fetch("/api/gpr/process?folderPath=" + encodeURIComponent(folderPath), {
@@ -2767,12 +3661,12 @@
                 }
                 return res.json();
             })
-            .then(function (data) {
+            .then(async function (data) {
                 if (!data || !data.segments || !data.segments.length) {
                     throw new Error("返回数据为空或格式不正确");
                 }
                 setStatus("处理完成。当前显示的是第 1 段 B 扫结果。", "success");
-                renderGprResults(data);
+                await renderGprResults(data);
             })
             .catch(function (err) {
                 console.error(err);
@@ -2896,16 +3790,32 @@
     }
 
     // 渲染一次完整结果：填充下拉框 + 默认显示第 1 段 + 画 Z 字 3D
-    function renderGprResults(result) {
+    async function renderGprResults(result) {
         if (!result || !result.segments || !result.segments.length) {
             throw new Error("返回数据中没有 segments");
         }
         gprResult = result;
         currentGprSegmentIndex = 0;
         manualMigAnnotationMode = false;
+        forcedPipeAnnotationMode = false;
+        activeForcedPipeGroupId = null;
+        forcedPipeGroupCounter = 0;
+        forcedPipeAnnotationOrder = 0;
         manualMigAnnotationsBySegment.clear();
         ignoredAutoMigAnnotationsBySegment.clear();
+        forcedPipeAnnotationsBySegment.clear();
+
+        const folderInputForCalibration = $("folderPathInput");
+        const folderPathForCalibration = folderInputForCalibration ? folderInputForCalibration.value.trim() : currentGprFolderPath;
+        const calibrationLoadInfo = await loadGprAnnotationCalibration(result, folderPathForCalibration);
+
         updateManualMigAnnotationUI();
+        updateForcedPipeAnnotationUI();
+
+        // 如果该文件夹存在历史人工校准，默认直接打开标注显示，确保用户再次打开时看到的是校准后的结果。
+        if (calibrationLoadInfo && calibrationLoadInfo.loaded) {
+            setAnnotationButtonState(true);
+        }
 
         // ✅ 数据加载成功后，显示标注按钮
         const btnAnno = $("btnToggleAnnotation");
@@ -2932,6 +3842,15 @@
 
         showSegment(0);
         render3DZigzagAll(result, true);
+
+        if (calibrationLoadInfo && calibrationLoadInfo.loaded) {
+            setStatus(
+                "处理完成",
+                "success"
+            );
+        } else if (calibrationLoadInfo && calibrationLoadInfo.reason === "signature-mismatch") {
+            setStatus("处理完成。已在当前GPR文件夹中发现历史校准，但剖面数量或文件名不一致，已使用当前自动识别结果。", "error");
+        }
     }
 
     // 显示指定索引的剖面（2D）
@@ -3026,25 +3945,30 @@
 
 
 
-        // ✅ 绘制标注红圈 (仅针对偏移后剖面 mig2dCanvas)
+        // ✅ 绘制标注圆圈 (仅针对偏移后剖面 mig2dCanvas)
         if (canvasId === "mig2dCanvas" && showAnnotation) {
             const seg = gprResult && gprResult.segments ? gprResult.segments[currentGprSegmentIndex] : null;
-            const blobs = seg ? getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true) : detectBlobs(matrix);
+            const redBlobs = seg ? getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true) : detectBlobs(matrix);
+            const forcedPipeBlobs = getForcedPipeAnnotationBlobs(currentGprSegmentIndex);
 
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = "#ff0000"; // 红色
-            ctx.shadowColor = "red";
-            ctx.shadowBlur = 5;
-
-            blobs.forEach(blob => {
+            function drawCircle(blob, colorCss, shadowCss) {
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = colorCss;
+                ctx.shadowColor = shadowCss || colorCss;
+                ctx.shadowBlur = 5;
                 ctx.beginPath();
                 const cx = blob.col / stepX;
                 const cy = blob.row / stepY;
                 const r = (blob.radius + CONFIG.radiusPadding) / Math.max(stepX, stepY);
-
                 ctx.arc(cx, cy, r, 0, 2 * Math.PI);
                 ctx.stroke();
-            });
+            }
+
+            // 普通自动/手动标注保持红色。
+            redBlobs.forEach(blob => drawCircle(blob, "#ff0000", "red"));
+
+            // 倾斜/交叉管道强制连接标注按管道组显示不同颜色。
+            forcedPipeBlobs.forEach(blob => drawCircle(blob, blob.pipeColorCss || "#0099ff", blob.pipeColorCss || "#0099ff"));
 
             ctx.shadowBlur = 0;
         }
@@ -3187,7 +4111,19 @@
 
             // ✅ 3D 标注圆环 + 记录圆心和半径
             if (useMigrated && seg.migratedData) {
-                const blobs = getSegmentAnnotationBlobs(seg, segIndex, true);
+                const normalBlobs = getSegmentAnnotationBlobs(seg, segIndex, true).map(blob => ({
+                    ...blob,
+                    linkMode: "normal",
+                    colorHex: 0xff0000,
+                    colorCss: "#ff0000"
+                }));
+                const forcedBlobs = getForcedPipeAnnotationBlobs(segIndex).map(blob => ({
+                    ...blob,
+                    linkMode: "forced",
+                    colorHex: blob.pipeColorHex || 0x0099ff,
+                    colorCss: blob.pipeColorCss || "#0099ff"
+                }));
+                const blobs = normalBlobs.concat(forcedBlobs);
                 const annoGroup = new THREE.Group();
 
                 const phi = geo.phiRad || 0.0;
@@ -3238,7 +4174,8 @@
                     const tubeThickness = 0.01;
 
                     const geometry = new THREE.TorusGeometry(ringRadius, tubeThickness, 16, 32);
-                    const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                    const ringColor = blob.colorHex || blob.pipeColorHex || 0xff0000;
+                    const material = new THREE.MeshBasicMaterial({ color: ringColor });
                     const ring = new THREE.Mesh(geometry, material);
 
                     // --- C. 姿态与定位 ---
@@ -3254,7 +4191,13 @@
                         radius: ringRadius,
                         zCoord: depth,   // 对应 z 轴的坐标值 (m, down)
                         yCoord: worldZ,  // 对应 y 轴的坐标值 (m)
-                        segIndex: segIndex
+                        segIndex: segIndex,
+                        linkMode: blob.linkMode || "normal",
+                        pipeGroupId: blob.pipeGroupId || null,
+                        pipeGroupNo: blob.pipeGroupNo || null,
+                        pipeColorHex: blob.pipeColorHex || blob.colorHex || null,
+                        pipeColorCss: blob.pipeColorCss || blob.colorCss || null,
+                        pipeOrder: Number(blob.pipeOrder || 0)
                     };
                     centersThisSeg.push(centerObj);
                     allCenters[centerObj.id] = centerObj;
@@ -3276,8 +4219,8 @@
 
             // 1) 第一阶段：找出所有相邻两层的潜在连线
             for (let i = 0; i < segmentAnnoCenters.length - 1; i++) {
-                const listA = segmentAnnoCenters[i];
-                const listB = segmentAnnoCenters[i + 1];
+                const listA = segmentAnnoCenters[i].filter(item => item.linkMode === "normal");
+                const listB = segmentAnnoCenters[i + 1].filter(item => item.linkMode === "normal");
                 const currentLayerLinks = [];
 
                 listA.forEach(a => {
@@ -3323,26 +4266,21 @@
                 });
             }
 
-            // 3) 根据验证通过的连线生成 3D 圆柱体
+            // 3) 根据验证通过的连线记录拓扑边。
+            //    这里先不直接生成一段一段的硬直圆柱，后面按连通分量整理成整条管道后再做平滑。
             validLinks.forEach(link => {
                 const a = link.a;
                 const b = link.b;
-                const radius = (a.radius + b.radius) / 2;
-                const cylinder = createHollowCylinderBetween(
-                    a.center,
-                    b.center,
-                    radius
-                );
-                if (cylinder) {
-                    edges.push({
-                        aId: a.id,
-                        bId: b.id,
-                        mesh: cylinder
-                    });
-                }
+                edges.push({
+                    aId: a.id,
+                    bId: b.id,
+                    a,
+                    b,
+                    radius: (a.radius + b.radius) / 2
+                });
             });
 
-            // 4) 用并查集根据 edges 做“管道分组”（连通分量） - 原有逻辑保持不变
+            // 4) 用并查集根据 edges 做“管道分组”（连通分量）
             if (edges.length > 0 && allCenters.length > 0) {
                 const parent = new Array(allCenters.length);
                 for (let i = 0; i < allCenters.length; i++) parent[i] = i;
@@ -3361,7 +4299,7 @@
                 edges.forEach(e => union(e.aId, e.bId));
 
                 // 按根节点把边分组 -> 每组是一条管道
-                const pipelinesMap = new Map(); // root -> [meshes]
+                const pipelinesMap = new Map(); // root -> [edge]
                 edges.forEach(e => {
                     const root = find(e.aId);
                     let arr = pipelinesMap.get(root);
@@ -3369,7 +4307,7 @@
                         arr = [];
                         pipelinesMap.set(root, arr);
                     }
-                    arr.push(e.mesh);
+                    arr.push(e);
                 });
 
                 // 给每条管道分配不同颜色，并单独建组
@@ -3377,25 +4315,60 @@
                 let pipelineIndex = 0;
                 const pipelineCount = pipelinesMap.size;
 
-                pipelinesMap.forEach(meshes => {
+                pipelinesMap.forEach(edgeItems => {
                     const pipelineGroup = new THREE.Group();
 
                     const color = new THREE.Color();
                     if (pipelineCount === 1) {
-                        // ✅ 新增：当只有一根管道时，默认直接渲染为纯黄色
                         color.setHex(0xffff00);
                     } else {
-                        // 如果有多根管道，依然通过 HSL 自动均匀分色，防止颜色冲突
                         color.setHSL((pipelineIndex / pipelineCount), 0.8, 0.5);
                     }
                     pipelineIndex++;
 
-                    meshes.forEach(mesh => {
-                        if (mesh.material && mesh.material.color) {
-                            mesh.material.color.copy(color);
-                        }
-                        pipelineGroup.add(mesh);
+                    // 将同一连通分量中的圆心按剖面序号排序，形成一条连续曲线。
+                    const centerMap = new Map();
+                    edgeItems.forEach(e => {
+                        centerMap.set(e.aId, e.a);
+                        centerMap.set(e.bId, e.b);
                     });
+                    const centers = Array.from(centerMap.values())
+                        .sort((a, b) => {
+                            if (a.segIndex !== b.segIndex) return a.segIndex - b.segIndex;
+                            if (Math.abs(a.yCoord - b.yCoord) > 1e-9) return a.yCoord - b.yCoord;
+                            return a.zCoord - b.zCoord;
+                        });
+
+                    // 如果同一剖面内出现多个点，说明可能是分叉/误连。
+                    // 这种情况下继续使用原来的逐段连接，避免平滑曲线错误穿插。
+                    const segSet = new Set(centers.map(item => item.segIndex));
+                    const canUseSmoothTube = PIPE_SMOOTH_CONFIG.enabled
+                        && centers.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth
+                        && segSet.size === centers.length;
+
+                    if (canUseSmoothTube) {
+                        const avgRadius = centers.reduce((sum, item) => sum + item.radius, 0) / centers.length;
+                        const smoothTube = createSmoothTubeThroughPoints(
+                            centers.map(item => item.center),
+                            avgRadius,
+                            color.getHex()
+                        );
+                        if (smoothTube) {
+                            pipelineGroup.add(smoothTube);
+                        }
+                    }
+
+                    // 兜底：点数不足 3 个、存在分叉、或平滑管道创建失败时，仍用原来的相邻圆柱连接。
+                    if (pipelineGroup.children.length === 0) {
+                        edgeItems.forEach(e => {
+                            const cylinder = createHollowCylinderBetween(e.a.center, e.b.center, e.radius);
+                            if (!cylinder) return;
+                            if (cylinder.material && cylinder.material.color) {
+                                cylinder.material.color.copy(color);
+                            }
+                            pipelineGroup.add(cylinder);
+                        });
+                    }
 
                     connPipelinesGroup.add(pipelineGroup);
                 });
@@ -3403,6 +4376,120 @@
                 connPipelinesGroup.visible = showAnnotation;
                 world.add(connPipelinesGroup);
                 annotation3DGroups.push(connPipelinesGroup);
+            }
+        }
+
+        // ================= 3.2b 倾斜/交叉管道彩色强制连接 =================
+        // 同一标注批次（同色/同 groupId）的圆圈在相邻剖面之间强制连接，不再受 maxZDiff / maxYDiff 限制。
+        if (segmentAnnoCenters.length >= 2) {
+            const forcedPipeMap = new Map(); // pipeGroupId -> {colorHex, bySegment: Map(segIndex -> [centerObj])}
+
+            segmentAnnoCenters.forEach((centers, segIndex) => {
+                centers.forEach(centerObj => {
+                    if (centerObj.linkMode !== "forced" || !centerObj.pipeGroupId) return;
+
+                    let pipeInfo = forcedPipeMap.get(centerObj.pipeGroupId);
+                    if (!pipeInfo) {
+                        pipeInfo = {
+                            colorHex: centerObj.pipeColorHex || 0x0099ff,
+                            bySegment: new Map()
+                        };
+                        forcedPipeMap.set(centerObj.pipeGroupId, pipeInfo);
+                    }
+
+                    if (!pipeInfo.bySegment.has(segIndex)) {
+                        pipeInfo.bySegment.set(segIndex, []);
+                    }
+                    pipeInfo.bySegment.get(segIndex).push(centerObj);
+                });
+            });
+
+            const forcedConnGroup = new THREE.Group();
+            let forcedEdgeCount = 0;
+
+            forcedPipeMap.forEach(pipeInfo => {
+                const onePipeGroup = new THREE.Group();
+                const pipeColorHex = pipeInfo.colorHex || 0x0099ff;
+
+                // 同一颜色/同一批次可能在每个剖面标 1 个点，也可能误标多个点。
+                // 这里仍按每个剖面内的添加顺序 k 进行一一配对；
+                // 对每一条 k 序列，跨多个相邻剖面的点组成一段平滑管道。
+                let maxPointCountInOneSegment = 0;
+                for (let i = 0; i < segmentAnnoCenters.length; i++) {
+                    const list = (pipeInfo.bySegment.get(i) || []).slice().sort((a, b) => a.pipeOrder - b.pipeOrder);
+                    maxPointCountInOneSegment = Math.max(maxPointCountInOneSegment, list.length);
+                }
+
+                function addForcedPipeRun(run) {
+                    if (!Array.isArray(run) || run.length < 2) return;
+
+                    const avgRadius = run.reduce((sum, item) => sum + item.radius, 0) / run.length;
+                    let mesh = null;
+
+                    if (PIPE_SMOOTH_CONFIG.enabled && run.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth) {
+                        mesh = createSmoothTubeThroughPoints(
+                            run.map(item => item.center),
+                            avgRadius,
+                            pipeColorHex
+                        );
+                    }
+
+                    // 只有两个点时本身就是直线；或者平滑管道创建失败时，使用原来的直线圆柱兜底。
+                    if (!mesh && run.length === 2) {
+                        mesh = createHollowCylinderBetween(run[0].center, run[1].center, avgRadius);
+                        if (mesh && mesh.material && mesh.material.color) {
+                            mesh.material.color.setHex(pipeColorHex);
+                        }
+                    }
+
+                    if (!mesh) {
+                        // 兜底：极端情况下逐段连接，避免什么都不显示。
+                        for (let j = 0; j < run.length - 1; j++) {
+                            const a = run[j];
+                            const b = run[j + 1];
+                            const cylinder = createHollowCylinderBetween(a.center, b.center, (a.radius + b.radius) / 2);
+                            if (!cylinder) continue;
+                            if (cylinder.material && cylinder.material.color) {
+                                cylinder.material.color.setHex(pipeColorHex);
+                            }
+                            onePipeGroup.add(cylinder);
+                            forcedEdgeCount++;
+                        }
+                        return;
+                    }
+
+                    onePipeGroup.add(mesh);
+                    forcedEdgeCount += Math.max(1, run.length - 1);
+                }
+
+                for (let k = 0; k < maxPointCountInOneSegment; k++) {
+                    let currentRun = [];
+
+                    for (let i = 0; i < segmentAnnoCenters.length; i++) {
+                        const list = (pipeInfo.bySegment.get(i) || []).slice().sort((a, b) => a.pipeOrder - b.pipeOrder);
+                        const item = list[k];
+
+                        if (item) {
+                            currentRun.push(item);
+                        } else {
+                            // 中间缺失某个剖面的同序号点时，断开成两段，避免跨空段硬连。
+                            addForcedPipeRun(currentRun);
+                            currentRun = [];
+                        }
+                    }
+
+                    addForcedPipeRun(currentRun);
+                }
+
+                if (onePipeGroup.children.length > 0) {
+                    forcedConnGroup.add(onePipeGroup);
+                }
+            });
+
+            if (forcedEdgeCount > 0) {
+                forcedConnGroup.visible = showAnnotation;
+                world.add(forcedConnGroup);
+                annotation3DGroups.push(forcedConnGroup);
             }
         }
 
@@ -3616,6 +4703,62 @@
             }
         }
         animate();
+    }
+
+    // 根据多个圆心生成一整条平滑管道。
+    // points.length >= 3 时使用 CatmullRomCurve3 平滑；points.length == 2 时退化为直线连接。
+    function createSmoothTubeThroughPoints(points, radius, colorHex = 0xffff00) {
+        if (!Array.isArray(points) || points.length < 2) return null;
+
+        const cleanPoints = [];
+        points.forEach(pt => {
+            if (!pt) return;
+            const p = pt.clone ? pt.clone() : new THREE.Vector3(Number(pt.x), Number(pt.y), Number(pt.z));
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return;
+
+            // 去掉连续重复点，避免 TubeGeometry 在零长度段上出现异常。
+            const last = cleanPoints[cleanPoints.length - 1];
+            if (!last || last.distanceTo(p) > 1e-6) {
+                cleanPoints.push(p);
+            }
+        });
+
+        if (cleanPoints.length < 2) return null;
+
+        const safeRadius = Math.max(Number(radius) || 0.02, 0.005);
+
+        if (cleanPoints.length < PIPE_SMOOTH_CONFIG.minPointsForSmooth || !PIPE_SMOOTH_CONFIG.enabled) {
+            const cylinder = createHollowCylinderBetween(cleanPoints[0], cleanPoints[1], safeRadius);
+            if (cylinder && cylinder.material && cylinder.material.color) {
+                cylinder.material.color.setHex(colorHex);
+            }
+            return cylinder;
+        }
+
+        const curve = new THREE.CatmullRomCurve3(
+            cleanPoints,
+            false,
+            PIPE_SMOOTH_CONFIG.curveType || "centripetal",
+            PIPE_SMOOTH_CONFIG.tension ?? 0.35
+        );
+
+        const tubularSegments = Math.max(
+            24,
+            Math.ceil((cleanPoints.length - 1) * (PIPE_SMOOTH_CONFIG.tubularSegmentsPerSpan || 18))
+        );
+
+        const geometry = new THREE.TubeGeometry(
+            curve,
+            tubularSegments,
+            safeRadius,
+            PIPE_SMOOTH_CONFIG.radialSegments || 12,
+            false
+        );
+
+        return new THREE.Mesh(
+            geometry,
+            new THREE.MeshBasicMaterial({ color: colorHex })
+        );
     }
 
     // 在两点之间生成一个空心圆柱体（沿两点连线方向）

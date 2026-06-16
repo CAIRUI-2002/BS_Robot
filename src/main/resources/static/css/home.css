@@ -3864,3 +3864,70 @@ input[type="range"]::-webkit-slider-thumb {
 .gpr-view.manual-annotation-active canvas {
     cursor: crosshair;
 }
+
+
+/* ==========================================
+   ✅ 偏移后二维剖面：倾斜管道彩色强制连接标注
+   ========================================== */
+.manual-pipe-btn {
+    padding: 2px 8px;
+    font-size: 12px;
+    line-height: 18px;
+    white-space: nowrap;
+    background: rgba(20, 45, 85, 0.72);
+    border-color: rgba(0, 180, 255, 0.8);
+    color: #d8f2ff;
+}
+
+.manual-pipe-btn:hover {
+    filter: brightness(1.15);
+    box-shadow: 0 0 8px rgba(0, 180, 255, 0.55);
+}
+
+.manual-pipe-btn.active {
+    background: linear-gradient(180deg, rgba(0, 170, 255, 0.98), rgba(0, 70, 160, 0.98));
+    color: #ffffff;
+    border-color: #ffffff;
+    box-shadow: 0 0 12px rgba(0, 180, 255, 0.9);
+}
+
+.gpr-view.forced-pipe-annotation-active {
+    border-color: rgba(0, 190, 255, 0.95);
+    box-shadow: 0 0 12px rgba(0, 180, 255, 0.38);
+}
+
+.gpr-view.forced-pipe-annotation-active canvas {
+    cursor: crosshair;
+}
+
+/* ==========================================
+   ✅ GPR 标注校准持久化：清除校准按钮
+   ========================================== */
+.calibration-clear-btn {
+    padding: 2px 8px;
+    font-size: 12px;
+    line-height: 18px;
+    white-space: nowrap;
+    background: rgba(70, 60, 20, 0.72);
+    border-color: rgba(255, 205, 60, 0.8);
+    color: #fff2c2;
+}
+
+.calibration-clear-btn:hover {
+    filter: brightness(1.15);
+    box-shadow: 0 0 8px rgba(255, 205, 60, 0.55);
+}
+
+/* ==========================================
+   ✅ 偏移后二维剖面：标注圆圈拖动交互
+   ========================================== */
+#mig2dCanvas {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.gpr-view.manual-annotation-active canvas,
+.gpr-view.forced-pipe-annotation-active canvas {
+    cursor: crosshair;
+}

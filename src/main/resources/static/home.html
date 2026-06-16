@@ -181,8 +181,10 @@
                         <div class="gpr-view gpr-view-2d" id="mig2dView">
                             <div class="gpr-view-header">
                                 <h3>偏移后二维剖面</h3>
-                                <button id="btnManualMigAnnotation" class="action-btn-small manual-anno-btn"
-                                    title="进入后在偏移后剖面中单击添加红圈；Ctrl+单击或右键可删除最近的手动红圈">手动标注</button>
+                                <button id="btnManualMigAnnotation" class="action-btn-small manual-anno-btn">手动标注</button>
+                                <button id="btnForcedPipeAnnotation" class="action-btn-small manual-pipe-btn">倾斜管道</button>
+                                <button id="btnClearGprAnnotationCalibration" class="action-btn-small calibration-clear-btn"
+                                    title="清除当前GPR数据文件夹中的 gpr_annotation_calibration.json 校准文件，恢复自动识别结果">清除校准</button>
                             </div>
                             <canvas id="mig2dCanvas"></canvas>
                         </div>
