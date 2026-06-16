@@ -112,6 +112,19 @@
     let annotation3DGroups = [];     // 存储 3D 标注对象
     let gprResult = null;            // 缓存 GPR 结果
 
+    // ✅ 偏移后二维剖面手动标注相关状态
+    let currentGprSegmentIndex = 0;
+    let manualMigAnnotationMode = false;
+    const manualMigAnnotationsBySegment = new Map(); // segIndex -> [{row,col,radius,width,height,manual}]
+    // segIndex -> Set(autoKey)，用于记录被用户手动删除的自动识别红圈。
+    // 自动红圈每次都会由 detectBlobs 重新计算，所以删除自动红圈不能直接 splice，必须记录忽略列表。
+    const ignoredAutoMigAnnotationsBySegment = new Map();
+    const gpr2DRenderInfo = {};                      // canvasId -> {rows,cols,stepX,stepY,w,h}
+    const MANUAL_MIG_ANNOTATION = {
+        displayRadiusPx: 6,
+        deleteHitRadiusPx: 18
+    };
+
     // ROS 机器人相关
     let stompClient = null;          // WebSocket 客户端
     let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
@@ -1394,6 +1407,282 @@
         return { row: centerR, col: centerC, radius: radius, width: width, height: height };
     }
 
+
+    // ==========================================
+    // ✅ 偏移后二维剖面：手动红圈标注工具函数
+    // ==========================================
+    function getManualMigAnnotations(segIndex) {
+        const key = Number(segIndex) || 0;
+        if (!manualMigAnnotationsBySegment.has(key)) {
+            manualMigAnnotationsBySegment.set(key, []);
+        }
+        return manualMigAnnotationsBySegment.get(key);
+    }
+
+    function getIgnoredAutoMigAnnotations(segIndex) {
+        const key = Number(segIndex) || 0;
+        if (!ignoredAutoMigAnnotationsBySegment.has(key)) {
+            ignoredAutoMigAnnotationsBySegment.set(key, new Set());
+        }
+        return ignoredAutoMigAnnotationsBySegment.get(key);
+    }
+
+    function makeAutoMigAnnotationKey(blob) {
+        // detectBlobs 每次重新计算自动红圈，因此用中心和半径生成稳定 key 来“屏蔽”被手动删除的自动红圈。
+        return [
+            Math.round(Number(blob.row) * 10) / 10,
+            Math.round(Number(blob.col) * 10) / 10,
+            Math.round(Number(blob.radius) * 10) / 10
+        ].join("_");
+    }
+
+    function cloneManualMigAnnotation(item, manualIndex = -1) {
+        return {
+            row: Number(item.row),
+            col: Number(item.col),
+            radius: Number(item.radius),
+            width: Number(item.width || item.radius * 2),
+            height: Number(item.height || item.radius * 2),
+            manual: true,
+            source: "manual",
+            manualIndex
+        };
+    }
+
+    function getAutoMigAnnotationBlobs(seg, segIndex) {
+        const autoBlobs = [];
+        if (seg && seg.migratedData) {
+            try {
+                const ignoredSet = getIgnoredAutoMigAnnotations(segIndex);
+                detectBlobs(seg.migratedData).forEach(blob => {
+                    const autoKey = makeAutoMigAnnotationKey(blob);
+                    if (!ignoredSet.has(autoKey)) {
+                        autoBlobs.push({
+                            ...blob,
+                            manual: false,
+                            source: "auto",
+                            autoKey
+                        });
+                    }
+                });
+            } catch (e) {
+                console.warn("自动识别红圈失败：", e);
+            }
+        }
+        return autoBlobs;
+    }
+
+    function getSegmentAnnotationBlobs(seg, segIndex, includeAuto = true) {
+        const autoBlobs = includeAuto ? getAutoMigAnnotationBlobs(seg, segIndex) : [];
+
+        const manualBlobs = getManualMigAnnotations(segIndex)
+            .map((item, idx) => cloneManualMigAnnotation(item, idx))
+            .filter(b => Number.isFinite(b.row) && Number.isFinite(b.col) && Number.isFinite(b.radius));
+
+        return autoBlobs.concat(manualBlobs);
+    }
+
+    function setAnnotationButtonState(enabled) {
+        showAnnotation = !!enabled;
+        const btnAnno = $("btnToggleAnnotation");
+        if (btnAnno) {
+            btnAnno.textContent = "显示标注: " + (showAnnotation ? "ON" : "OFF");
+            btnAnno.classList.toggle("active", showAnnotation);
+        }
+
+        annotation3DGroups.forEach(g => g.visible = showAnnotation);
+        if (window.gprSlicesGroup) {
+            window.gprSlicesGroup.visible = !showAnnotation;
+        }
+    }
+
+    function refreshCurrentMig2DCanvas() {
+        if (!gprResult || !Array.isArray(gprResult.segments)) return;
+        const seg = gprResult.segments[currentGprSegmentIndex];
+        if (seg && seg.migratedData) {
+            render2DCanvas("mig2dCanvas", seg.migratedData);
+        }
+    }
+
+    function updateManualMigAnnotationUI() {
+        const btn = $("btnManualMigAnnotation");
+        const view = $("mig2dView");
+
+        if (btn) {
+            btn.textContent = manualMigAnnotationMode ? "结束标注" : "手动标注";
+            btn.classList.toggle("active", manualMigAnnotationMode);
+        }
+
+        if (view) {
+            view.classList.toggle("manual-annotation-active", manualMigAnnotationMode);
+        }
+    }
+
+    function setManualMigAnnotationMode(enabled) {
+        const nextEnabled = !!enabled;
+
+        if (nextEnabled && (!gprResult || !Array.isArray(gprResult.segments) || !gprResult.segments.length)) {
+            alert("请先点击“开始处理”并加载探地雷达剖面数据。 ");
+            return;
+        }
+
+        manualMigAnnotationMode = nextEnabled;
+        updateManualMigAnnotationUI();
+
+        if (manualMigAnnotationMode) {
+            // 手动标注时自动打开红圈显示，避免用户看不到自动红圈和新增红圈。
+            setAnnotationButtonState(true);
+            refreshCurrentMig2DCanvas();
+            setStatus("手动标注中：在偏移后二维剖面单击添加红圈；Ctrl+单击、Shift+单击或右键删除最近红圈（手动和自动均可删除）。", "success");
+        } else {
+            refreshCurrentMig2DCanvas();
+
+            // 结束标注后，立即重建 3D 红圈与相邻剖面管道连接。
+            if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
+                render3DZigzagAll(gprResult, true);
+                const totalManual = Array.from(manualMigAnnotationsBySegment.values()).reduce((sum, arr) => sum + arr.length, 0);
+                setStatus("手动标注结束。三维视图中的管道连接已按最新红圈更新，当前手动红圈 " + totalManual + " 个。", "success");
+            }
+        }
+    }
+
+    function getCanvasContentPoint(canvas, event) {
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height || !canvas.width || !canvas.height) return null;
+
+        // canvas 使用 object-fit: contain 时，真实图像可能有上下/左右留黑边。
+        const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+        const displayW = canvas.width * scale;
+        const displayH = canvas.height * scale;
+        const offsetX = (rect.width - displayW) / 2;
+        const offsetY = (rect.height - displayH) / 2;
+
+        const x = (event.clientX - rect.left - offsetX) / scale;
+        const y = (event.clientY - rect.top - offsetY) / scale;
+
+        if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return null;
+        return { x, y };
+    }
+
+    function addManualMigAnnotationAt(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info) return false;
+
+        const segIndex = currentGprSegmentIndex;
+        const col = Math.max(0, Math.min(info.cols - 1, canvasPoint.x * info.stepX));
+        const row = Math.max(0, Math.min(info.rows - 1, canvasPoint.y * info.stepY));
+
+        // 让手动红圈在当前显示画布中保持约 12px 的视觉半径，同时在 3D 中能转换为合理物理半径。
+        const pixelScale = Math.max(info.stepX, info.stepY, 1);
+        const matrixRadius = Math.max(
+            CONFIG.minRadius + 1,
+            MANUAL_MIG_ANNOTATION.displayRadiusPx * pixelScale - CONFIG.radiusPadding
+        );
+
+        getManualMigAnnotations(segIndex).push({
+            row,
+            col,
+            radius: matrixRadius,
+            width: matrixRadius * 2,
+            height: matrixRadius * 2,
+            manual: true,
+            createdAt: Date.now()
+        });
+
+        refreshCurrentMig2DCanvas();
+        setStatus("已添加 1 个手动红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+        return true;
+    }
+
+    function removeNearestMigAnnotation(canvasPoint) {
+        const info = gpr2DRenderInfo.mig2dCanvas;
+        if (!info) return false;
+
+        const seg = gprResult && gprResult.segments ? gprResult.segments[currentGprSegmentIndex] : null;
+        const candidates = getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true);
+        if (!candidates.length) {
+            setStatus("当前剖面没有可删除的红圈。", "error");
+            return false;
+        }
+
+        let best = null;
+        let bestDist = Infinity;
+
+        candidates.forEach(item => {
+            const x = Number(item.col) / info.stepX;
+            const y = Number(item.row) / info.stepY;
+            const dist = Math.hypot(x - canvasPoint.x, y - canvasPoint.y);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = item;
+            }
+        });
+
+        if (!best || bestDist > MANUAL_MIG_ANNOTATION.deleteHitRadiusPx) {
+            setStatus("附近没有可删除的红圈。", "error");
+            return false;
+        }
+
+        if (best.source === "manual") {
+            const arr = getManualMigAnnotations(currentGprSegmentIndex);
+            const idx = Number(best.manualIndex);
+            if (idx >= 0 && idx < arr.length) {
+                arr.splice(idx, 1);
+                refreshCurrentMig2DCanvas();
+                setStatus("已删除最近的 1 个手动红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+                return true;
+            }
+        }
+
+        if (best.source === "auto" && best.autoKey) {
+            getIgnoredAutoMigAnnotations(currentGprSegmentIndex).add(best.autoKey);
+            refreshCurrentMig2DCanvas();
+            setStatus("已删除最近的 1 个自动识别红圈；点击“结束标注”后会立即更新三维管道连接。", "success");
+            return true;
+        }
+
+        setStatus("删除失败：没有识别到红圈来源。", "error");
+        return false;
+    }
+
+    function handleManualMigCanvasPointer(event) {
+        if (!manualMigAnnotationMode) return;
+        event.preventDefault();
+        event.stopPropagation();
+
+        const canvas = $("mig2dCanvas");
+        const pt = getCanvasContentPoint(canvas, event);
+        if (!pt) return;
+
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.button === 2) {
+            removeNearestMigAnnotation(pt);
+        } else {
+            addManualMigAnnotationAt(pt);
+        }
+    }
+
+    function initManualMigAnnotationFeature() {
+        const btn = $("btnManualMigAnnotation");
+        const canvas = $("mig2dCanvas");
+
+        if (btn) {
+            btn.addEventListener("click", function () {
+                setManualMigAnnotationMode(!manualMigAnnotationMode);
+            });
+        }
+
+        if (canvas) {
+            canvas.addEventListener("click", handleManualMigCanvasPointer);
+            canvas.addEventListener("contextmenu", function (event) {
+                if (!manualMigAnnotationMode) return;
+                handleManualMigCanvasPointer(event);
+            });
+        }
+
+        updateManualMigAnnotationUI();
+    }
+
     // SLAM 本地坐标 (x,y) 转 全局 GPS 经纬度 (lat,lon)
     window.slamToGps = function (targetX, targetY) {
         if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
@@ -1618,6 +1907,9 @@
         const gprViewsContainer = document.querySelector('.gpr-views');
         let showSlices = false; // 初始状态为隐藏
 
+        // ✅ 初始化偏移后二维剖面的手动红圈标注按钮和鼠标事件
+        initManualMigAnnotationFeature();
+
         const btnDogStand = $("btnDogStand");  // 机器狗站立
         const btnDogWalk = $("btnDogControl"); // 运动控制
 
@@ -1740,9 +2032,12 @@
 
         if (btnAnno) {
             btnAnno.addEventListener("click", function () {
-                showAnnotation = !showAnnotation;
-                this.textContent = "显示标注: " + (showAnnotation ? "ON" : "OFF");
-                this.classList.toggle("active", showAnnotation);
+                const nextShow = !showAnnotation;
+                setAnnotationButtonState(nextShow);
+                if (!nextShow && manualMigAnnotationMode) {
+                    manualMigAnnotationMode = false;
+                    updateManualMigAnnotationUI();
+                }
                 if (segmentSelect && !segmentSelect.disabled) {
                     const idx = parseInt(segmentSelect.value, 10);
                     if (!isNaN(idx)) showSegment(idx);
@@ -2606,6 +2901,11 @@
             throw new Error("返回数据中没有 segments");
         }
         gprResult = result;
+        currentGprSegmentIndex = 0;
+        manualMigAnnotationMode = false;
+        manualMigAnnotationsBySegment.clear();
+        ignoredAutoMigAnnotationsBySegment.clear();
+        updateManualMigAnnotationUI();
 
         // ✅ 数据加载成功后，显示标注按钮
         const btnAnno = $("btnToggleAnnotation");
@@ -2639,6 +2939,7 @@
         if (!gprResult || !gprResult.segments) return;
         if (index < 0 || index >= gprResult.segments.length) return;
 
+        currentGprSegmentIndex = index;
         const seg = gprResult.segments[index];
 
         if (seg.rawData) {
@@ -2673,6 +2974,16 @@
 
         canvas.width = w;
         canvas.height = h;
+
+        // 记录本次二维绘制的矩阵尺寸和降采样比例，供鼠标手动标注反算到原始矩阵坐标。
+        gpr2DRenderInfo[canvasId] = {
+            rows,
+            cols,
+            stepX,
+            stepY,
+            w,
+            h
+        };
 
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
@@ -2717,7 +3028,8 @@
 
         // ✅ 绘制标注红圈 (仅针对偏移后剖面 mig2dCanvas)
         if (canvasId === "mig2dCanvas" && showAnnotation) {
-            const blobs = detectBlobs(matrix);
+            const seg = gprResult && gprResult.segments ? gprResult.segments[currentGprSegmentIndex] : null;
+            const blobs = seg ? getSegmentAnnotationBlobs(seg, currentGprSegmentIndex, true) : detectBlobs(matrix);
 
             ctx.lineWidth = 1;
             ctx.strokeStyle = "#ff0000"; // 红色
@@ -2733,6 +3045,8 @@
                 ctx.arc(cx, cy, r, 0, 2 * Math.PI);
                 ctx.stroke();
             });
+
+            ctx.shadowBlur = 0;
         }
     }
 
@@ -2841,6 +3155,9 @@
 
         // ✅ 新增：创建一个专门用于存放雷达二维剖面的分组，方便一键隐藏
         window.gprSlicesGroup = new THREE.Group();
+        // ✅ 修复：render3DZigzagAll 会重建 gprSlicesGroup，默认 visible=true。
+        // 当“显示标注”为 ON 时，重建后必须立刻继续隐藏剖面，只显示红圈/管道连接。
+        window.gprSlicesGroup.visible = !showAnnotation;
         world.add(window.gprSlicesGroup);
 
         // 3. 计算几何包围盒 + 最大深度（单位：m）
@@ -2870,7 +3187,7 @@
 
             // ✅ 3D 标注圆环 + 记录圆心和半径
             if (useMigrated && seg.migratedData) {
-                const blobs = detectBlobs(seg.migratedData);
+                const blobs = getSegmentAnnotationBlobs(seg, segIndex, true);
                 const annoGroup = new THREE.Group();
 
                 const phi = geo.phiRad || 0.0;

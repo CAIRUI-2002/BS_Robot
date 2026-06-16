@@ -178,8 +178,12 @@
                             <h3>原始二维剖面</h3>
                             <canvas id="raw2dCanvas"></canvas>
                         </div>
-                        <div class="gpr-view gpr-view-2d">
-                            <h3>偏移后二维剖面</h3>
+                        <div class="gpr-view gpr-view-2d" id="mig2dView">
+                            <div class="gpr-view-header">
+                                <h3>偏移后二维剖面</h3>
+                                <button id="btnManualMigAnnotation" class="action-btn-small manual-anno-btn"
+                                    title="进入后在偏移后剖面中单击添加红圈；Ctrl+单击或右键可删除最近的手动红圈">手动标注</button>
+                            </div>
                             <canvas id="mig2dCanvas"></canvas>
                         </div>
                         <div class="gpr-view gpr-view-3d">
