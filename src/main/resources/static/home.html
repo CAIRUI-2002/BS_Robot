@@ -207,6 +207,11 @@
                                         📍 发送破损点坐标
                                     </button>
 
+                                    <button id="btnManualScanArea" class="action-btn-small crawler-action-btn manual-scan-btn"
+                                        title="在三维视图中指定扫描中心和扫描方向，不依赖电缆破损点">
+                                        🧭 指定扫描区域
+                                    </button>
+
                                     <div class="joystick-title">🚀 履带车控制</div>
                                     <div class="joystick-base" id="carJoystickBase">
                                         <div class="joystick-stick" id="carJoystickStick"></div>
@@ -732,7 +737,7 @@
             </div>
             <div class="cyber-modal-body scan-param-body">
                 <div class="scan-param-desc">
-                    设置完成后，上位机会在破损点周围生成矩形扫描范围和 Z 字形扫描路径，并将规划好的 GPS 航点发送给履带小车。
+                    设置完成后，上位机会生成矩形扫描范围和 Z 字形扫描路径，并将规划好的 GPS 航点发送给履带小车。破损点扫描会自动以破损点为中心；手动扫描会要求你在三维视图中点击扫描中心和方向点。
                 </div>
 
                 <label class="scan-param-row">

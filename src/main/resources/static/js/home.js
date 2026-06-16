@@ -810,7 +810,7 @@
         return Math.max(min, Math.min(max, n));
     }
 
-    function openScanParamModal(defaults = DEFAULT_SCAN_PARAMS) {
+    function openScanParamModal(defaults = DEFAULT_SCAN_PARAMS, options = {}) {
         const modal = document.getElementById("scanParamModal");
         const inputL = document.getElementById("scanRectLengthInput");
         const inputW = document.getElementById("scanRectWidthInput");
@@ -818,6 +818,10 @@
         const btnOk = document.getElementById("btnScanParamConfirm");
         const btnCancel = document.getElementById("btnScanParamCancel");
         const btnClose = document.getElementById("btnScanParamClose");
+
+        const titleText = options.title || "🧭 履带小车扫描范围参数设置";
+        const descText = options.desc || "设置完成后，上位机会生成矩形扫描范围和 Z 字形扫描路径，并将规划好的 GPS 航点发送给履带小车。";
+        const confirmText = options.confirmText || "确定并规划";
 
         if (!modal || !inputL || !inputW || !inputA || !btnOk) {
             // 如果 HTML 没有同步更新，使用浏览器 prompt 兜底，避免功能完全不可用。
@@ -834,6 +838,16 @@
             });
         }
 
+        const titleEl = modal.querySelector(".cyber-modal-header span");
+        const descEl = modal.querySelector(".scan-param-desc");
+        const oldTitle = titleEl ? titleEl.textContent : "";
+        const oldDesc = descEl ? descEl.textContent : "";
+        const oldConfirmText = btnOk.textContent;
+
+        if (titleEl) titleEl.textContent = titleText;
+        if (descEl) descEl.textContent = descText;
+        btnOk.textContent = confirmText;
+
         inputL.value = String(defaults.length ?? DEFAULT_SCAN_PARAMS.length);
         inputW.value = String(defaults.width ?? DEFAULT_SCAN_PARAMS.width);
         inputA.value = String(defaults.angleDeg ?? DEFAULT_SCAN_PARAMS.angleDeg);
@@ -849,6 +863,9 @@
                 if (btnCancel) btnCancel.onclick = null;
                 if (btnClose) btnClose.onclick = null;
                 modal.onclick = null;
+                if (titleEl) titleEl.textContent = oldTitle;
+                if (descEl) descEl.textContent = oldDesc;
+                btnOk.textContent = oldConfirmText;
                 resolve(value);
             }
 
@@ -975,13 +992,30 @@
         };
     }
 
-    function buildUpperComputerScanPlan(faultSlamPos, params) {
-        const centerGps = window.slamToGps(faultSlamPos.x, faultSlamPos.y);
+    function buildUpperComputerScanPlan(centerSlamPos, params, options = {}) {
+        if (!centerSlamPos) {
+            throw new Error("扫描中心点无效，无法生成扫描路径。");
+        }
+
+        const scanCenter = {
+            x: Number(centerSlamPos.x),
+            y: Number(centerSlamPos.y),
+            z: Number(centerSlamPos.z ?? 0.10)
+        };
+        if (!Number.isFinite(scanCenter.x) || !Number.isFinite(scanCenter.y)) {
+            throw new Error("扫描中心点坐标无效，无法生成扫描路径。");
+        }
+
+        const centerGps = window.slamToGps(scanCenter.x, scanCenter.y);
         if (!centerGps) {
             throw new Error("GPS 尚未标定完成，无法将扫描路径转换为经纬度。");
         }
 
-        const slamYaw = getCableSlamYawAtFault(faultSlamPos);
+        // 破损点扫描：不传 options.slamYaw 时，沿用电缆局部切向。
+        // 手动指定扫描区域：传入用户在三维视图中点击得到的 slamYaw。
+        const slamYaw = Number.isFinite(Number(options.slamYaw))
+            ? normalizeRad(Number(options.slamYaw))
+            : getCableSlamYawAtFault(scanCenter);
         const geoYawRad = slamYawToGeoYawRad(slamYaw);
         const zigzagPlan = generateLocalZigzagPlan(params.length, params.width, params.angleDeg);
         const localZigzag = zigzagPlan.points;
@@ -994,8 +1028,8 @@
             { x: zigzagPlan.startX, y: zigzagPlan.width / 2 }
         ];
 
-        const zigzagSlam = localZigzag.map(p => localScanPointToSlam(faultSlamPos, slamYaw, p.x, p.y));
-        const rectangleSlam = rectangleLocal.map(p => localScanPointToSlam(faultSlamPos, slamYaw, p.x, p.y));
+        const zigzagSlam = localZigzag.map(p => localScanPointToSlam(scanCenter, slamYaw, p.x, p.y));
+        const rectangleSlam = rectangleLocal.map(p => localScanPointToSlam(scanCenter, slamYaw, p.x, p.y));
 
         const waypoints = zigzagSlam.map((p, idx) => {
             const gps = window.slamToGps(p.x, p.y);
@@ -1009,15 +1043,19 @@
             };
         });
 
+        const source = options.source || "fault";
+        const taskPrefix = options.taskPrefix || (source === "manual_area" ? "manual_scan" : "scan");
+
         return {
             type: "scan_path",
-            taskId: "scan_" + Date.now(),
+            source,
+            taskId: taskPrefix + "_" + Date.now(),
             center: {
                 lat: Number(centerGps.lat.toFixed(8)),
                 lon: Number(centerGps.lon.toFixed(8)),
-                x: Number(faultSlamPos.x.toFixed(4)),
-                y: Number(faultSlamPos.y.toFixed(4)),
-                z: Number((faultSlamPos.z ?? 0.10).toFixed(4)),
+                x: Number(scanCenter.x.toFixed(4)),
+                y: Number(scanCenter.y.toFixed(4)),
+                z: Number((scanCenter.z ?? 0.10).toFixed(4)),
                 yawRad: Number(geoYawRad.toFixed(6)),
                 yawDeg: Number((geoYawRad * 180 / Math.PI).toFixed(3)),
                 slamYawRad: Number(slamYaw.toFixed(6))
@@ -1140,6 +1178,7 @@
     async function sendScanPlanToCrawler(plan) {
         const payload = {
             type: "scan_path",
+            source: plan.source || "fault",
             taskId: plan.taskId,
             center: plan.center,
             params: plan.params,
@@ -1162,6 +1201,343 @@
     }
 
 
+
+
+    // ==========================================
+    // ✅ 手动指定履带小车扫描区域
+    // 交互流程：点击“指定扫描区域” -> 设置 L/W/夹角 -> 在三维视图依次点击中心点和方向点 -> 上位机规划并下发航点。
+    // ==========================================
+    let manualScanPickState = null;
+
+    function gprVectorToSlamPoint(v) {
+        // slamPointToGprVector 的逆变换：GPR页 (x, y高度, z) -> 路径页 SLAM (x, -z, y高度)
+        return {
+            x: Number(v.x),
+            y: -Number(v.z),
+            z: Number(v.y || 0.10)
+        };
+    }
+
+    function getManualScanTipEl() {
+        const container = document.getElementById("threeContainer");
+        if (!container) return null;
+        let el = document.getElementById("gprManualScanTip");
+        if (!el) {
+            el = document.createElement("div");
+            el.id = "gprManualScanTip";
+            el.className = "gpr-manual-scan-tip";
+            container.appendChild(el);
+        }
+        return el;
+    }
+
+    function showManualScanTip(html) {
+        const el = getManualScanTipEl();
+        if (!el) return;
+        el.innerHTML = html;
+        el.style.display = "block";
+    }
+
+    function hideManualScanTip() {
+        const el = document.getElementById("gprManualScanTip");
+        if (el) el.style.display = "none";
+    }
+
+    function clearManualScanPickOverlay() {
+        if (window.gprScene && window.gprManualScanPickGroup) {
+            window.gprScene.remove(window.gprManualScanPickGroup);
+            disposeThreeObjectForReuse(window.gprManualScanPickGroup);
+        }
+        window.gprManualScanPickGroup = null;
+    }
+
+    function addManualScanTextSprite(text, slamPoint, colorCss = "#ffffff") {
+        const canvas = document.createElement("canvas");
+        canvas.width = 192;
+        canvas.height = 80;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.font = "bold 26px Microsoft YaHei, Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = colorCss;
+        ctx.shadowColor = "#000000";
+        ctx.shadowBlur = 8;
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false
+        }));
+        const pos = slamPointToGprVector(slamPoint);
+        sprite.position.set(pos.x, pos.y + 0.35, pos.z);
+        sprite.scale.set(1.25, 0.52, 1);
+        sprite.renderOrder = 35;
+        return sprite;
+    }
+
+    function renderManualScanPickOverlay(centerSlam, directionSlam = null) {
+        if (!window.gprScene || typeof THREE === "undefined") return;
+
+        clearManualScanPickOverlay();
+
+        const group = new THREE.Group();
+        group.name = "手动扫描区域选点辅助";
+
+        if (centerSlam) {
+            const centerPos = slamPointToGprVector(centerSlam);
+            const centerMarker = new THREE.Mesh(
+                new THREE.SphereGeometry(0.12, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0x18a058, depthTest: false })
+            );
+            centerMarker.position.copy(centerPos);
+            centerMarker.renderOrder = 32;
+            group.add(centerMarker);
+            group.add(addManualScanTextSprite("中心", centerSlam, "#8bff8b"));
+        }
+
+        if (centerSlam && directionSlam) {
+            const dirPos = slamPointToGprVector(directionSlam);
+            const dirMarker = new THREE.Mesh(
+                new THREE.SphereGeometry(0.10, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xffa500, depthTest: false })
+            );
+            dirMarker.position.copy(dirPos);
+            dirMarker.renderOrder = 32;
+            group.add(dirMarker);
+            group.add(addManualScanTextSprite("方向", directionSlam, "#ffd166"));
+
+            const lineGeom = new THREE.BufferGeometry().setFromPoints([
+                slamPointToGprVector(centerSlam),
+                dirPos
+            ]);
+            const line = new THREE.Line(
+                lineGeom,
+                new THREE.LineBasicMaterial({ color: 0xffa500, depthTest: false })
+            );
+            line.renderOrder = 31;
+            line.frustumCulled = false;
+            group.add(line);
+        }
+
+        window.gprScene.add(group);
+        window.gprManualScanPickGroup = group;
+    }
+
+    function getSlamPointFromGprMouseEvent(event) {
+        if (!window.gprRenderer || !window.gprCamera || typeof THREE === "undefined") return null;
+
+        const dom = window.gprRenderer.domElement;
+        const rect = dom.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+
+        const mouse = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, window.gprCamera);
+
+        // 三维重建页以 Y 为高度轴；用 y=0 的水平面承接点击，适合指定地面扫描区域。
+        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const hit = new THREE.Vector3();
+        const ok = raycaster.ray.intersectPlane(groundPlane, hit);
+        if (!ok) return null;
+
+        const slam = gprVectorToSlamPoint(hit);
+        slam.z = 0.10;
+        if (!Number.isFinite(slam.x) || !Number.isFinite(slam.y)) return null;
+        return slam;
+    }
+
+    function cleanupManualScanPicking() {
+        if (!manualScanPickState) return;
+
+        const dom = manualScanPickState.dom;
+        if (dom && manualScanPickState.onPointerDown) {
+            dom.removeEventListener("pointerdown", manualScanPickState.onPointerDown, true);
+            dom.removeEventListener("pointermove", manualScanPickState.onPointerMove, true);
+        }
+        if (manualScanPickState.onKeyDown) {
+            window.removeEventListener("keydown", manualScanPickState.onKeyDown, true);
+        }
+        if (dom) {
+            dom.style.cursor = manualScanPickState.oldCursor || "";
+        }
+
+        hideManualScanTip();
+        manualScanPickState = null;
+    }
+
+    function pickManualScanAreaPlan(params) {
+        ensureStandaloneGprSceneForMap();
+
+        if (!window.gprRenderer || !window.gprCamera) {
+            return Promise.reject(new Error("三维视图尚未初始化，无法指定扫描区域。"));
+        }
+
+        if (manualScanPickState) {
+            cleanupManualScanPicking();
+        }
+
+        clearManualScanPickOverlay();
+
+        const dom = window.gprRenderer.domElement;
+        const oldCursor = dom.style.cursor;
+        dom.style.cursor = "crosshair";
+
+        return new Promise((resolve, reject) => {
+            const state = {
+                dom,
+                oldCursor,
+                step: "center",
+                centerSlam: null,
+                latestDirectionSlam: null,
+                resolved: false
+            };
+
+            function finish(value, isError = false) {
+                if (state.resolved) return;
+                state.resolved = true;
+                cleanupManualScanPicking();
+                if (isError) reject(value);
+                else resolve(value);
+            }
+
+            state.onPointerDown = function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                if (event.button !== undefined && event.button !== 0) return;
+
+                const slam = getSlamPointFromGprMouseEvent(event);
+                if (!slam) {
+                    alert("当前点击位置无法投影到地面平面，请调整视角后重试。 ");
+                    return;
+                }
+
+                if (state.step === "center") {
+                    state.centerSlam = slam;
+                    state.step = "direction";
+                    renderManualScanPickOverlay(state.centerSlam);
+                    showManualScanTip("已选择扫描中心点。请继续在三维视图中点击 <b>扫描前进方向点</b>。<span class='hotkey'>Esc</span> 取消");
+                    return;
+                }
+
+                const dx = slam.x - state.centerSlam.x;
+                const dy = slam.y - state.centerSlam.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist < 0.15) {
+                    alert("方向点距离中心点太近，请重新点击一个更远的方向点。 ");
+                    return;
+                }
+
+                renderManualScanPickOverlay(state.centerSlam, slam);
+                const slamYaw = Math.atan2(dy, dx);
+                const plan = buildUpperComputerScanPlan(state.centerSlam, params, {
+                    slamYaw,
+                    source: "manual_area",
+                    taskPrefix: "manual_scan"
+                });
+                finish(plan, false);
+            };
+
+            state.onPointerMove = function (event) {
+                if (state.step !== "direction" || !state.centerSlam) return;
+                const slam = getSlamPointFromGprMouseEvent(event);
+                if (!slam) return;
+                state.latestDirectionSlam = slam;
+                renderManualScanPickOverlay(state.centerSlam, slam);
+            };
+
+            state.onKeyDown = function (event) {
+                if (event.key === "Escape") {
+                    clearManualScanPickOverlay();
+                    finish(new Error("已取消手动指定扫描区域。"), true);
+                }
+            };
+
+            manualScanPickState = state;
+            dom.addEventListener("pointerdown", state.onPointerDown, true);
+            dom.addEventListener("pointermove", state.onPointerMove, true);
+            window.addEventListener("keydown", state.onKeyDown, true);
+
+            showManualScanTip("请在三维视图中点击 <b>扫描区域中心点</b>，再点击 <b>扫描前进方向点</b>。<span class='hotkey'>Esc</span> 取消");
+        });
+    }
+
+    async function startManualScanAreaPlanning(btnManualScan) {
+        const originText = btnManualScan ? btnManualScan.innerText : "";
+
+        try {
+            if (!window.isGpsCalibrated || !window.gpsAnchor) {
+                alert("⚠️ GPS 尚未标定完成，无法把手动扫描区域转换为履带小车经纬度航点！\n(可按 Shift+C 触发室内虚拟标定)");
+                return;
+            }
+
+            const params = await openScanParamModal(DEFAULT_SCAN_PARAMS, {
+                title: "🧭 手动指定扫描区域参数设置",
+                desc: "设置矩形长度、宽度和 Z 字路径夹角。点击确定后，请在三维视图中依次点击扫描中心点和扫描前进方向点；该流程不依赖电缆破损点。",
+                confirmText: "下一步：选中心和方向"
+            });
+            if (!params) return;
+
+            ensureStandaloneGprSceneForMap();
+
+            // 有当前点云地图时尽量自动加载，便于用户在点云地图上选扫描区域；没有地图也允许在网格平面上选点。
+            if (!window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
+                try {
+                    loadCurrentPathFaultMapToGpr();
+                } catch (e) {
+                    console.warn("⚠️ 当前没有可加载的点云地图，允许在三维网格平面上手动指定扫描区域：", e);
+                }
+            }
+
+            if (btnManualScan) {
+                btnManualScan.disabled = true;
+                btnManualScan.classList.add("picking");
+                btnManualScan.innerText = "🎯 选中心/方向";
+            }
+
+            const plan = await pickManualScanAreaPlan(params);
+
+            if (btnManualScan) btnManualScan.innerText = "⏳ 绘制路径...";
+            clearManualScanPickOverlay();
+            renderScanPlanOnGpr(plan);
+
+            if (btnManualScan) btnManualScan.innerText = "⏳ 发送路径...";
+            await sendScanPlanToCrawler(plan);
+
+            const extendTip = plan.params.autoExtended
+                ? `，末段自动延长 ${plan.params.extensionLength}m，实际L=${plan.params.length}m`
+                : "";
+            setStatus(`✅ 已手动指定扫描区域并下发履带小车路径：设置L=${plan.params.requestedLength}m${extendTip}，W=${plan.params.width}m，夹角=${plan.params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
+            console.log("🧭 手动指定扫描区域路径已下发：", plan);
+
+            if (btnManualScan) btnManualScan.innerText = `✅ 已发送${plan.waypoints.length}个航点`;
+        } catch (err) {
+            if (err && String(err.message || "").includes("已取消")) {
+                setStatus("已取消手动指定扫描区域。", "");
+            } else {
+                console.error("⚠️ 手动指定扫描区域失败：", err);
+                alert("❌ 手动指定扫描区域失败：" + (err.message || err));
+                setStatus("手动指定扫描区域失败：" + (err.message || err), "error");
+                if (btnManualScan) btnManualScan.innerText = "❌ 指定失败";
+            }
+        } finally {
+            cleanupManualScanPicking();
+            if (btnManualScan) {
+                setTimeout(() => {
+                    btnManualScan.innerText = originText || "🧭 指定扫描区域";
+                    btnManualScan.disabled = false;
+                    btnManualScan.classList.remove("picking");
+                }, 1500);
+            }
+        }
+    }
     // ==========================================
     // ✅ 新增：精确计算滑块 Thumb 实时偏移量的浮动标签函数
     // ==========================================
@@ -9882,7 +10258,10 @@
                     btnSendFault.disabled = true;
 
                     // 3. 上位机基于破损点、局部电缆切向和参数生成扫描路径
-                    const plan = buildUpperComputerScanPlan(window.lastFaultCablePos, params);
+                    const plan = buildUpperComputerScanPlan(window.lastFaultCablePos, params, {
+                        source: "fault",
+                        taskPrefix: "scan"
+                    });
 
                     // 4. 在三维重建页点云地图中绘制矩形范围和 Z 字形路径虚线
                     renderScanPlanOnGpr(plan);
@@ -9911,6 +10290,13 @@
                         btnSendFault.disabled = false;
                     }, 2000);
                 }
+            });
+        }
+
+        const btnManualScanArea = document.getElementById('btnManualScanArea');
+        if (btnManualScanArea) {
+            btnManualScanArea.addEventListener('click', function () {
+                startManualScanAreaPlanning(btnManualScanArea);
             });
         }
     })();

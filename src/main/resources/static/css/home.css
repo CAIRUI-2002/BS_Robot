@@ -3693,10 +3693,47 @@ input[type="range"]::-webkit-slider-thumb {
     transition: all 0.2s ease;
 }
 
-/* 发送破损点按钮与摇杆标题之间的距离 */
-#btnSendFaultToCar {
+/* 发送破损点/指定扫描区域按钮与摇杆标题之间的距离 */
+#btnSendFaultToCar,
+#btnManualScanArea {
     margin-bottom: 6px;
-    /* 原来 8px，缩小 */
+}
+
+#btnManualScanArea.manual-scan-btn {
+    background: linear-gradient(180deg, #00a8ff, #0067b1) !important;
+    border-color: #00a8ff !important;
+    box-shadow: 0 0 6px rgba(0, 168, 255, 0.45);
+}
+
+#btnManualScanArea.manual-scan-btn.picking {
+    background: linear-gradient(180deg, #18a058, #0c6b3b) !important;
+    border-color: #18a058 !important;
+    box-shadow: 0 0 12px rgba(24, 160, 88, 0.75);
+}
+
+.gpr-manual-scan-tip {
+    position: absolute;
+    left: 50%;
+    top: 14px;
+    transform: translateX(-50%);
+    z-index: 180;
+    min-width: 300px;
+    max-width: calc(100% - 40px);
+    padding: 8px 12px;
+    border: 1px solid rgba(0, 229, 255, 0.75);
+    border-radius: 6px;
+    background: rgba(2, 20, 42, 0.92);
+    color: #eaf6ff;
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: center;
+    box-shadow: 0 0 14px rgba(0, 180, 255, 0.45);
+    pointer-events: none;
+}
+
+.gpr-manual-scan-tip .hotkey {
+    color: #ffd166;
+    font-weight: bold;
 }
 
 /* 悬停效果 */
