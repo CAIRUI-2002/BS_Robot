@@ -243,6 +243,120 @@
     }
 
     // ==========================================
+    // ✅ 点云地图经纬度元数据工具函数
+    // 说明：PCD 只保存 SLAM 点云本体；同名 .geo.json 保存 GPS/SLAM 标定参数。
+    // 三维重建页读取 .geo.json 后会恢复 window.gpsAnchor / window.slamAnchor / window.headingOffset，
+    // 从而复用现有 slamToGps() 生成履带小车经纬度航点。
+    // ==========================================
+    function roundNumber(value, digits = 8) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return null;
+        return Number(n.toFixed(digits));
+    }
+
+    function clonePlainGps(gps) {
+        if (!gps) return null;
+        const lat = Number(gps.lat);
+        const lon = Number(gps.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+        return {
+            lat: roundNumber(lat, 10),
+            lon: roundNumber(lon, 10)
+        };
+    }
+
+    function clonePlainSlam(pt) {
+        if (!pt) return null;
+        const x = Number(pt.x);
+        const y = Number(pt.y);
+        const z = Number(pt.z ?? 0);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return {
+            x: roundNumber(x, 5),
+            y: roundNumber(y, 5),
+            z: roundNumber(z, 5)
+        };
+    }
+
+    function applyLoadedMapGeoMetadata(meta, sourceName = "") {
+        if (!meta || typeof meta !== "object") return false;
+
+        const calibration = meta.calibration || meta.gpsCalibration || meta;
+        const gpsAnchor = clonePlainGps(calibration.gpsAnchor);
+        const slamAnchor = clonePlainSlam(calibration.slamAnchor);
+        const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? 0);
+
+        if (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset)) {
+            console.warn("⚠️ 点云经纬度元数据缺少 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
+            return false;
+        }
+
+        window.gpsAnchor = gpsAnchor;
+        window.slamAnchor = slamAnchor;
+        window.headingOffset = headingOffset;
+        window.isGpsCalibrated = true;
+
+        if (calibration.currentGps) {
+            const currentGps = clonePlainGps(calibration.currentGps);
+            if (currentGps) window.currentGps = currentGps;
+        }
+
+        window.loadedPointCloudGeoMetadata = meta;
+        window.loadedPointCloudGeoSource = sourceName || meta.pcdFileName || "loaded-map";
+
+        console.log("✅ 已恢复点云地图经纬度标定：", {
+            source: window.loadedPointCloudGeoSource,
+            gpsAnchor: window.gpsAnchor,
+            slamAnchor: window.slamAnchor,
+            headingOffset: window.headingOffset
+        });
+
+        return true;
+    }
+
+    function inferGeoJsonPathFromPcdPath(pcdPath) {
+        const path = String(pcdPath || "").trim();
+        if (!path) return "";
+        if (/\.pcd$/i.test(path)) return path.replace(/\.pcd$/i, ".geo.json");
+        return path + ".geo.json";
+    }
+
+    async function tryLoadServerPcdGeoMetadata(pcdPath) {
+        const geoPath = inferGeoJsonPathFromPcdPath(pcdPath);
+        if (!geoPath) return null;
+
+        try {
+            const url = "/api/gpr/pcd?filePath=" + encodeURIComponent(geoPath);
+            const res = await fetch(url, { cache: "no-store" });
+            if (!res.ok) return null;
+
+            const text = await res.text();
+            return JSON.parse(text);
+        } catch (err) {
+            console.warn("未读取到同名点云经纬度元数据：", geoPath, err);
+            return null;
+        }
+    }
+
+    function readFileAsText(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(String(e.target.result || ""));
+            reader.onerror = () => reject(new Error("读取文件失败：" + file.name));
+            reader.readAsText(file);
+        });
+    }
+
+    function readFileAsArrayBuffer(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(e.target.result);
+            reader.onerror = () => reject(new Error("读取文件失败：" + file.name));
+            reader.readAsArrayBuffer(file);
+        });
+    }
+
+    // ==========================================
     // ✅ 机械臂末端摄像头实时视频流
     // ==========================================
     function initArmEndCameraStream() {
@@ -3107,62 +3221,23 @@
                 // 拼接 Java 后端接口的 URL
                 const url = "/api/gpr/pcd?filePath=" + encodeURIComponent(pcdPath);
 
+                const geoMetaPromise = tryLoadServerPcdGeoMetadata(pcdPath);
                 const loader = new THREE.PCDLoader();
-                loader.load(url, function (points) {
-                    // 如果之前已经加载过点云或当前地图，先清除旧的外部叠加层
-                    clearCurrentGprExternalMapLayer();
+                loader.load(url, async function (points) {
+                    let geoMeta = null;
+                    try {
+                        geoMeta = await geoMetaPromise;
+                    } catch (e) {
+                        console.warn("读取同名经纬度元数据失败：", e);
+                    }
 
-                    // 1. 点云材质与颜色设置
-                    points.material.size = 0.05; // 根据视觉效果调节大小
-                    // points.material.color.setHex(0x00ffff); // 如果你想给点云统一染色，可以取消注释
+                    addLoadedPcdPointsToGprScene(points, pcdPath, geoMeta);
 
-                    // 2. 几何体居中，方便后续做对齐
-                    points.geometry.center();
-                    points.geometry.computeBoundingBox();
-                    const bbox = points.geometry.boundingBox;
-
-                    // 3. 姿态调整：机器人 SLAM 点云一般是 Z 轴朝上，而 Three.js 是 Y 轴朝上
-                    points.rotation.x = -Math.PI / 2;
-
-                    // 4. 高度拼接：原本探地雷达长方体的顶面是 Y=0，我们需要让点云的底部恰好贴在 Y=0
-                    // 旋转 -90度 后，原点云的 Z 轴方向就变成了现三维场景的 Y 轴方向
-                    const zHeight = bbox.max.z - bbox.min.z;
-                    points.position.y = zHeight / 2;
-
-                    // 如果地上和地下坐标系在 X、Z 平面上存在平移偏差，可以通过以下调整：
-                    // points.position.x = 0; 
-                    // points.position.z = 0;
-
-
-
-                    // 🌟🌟🌟 新增：创建外层 Group 容器，专门用于控制水平方向的角度 🌟🌟🌟
-                    const pcdGroup = new THREE.Group();
-                    pcdGroup.add(points); // 把点云装进容器
-                    // ==========================================
-                    // 🌟 在这里硬编码你记录下来的对齐参数
-                    // ==========================================
-
-                    // 填入你在调试控制台记录下的 X 数值
-                    pcdGroup.position.x = 5.25; // 示例：向右偏移 0.15 米
-
-                    // 填入你在调试控制台记录下的 Z 数值
-                    pcdGroup.position.z = 5.40; // 示例：向前偏移 0.05 米
-
-                    // 填入你在调试控制台记录下的角度（弧度制）
-                    // 如果你记录的是角度(°)，需要转换：角度 * Math.PI / 180
-                    pcdGroup.rotation.y = 1.8501; // 示例：旋转 90 度 (π/2)
-
-                    // ==========================================
-
-                    window.gprScene.add(pcdGroup);
-
-                    // 保存引用
-                    window.currentPcdMesh = points;     // 保留网格引用用于清理内存
-                    window.currentPcdGroup = pcdGroup;  // 保留容器引用用于键盘旋转控制
-                    window.currentImportedInspectionMapGroup = null;
-                    window.gprHasInspectionMapLayerLoaded = false;
-
-                    setStatus("点云加载完成！", "success");
+                    if (geoMeta && window.isGpsCalibrated) {
+                        setStatus("✅ 点云加载完成，并已恢复经纬度标定，可在三维重建页指定扫描区域并发送履带小车。", "success");
+                    } else {
+                        setStatus("点云加载完成；未找到同名 .geo.json，经纬度标定未恢复。", "success");
+                    }
                 },
                     // 加载进度回调
                     function (xhr) {
@@ -3178,6 +3253,105 @@
                     });
             });
         }
+
+        // 👇========= 新增：读取电脑本地下载的 PCD 点云 =========👇
+        const btnLoadLocalPcd = $("btnLoadLocalPcd");
+        const pcdLocalFileInput = $("pcdLocalFileInput");
+
+        function addLoadedPcdPointsToGprScene(points, sourceName, geoMeta = null) {
+            clearCurrentGprExternalMapLayer();
+
+            points.material.size = 0.05;
+            points.geometry.computeBoundingBox();
+
+            const hasValidGeoMeta = !!(geoMeta && typeof geoMeta === "object");
+
+            // 与原“加载点云”按钮保持一致：SLAM 点云 Z 轴向上，GPR 三维页 Y 轴向上。
+            // 有 geo.json 时不能 geometry.center()，否则原始 SLAM 坐标会被平移，后续经纬度换算会失真。
+            points.rotation.x = -Math.PI / 2;
+
+            const pcdGroup = new THREE.Group();
+            pcdGroup.name = sourceName || "本地点云文件";
+            pcdGroup.add(points);
+
+            if (hasValidGeoMeta) {
+                pcdGroup.position.set(0, 0, 0);
+                pcdGroup.rotation.y = 0;
+                pcdGroup.userData.geoMetadata = geoMeta;
+                applyLoadedMapGeoMetadata(geoMeta, sourceName);
+            } else {
+                // 没有 geo.json 的旧点云只用于视觉查看，仍保持之前的居中和现场对齐参数。
+                points.geometry.center();
+                points.geometry.computeBoundingBox();
+                const bbox = points.geometry.boundingBox;
+                const zHeight = bbox ? (bbox.max.z - bbox.min.z) : 0;
+                points.position.y = zHeight / 2;
+
+                pcdGroup.position.x = 5.25;
+                pcdGroup.position.z = 5.40;
+                pcdGroup.rotation.y = 1.8501;
+            }
+
+            window.gprScene.add(pcdGroup);
+
+            window.currentPcdMesh = points;
+            window.currentPcdGroup = pcdGroup;
+            window.currentImportedInspectionMapGroup = null;
+            window.gprHasInspectionMapLayerLoaded = !!hasValidGeoMeta;
+            window.latestImportedInspectionMapSnapshot = null;
+
+            const box = new THREE.Box3().setFromObject(pcdGroup);
+            updateGprCameraByBox(box);
+        }
+
+        if (btnLoadLocalPcd && pcdLocalFileInput) {
+            btnLoadLocalPcd.addEventListener("click", function () {
+                pcdLocalFileInput.value = "";
+                pcdLocalFileInput.click();
+            });
+
+            pcdLocalFileInput.addEventListener("change", async function () {
+                const files = Array.from(this.files || []);
+                if (!files.length) return;
+
+                const pcdFile = files.find(f => /\.pcd$/i.test(f.name));
+                const geoFile = files.find(f => /\.geo\.json$/i.test(f.name)) || files.find(f => /\.json$/i.test(f.name));
+
+                if (!pcdFile) {
+                    alert("请选择 .pcd 点云文件；如果需要恢复经纬度，请同时选择同名 .geo.json 文件。 ");
+                    return;
+                }
+
+                if (!window.gprScene) {
+                    alert("请先进入三维重建页面，并点击“开始处理”或加载当前点云地图初始化三维视图。 ");
+                    return;
+                }
+
+                try {
+                    let geoMeta = null;
+                    if (geoFile) {
+                        const geoText = await readFileAsText(geoFile);
+                        geoMeta = JSON.parse(geoText);
+                    }
+
+                    const buffer = await readFileAsArrayBuffer(pcdFile);
+                    const loader = new THREE.PCDLoader();
+                    const points = loader.parse(buffer, pcdFile.name);
+                    addLoadedPcdPointsToGprScene(points, pcdFile.name, geoMeta);
+
+                    if (geoMeta && window.isGpsCalibrated) {
+                        setStatus(`✅ 本地地图加载完成：${pcdFile.name}，已恢复经纬度标定，可发送履带小车巡检。`, "success");
+                    } else {
+                        setStatus(`✅ 本地点云加载完成：${pcdFile.name}；未加载 .geo.json，经纬度不可用。`, "success");
+                    }
+                } catch (err) {
+                    console.error("本地地图读取失败:", err);
+                    alert("本地地图读取失败：" + (err.message || err));
+                    setStatus("本地地图读取失败，请检查 PCD / geo.json 文件格式。", "error");
+                }
+            });
+        }
+        // 👆=======================================================👆
         // 👆=============================================👆
         const segmentSelect = $("segmentSelect");
         const btnAnno = $("btnToggleAnnotation");
@@ -9233,61 +9407,346 @@
             };
         }
 
-        // ====== 👇 新增: 保存 PCD 点云按钮逻辑 👇 ======
+        // ====== 👇 修复：保存当前前端可见点云为 PCD 文件 👇 ======
+        // 原问题：旧代码请求 /api/slam/save_pcd，但后端是另开 WebSocket 缓存点云；
+        // 如果后端缓存为空，就会下载到只有 PCD 头部的小文件。
+        // 这里改为直接导出当前页面 mapMesh 中已经渲染出来的历史点云，所见即所得。
+        function clampColorToByte(v) {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return 255;
+            return Math.max(0, Math.min(255, Math.round(n * 255)));
+        }
+
+        function isValidPointCoord(x, y, z) {
+            return Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)
+                && Math.abs(x) < 9000 && Math.abs(y) < 9000 && Math.abs(z) < 9000;
+        }
+
+        function roundNumber(value, digits = 8) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return null;
+            return Number(n.toFixed(digits));
+        }
+
+        function clonePlainGps(gps) {
+            if (!gps) return null;
+            const lat = Number(gps.lat);
+            const lon = Number(gps.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+            return {
+                lat: roundNumber(lat, 10),
+                lon: roundNumber(lon, 10)
+            };
+        }
+
+        function clonePlainSlam(pt) {
+            if (!pt) return null;
+            const x = Number(pt.x);
+            const y = Number(pt.y);
+            const z = Number(pt.z ?? 0);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return {
+                x: roundNumber(x, 5),
+                y: roundNumber(y, 5),
+                z: roundNumber(z, 5)
+            };
+        }
+
+        function computeCurrentVisibleMapBounds() {
+            if (!mapMesh || !mapMesh.geometry || !mapMesh.geometry.attributes.position) {
+                return null;
+            }
+
+            const pos = mapMesh.geometry.attributes.position.array;
+            let minX = Infinity, minY = Infinity, minZ = Infinity;
+            let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+            let count = 0;
+
+            for (let i = 0; i < pos.length; i += 3) {
+                const x = Number(pos[i]);
+                const y = Number(pos[i + 1]);
+                const z = Number(pos[i + 2]);
+                if (!isValidPointCoord(x, y, z)) continue;
+
+                minX = Math.min(minX, x);
+                minY = Math.min(minY, y);
+                minZ = Math.min(minZ, z);
+                maxX = Math.max(maxX, x);
+                maxY = Math.max(maxY, y);
+                maxZ = Math.max(maxZ, z);
+                count++;
+            }
+
+            if (count <= 0) return null;
+
+            const center = {
+                x: (minX + maxX) / 2,
+                y: (minY + maxY) / 2,
+                z: (minZ + maxZ) / 2
+            };
+
+            const slamCorners = [
+                { name: "minX_minY", x: minX, y: minY, z: minZ },
+                { name: "maxX_minY", x: maxX, y: minY, z: minZ },
+                { name: "maxX_maxY", x: maxX, y: maxY, z: minZ },
+                { name: "minX_maxY", x: minX, y: maxY, z: minZ },
+                { name: "center", ...center }
+            ];
+
+            const gpsCorners = (typeof window.slamToGps === "function" && window.isGpsCalibrated)
+                ? slamCorners.map(corner => {
+                    const gps = window.slamToGps(corner.x, corner.y);
+                    return {
+                        name: corner.name,
+                        slam: clonePlainSlam(corner),
+                        gps: clonePlainGps(gps)
+                    };
+                })
+                : [];
+
+            return {
+                pointCount: count,
+                slam: {
+                    min: clonePlainSlam({ x: minX, y: minY, z: minZ }),
+                    max: clonePlainSlam({ x: maxX, y: maxY, z: maxZ }),
+                    center: clonePlainSlam(center)
+                },
+                gpsSamples: gpsCorners
+            };
+        }
+
+        function buildCurrentVisibleMapGeoMetadata(pcdFileName, pointCount) {
+            const hasCalibration = !!(
+                window.isGpsCalibrated &&
+                window.gpsAnchor &&
+                window.slamAnchor &&
+                Number.isFinite(Number(window.headingOffset))
+            );
+
+            const bounds = computeCurrentVisibleMapBounds();
+
+            return {
+                version: 1,
+                type: "slam_pcd_geo_metadata",
+                createdAt: new Date().toISOString(),
+                pcdFileName: pcdFileName,
+                pointCount: pointCount,
+                coordinateSystem: {
+                    pcd: "SLAM局部坐标，字段为 x y z rgb，单位m，Z轴向上",
+                    gprViewTransform: "三维重建页显示时使用 (x, y, z) -> (x, z, -y) 变换，保持与路径页方向一致",
+                    gpsTransform: "通过 gpsAnchor + slamAnchor + headingOffset 将 SLAM 平面坐标换算为经纬度"
+                },
+                calibration: {
+                    isGpsCalibrated: hasCalibration,
+                    gpsAnchor: clonePlainGps(window.gpsAnchor),
+                    slamAnchor: clonePlainSlam(window.slamAnchor),
+                    headingOffset: Number.isFinite(Number(window.headingOffset)) ? Number(window.headingOffset) : 0,
+                    currentGps: clonePlainGps(window.currentGps)
+                },
+                mapBounds: bounds,
+                usage: {
+                    loadTip: "读取点云时同时选择本 .geo.json 文件，可自动恢复 window.gpsAnchor/window.slamAnchor/window.headingOffset。",
+                    crawlerTip: "恢复标定后，三维重建页指定扫描区域会调用 slamToGps() 生成履带小车经纬度航点。"
+                }
+            };
+        }
+
+        function applyLoadedMapGeoMetadata(meta, sourceName = "") {
+            if (!meta || typeof meta !== "object") return false;
+
+            const calibration = meta.calibration || meta.gpsCalibration || meta;
+            const gpsAnchor = clonePlainGps(calibration.gpsAnchor);
+            const slamAnchor = clonePlainSlam(calibration.slamAnchor);
+            const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? 0);
+
+            if (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset)) {
+                console.warn("⚠️ 点云经纬度元数据缺少 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
+                return false;
+            }
+
+            window.gpsAnchor = gpsAnchor;
+            window.slamAnchor = slamAnchor;
+            window.headingOffset = headingOffset;
+            window.isGpsCalibrated = true;
+            if (calibration.currentGps) {
+                const currentGps = clonePlainGps(calibration.currentGps);
+                if (currentGps) window.currentGps = currentGps;
+            }
+
+            window.loadedPointCloudGeoMetadata = meta;
+            window.loadedPointCloudGeoSource = sourceName || meta.pcdFileName || "loaded-map";
+
+            console.log("✅ 已恢复点云地图经纬度标定：", {
+                source: window.loadedPointCloudGeoSource,
+                gpsAnchor: window.gpsAnchor,
+                slamAnchor: window.slamAnchor,
+                headingOffset: window.headingOffset
+            });
+
+            return true;
+        }
+
+        function inferGeoJsonPathFromPcdPath(pcdPath) {
+            const path = String(pcdPath || "").trim();
+            if (!path) return "";
+            if (/\.pcd$/i.test(path)) {
+                return path.replace(/\.pcd$/i, ".geo.json");
+            }
+            return path + ".geo.json";
+        }
+
+        async function tryLoadServerPcdGeoMetadata(pcdPath) {
+            const geoPath = inferGeoJsonPathFromPcdPath(pcdPath);
+            if (!geoPath) return null;
+
+            try {
+                // 复用已有 /api/gpr/pcd?filePath=... 文件读取接口读取同名 geo.json。
+                // 如果后端限制只能读取 .pcd，这里会静默失败；本地点云按钮仍支持手动选择 geo.json。
+                const url = "/api/gpr/pcd?filePath=" + encodeURIComponent(geoPath);
+                const res = await fetch(url, { cache: "no-store" });
+                if (!res.ok) return null;
+
+                const text = await res.text();
+                const meta = JSON.parse(text);
+                return meta;
+            } catch (err) {
+                console.warn("未读取到同名点云经纬度元数据：", geoPath, err);
+                return null;
+            }
+        }
+
+        function readFileAsText(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(String(e.target.result || ""));
+                reader.onerror = () => reject(new Error("读取文件失败：" + file.name));
+                reader.readAsText(file);
+            });
+        }
+
+        function readFileAsArrayBuffer(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = () => reject(new Error("读取文件失败：" + file.name));
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        function buildCurrentVisibleMapPcdText() {
+            if (!mapMesh || !mapMesh.geometry || !mapMesh.geometry.attributes.position) {
+                throw new Error("点云视图尚未初始化，无法保存。");
+            }
+
+            const pos = mapMesh.geometry.attributes.position.array;
+            const colAttr = mapMesh.geometry.attributes.color;
+            const col = colAttr ? colAttr.array : null;
+
+            const lines = [];
+            let pointCount = 0;
+
+            for (let i = 0; i < pos.length; i += 3) {
+                const x = Number(pos[i]);
+                const y = Number(pos[i + 1]);
+                const z = Number(pos[i + 2]);
+
+                // mapPositions 初始化时用 99999 作为空点占位，这里必须过滤掉。
+                if (!isValidPointCoord(x, y, z)) continue;
+
+                let r = 255, g = 255, b = 255;
+                if (col && i + 2 < col.length) {
+                    r = clampColorToByte(col[i]);
+                    g = clampColorToByte(col[i + 1]);
+                    b = clampColorToByte(col[i + 2]);
+                }
+
+                const rgb = ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+                lines.push(`${x.toFixed(5)} ${y.toFixed(5)} ${z.toFixed(5)} ${rgb}`);
+                pointCount++;
+            }
+
+            if (pointCount <= 0) {
+                throw new Error("当前页面没有有效点云数据，请先确认路径查找页面已经实时显示点云后再保存。");
+            }
+
+            const header = [
+                "# .PCD v0.7 - Point Cloud Data file format",
+                "VERSION 0.7",
+                "FIELDS x y z rgb",
+                "SIZE 4 4 4 4",
+                "TYPE F F F U",
+                "COUNT 1 1 1 1",
+                `WIDTH ${pointCount}`,
+                "HEIGHT 1",
+                "VIEWPOINT 0 0 0 1 0 0 0",
+                `POINTS ${pointCount}`,
+                "DATA ascii"
+            ].join("\n");
+
+            return {
+                pointCount,
+                text: header + "\n" + lines.join("\n") + "\n"
+            };
+        }
+
+        function downloadTextFile(text, filename, mimeType = "application/octet-stream") {
+            const blob = new Blob([text], { type: mimeType });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.style.display = "none";
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            }, 0);
+        }
+
         const btnSavePcd = document.getElementById("btnSavePcd");
         if (btnSavePcd) {
             btnSavePcd.onclick = function () {
-                console.log("💾 请求后端保存并下载 PCD 文件...");
-
-                // 改变按钮状态，防止重复点击
                 const originalText = this.innerText;
-                this.innerText = "⏳ 正在生成...";
-                this.disabled = true;
+                try {
+                    this.innerText = "⏳ 正在生成...";
+                    this.disabled = true;
 
-                // 假设你的 Spring Boot 运行在相对路径下，或者你可以改成具体的 ARM_BACKEND_URL
-                const saveUrl = "/api/slam/save_pcd";
+                    const result = buildCurrentVisibleMapPcdText();
+                    const dateStr = new Date().toISOString().replace(/T/, "_").replace(/:/g, "").split(".")[0];
+                    const baseName = `slam_map_${dateStr}`;
+                    const pcdFileName = `${baseName}.pcd`;
+                    const geoFileName = `${baseName}.geo.json`;
 
-                fetch(saveUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                })
-                    .then(response => {
-                        if (!response.ok) throw new Error("后端生成 PCD 失败");
-                        // 接收后端传回的二进制文件流
-                        return response.blob();
-                    })
-                    .then(blob => {
-                        // 1. 生成浏览器本地的临时下载链接
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
+                    const geoMeta = buildCurrentVisibleMapGeoMetadata(pcdFileName, result.pointCount);
+                    downloadTextFile(result.text, pcdFileName, "application/octet-stream");
+                    downloadTextFile(JSON.stringify(geoMeta, null, 2), geoFileName, "application/json");
 
-                        // 2. 动态命名文件 (例如: slam_map_20260416_1530.pcd)
-                        const dateStr = new Date().toISOString().replace(/T/, '_').replace(/:/g, '').split('.')[0];
-                        a.download = `slam_map_${dateStr}.pcd`;
+                    if (geoMeta.calibration && geoMeta.calibration.isGpsCalibrated) {
+                        setStatus(`✅ 点云和经纬度元数据已保存：${result.pointCount} 个点，${pcdFileName} + ${geoFileName}`, "success");
+                    } else {
+                        alert("⚠️ 当前 GPS 尚未标定，已保存 PCD 和 geo.json，但 geo.json 中没有可用经纬度标定。后续读取该地图时不能直接生成履带小车 GPS 航点。 ");
+                        setStatus(`⚠️ PCD 已保存：${result.pointCount} 个点，但 GPS 未标定，geo.json 不可用于巡检航点换算。`, "error");
+                    }
 
-                        // 3. 模拟点击下载并清理内存
-                        document.body.appendChild(a);
-                        a.click();
-                        window.URL.revokeObjectURL(url);
-                        document.body.removeChild(a);
-
-                        setStatus("✅ PCD 文件保存并下载成功！", "success");
-                    })
-                    .catch(err => {
-                        console.error("保存 PCD 报错:", err);
-                        alert("保存失败，请检查后端服务是否正常！");
-                        setStatus("❌ PCD 保存失败", "error");
-                    })
-                    .finally(() => {
-                        // 恢复按钮状态
-                        this.innerText = originalText;
-                        this.disabled = false;
+                    console.log("✅ PCD 与经纬度元数据已由前端可见点云导出：", {
+                        pointCount: result.pointCount,
+                        pcdFileName,
+                        geoFileName,
+                        geoMeta
                     });
+                } catch (err) {
+                    console.error("保存 PCD 报错:", err);
+                    alert("保存失败：" + (err.message || err));
+                    setStatus("❌ PCD 保存失败：" + (err.message || err), "error");
+                } finally {
+                    this.innerText = originalText;
+                    this.disabled = false;
+                }
             };
         }
-        // ====== 👆 新增逻辑结束 👆 ======
+        // ====== 👆 修复逻辑结束 👆 ======
         // ✅ [新增] 清除破损点按钮逻辑
         const btnClearFaults = document.getElementById("btnClearFaults");
         if (btnClearFaults) {
