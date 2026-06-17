@@ -197,10 +197,20 @@
                             <div id="gprPipeInfoPopup" class="gpr-pipe-info-popup" style="display: none;">
                                 <div class="gpr-pipe-popup-close"
                                     onclick="document.getElementById('gprPipeInfoPopup').style.display='none'">×</div>
-                                <div class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+                                <div class="gpr-pipe-popup-title-row">
+                                    <div id="gprPipePopupTitle" class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+                                    <button type="button" id="gprPipeColorToggleBtn" class="pipe-color-toggle-btn">▼</button>
+                                </div>
                                 <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps" class="hl-text">--</span></div>
                                 <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth" class="hl-text">--</span></div>
-                                <div class="gpr-pipe-popup-item"><strong>局部坐标：</strong><span id="gprPipePopupLocal" class="hl-text">--</span></div>
+                                <div id="gprPipeColorSection" class="gpr-pipe-color-section">
+                                    <div class="gpr-pipe-color-actions collapsed">
+                                        <button type="button" data-gpr-pipe-material="cable" class="pipe-color-btn pipe-color-cable"><span class="pipe-color-dot"></span>地下电缆</button>
+                                        <button type="button" data-gpr-pipe-material="pvc" class="pipe-color-btn pipe-color-pvc"><span class="pipe-color-dot"></span>PVC管</button>
+                                        <button type="button" data-gpr-pipe-material="metal" class="pipe-color-btn pipe-color-metal"><span class="pipe-color-dot"></span>金属管道</button>
+                                        <button type="button" data-gpr-pipe-material-reset="1" class="pipe-color-btn pipe-color-reset">恢复默认</button>
+                                    </div>
+                                </div>
                             </div>
 
                             <div id="btnToggleGrid" class="cyber-floating-btn">

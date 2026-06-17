@@ -162,6 +162,18 @@
         ]
     };
 
+    // ✅ 地下管道材质颜色指定状态
+    // 说明：点击三维重建页中已经连接好的地下管道后，可将其指定为强电电缆/PVC管/金属管道等材质颜色。
+    // 指定结果与手动标注校准一起保存到 gpr_annotation_calibration.json；下次读取同一GPR文件夹时自动恢复。
+    const GPR_PIPE_DEFAULT_COLOR_HEX = 0xffff00;
+    const GPR_PIPE_MATERIAL_TYPES = [
+        { type: "cable", name: "地下电缆", title: "强电电缆测点信息", colorHex: 0x050505, colorCss: "#050505" },
+        { type: "pvc", name: "PVC管", title: "PVC管道测点信息", colorHex: 0xffffff, colorCss: "#ffffff" },
+        { type: "metal", name: "金属管道", title: "金属管道测点信息", colorHex: 0xc0c0c0, colorCss: "#c0c0c0" }
+    ];
+    const gprPipeColorAssignments = new Map(); // pipeColorKey -> {materialType, materialName, colorHex, colorCss, updatedAt}
+    let selectedGprPipeObject = null;
+
     // ✅ 标注圆圈拖动相关状态
     // 支持拖动对象：手动红圈、被拖动后转为手动红圈的自动识别红圈、倾斜管道彩色圆圈。
     // 自动识别红圈本身每次会重新计算，因此拖动自动红圈时，会先将原自动红圈加入忽略列表，再生成一个可持久化的手动红圈。
@@ -2068,6 +2080,371 @@
         });
     }
 
+
+    function normalizeGprPipeColorHex(value, fallback = GPR_PIPE_DEFAULT_COLOR_HEX) {
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return Math.max(0, Math.min(0xffffff, Math.round(value)));
+        }
+
+        if (typeof value === "string") {
+            let text = value.trim();
+            if (!text) return fallback;
+            if (text.startsWith("#")) text = text.slice(1);
+            if (/^0x/i.test(text)) text = text.slice(2);
+            if (/^[0-9a-fA-F]{3}$/.test(text)) {
+                text = text.split("").map(ch => ch + ch).join("");
+            }
+            if (/^[0-9a-fA-F]{6}$/.test(text)) {
+                return parseInt(text, 16);
+            }
+        }
+
+        return fallback;
+    }
+
+    function gprPipeColorHexToCss(colorHex) {
+        return "#" + normalizeGprPipeColorHex(colorHex).toString(16).padStart(6, "0");
+    }
+
+    function normalizeGprPipeMaterialType(type) {
+        const raw = String(type || "").trim();
+        // 兼容上一版保存过的 “steel/钢管” 标识，后续统一按 metal（金属管道）处理。
+        if (raw === "steel" || raw === "钢管") return "metal";
+        return raw;
+    }
+
+    function getGprPipeMaterialByType(type) {
+        const normalizedType = normalizeGprPipeMaterialType(type);
+        return GPR_PIPE_MATERIAL_TYPES.find(item => item.type === normalizedType) || null;
+    }
+
+    function getGprPipePopupTitleByAssignment(assignment) {
+        if (!assignment) return "🟡 地下管道测点信息";
+        const material = getGprPipeMaterialByType(assignment.materialType);
+        return material && material.title ? material.title : "地下管道测点信息";
+    }
+
+    function updateGprPipePopupTitle(assignment) {
+        const titleEl = $("gprPipePopupTitle");
+        if (titleEl) {
+            titleEl.textContent = getGprPipePopupTitleByAssignment(assignment);
+        }
+    }
+
+    function serializeGprPipeColorAssignments() {
+        return Array.from(gprPipeColorAssignments.entries()).map(([key, value]) => {
+            const colorHex = normalizeGprPipeColorHex(value && value.colorHex);
+            return [String(key), {
+                pipeColorKey: String(key),
+                materialType: normalizeGprPipeMaterialType(value && value.materialType ? String(value.materialType) : "custom"),
+                materialName: value && value.materialName ? String(value.materialName) : "自定义颜色",
+                colorHex,
+                colorCss: value && value.colorCss ? String(value.colorCss) : gprPipeColorHexToCss(colorHex),
+                updatedAt: value && value.updatedAt ? Number(value.updatedAt) : Date.now()
+            }];
+        });
+    }
+
+    function restoreGprPipeColorAssignments(entries) {
+        gprPipeColorAssignments.clear();
+        if (!Array.isArray(entries)) return;
+
+        entries.forEach(item => {
+            if (!Array.isArray(item) || item.length < 2) return;
+            const key = String(item[0] || "");
+            if (!key) return;
+
+            const value = item[1] || {};
+            const colorHex = normalizeGprPipeColorHex(value.colorHex ?? value.hex ?? value.color);
+            const rawMaterialType = String(value.materialType || value.pipeType || "custom");
+            const matchedMaterial = getGprPipeMaterialByType(rawMaterialType);
+            const materialType = matchedMaterial ? matchedMaterial.type : normalizeGprPipeMaterialType(rawMaterialType);
+
+            gprPipeColorAssignments.set(key, {
+                pipeColorKey: key,
+                materialType,
+                // 已指定过的旧版“钢管”统一显示为“金属管道”。
+                materialName: matchedMaterial ? matchedMaterial.name : String(value.materialName || value.pipeTypeName || "自定义颜色"),
+                colorHex,
+                colorCss: String(value.colorCss || gprPipeColorHexToCss(colorHex)),
+                updatedAt: Number(value.updatedAt || Date.now())
+            });
+        });
+    }
+
+    function roundGprPipeCoord(value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n.toFixed(3) : "0.000";
+    }
+
+    function makeGprPipeColorKeyFromPoints(points, meta = {}) {
+        const cleanPoints = (Array.isArray(points) ? points : [])
+            .map(p => p && p.clone ? p : new THREE.Vector3(Number(p.x), Number(p.y), Number(p.z)))
+            .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+
+        const pointPart = cleanPoints
+            .map(p => `${roundGprPipeCoord(p.x)},${roundGprPipeCoord(p.y)},${roundGprPipeCoord(p.z)}`)
+            .join("|");
+        const source = String(meta.source || "pipe");
+        const groupId = String(meta.pipeGroupId || meta.groupId || "");
+        return `${source}:${groupId}:${simpleHashForStorage(pointPart)}`;
+    }
+
+    function makeGprPipeColorKeyFromCenters(centers, meta = {}) {
+        const points = (Array.isArray(centers) ? centers : [])
+            .map(item => item && item.center ? item.center : item)
+            .filter(Boolean);
+        return makeGprPipeColorKeyFromPoints(points, meta);
+    }
+
+    function getGprPipeAssignmentByKey(pipeColorKey) {
+        const key = String(pipeColorKey || "");
+        return key ? gprPipeColorAssignments.get(key) || null : null;
+    }
+
+    function resolveGprPipeColorHexByKey(pipeColorKey, fallbackColorHex = GPR_PIPE_DEFAULT_COLOR_HEX) {
+        const assignment = getGprPipeAssignmentByKey(pipeColorKey);
+        if (assignment) return normalizeGprPipeColorHex(assignment.colorHex, fallbackColorHex);
+        return normalizeGprPipeColorHex(fallbackColorHex);
+    }
+
+    function applyGprPipeColorToObject(obj, colorHex) {
+        if (!obj) return;
+        const safeColorHex = normalizeGprPipeColorHex(colorHex);
+        obj.traverse(child => {
+            if (!child.material) return;
+            const materials = Array.isArray(child.material) ? child.material : [child.material];
+            materials.forEach(mat => {
+                if (mat && mat.color && typeof mat.color.setHex === "function") {
+                    mat.color.setHex(safeColorHex);
+                    mat.needsUpdate = true;
+                }
+            });
+        });
+    }
+
+    function applyGprPipeSavedColorIfAny(mesh) {
+        if (!mesh || !mesh.userData) return;
+        const meta = mesh.userData.gprPipeMeta || {};
+        const pipeColorKey = mesh.userData.gprPipeColorKey || meta.colorKey || meta.pipeColorKey;
+        const renderColorHex = resolveGprPipeColorHexByKey(pipeColorKey, meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
+        applyGprPipeColorToObject(mesh, renderColorHex);
+    }
+
+    function applyGprPipeColorAssignmentToScene(pipeColorKey) {
+        const key = String(pipeColorKey || "");
+        if (!key || !window.gprPipePickObjects) return;
+        const assignment = getGprPipeAssignmentByKey(key);
+
+        window.gprPipePickObjects.forEach(obj => {
+            if (!obj || !obj.userData || obj.userData.gprPipeColorKey !== key) return;
+            const meta = obj.userData.gprPipeMeta || {};
+            const colorHex = assignment
+                ? assignment.colorHex
+                : (meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
+            applyGprPipeColorToObject(obj, colorHex);
+        });
+    }
+
+    function ensureGprPipeColorControls(popup) {
+        if (!popup) return;
+
+        // 1) 标题区改成“标题 + 指定材质下拉按钮”同一行。
+        //    下方不再显示“管道材质：xxx”这一行，材质类型由标题自动体现。
+        let titleEl = popup.querySelector("#gprPipePopupTitle") || popup.querySelector(".gpr-pipe-popup-title");
+        if (!titleEl) {
+            titleEl = document.createElement("div");
+            titleEl.id = "gprPipePopupTitle";
+            titleEl.className = "gpr-pipe-popup-title";
+            titleEl.textContent = "🟡 地下管道测点信息";
+            const closeBtn = popup.querySelector(".gpr-pipe-popup-close");
+            popup.insertBefore(titleEl, closeBtn ? closeBtn.nextSibling : popup.firstChild);
+        }
+        titleEl.id = "gprPipePopupTitle";
+
+        let titleRow = popup.querySelector(".gpr-pipe-popup-title-row");
+        if (!titleRow) {
+            titleRow = document.createElement("div");
+            titleRow.className = "gpr-pipe-popup-title-row";
+            titleEl.parentNode.insertBefore(titleRow, titleEl);
+            titleRow.appendChild(titleEl);
+        } else if (titleEl.parentElement !== titleRow) {
+            titleRow.insertBefore(titleEl, titleRow.firstChild);
+        }
+
+        let toggleBtn = popup.querySelector("#gprPipeColorToggleBtn");
+        if (!toggleBtn) {
+            toggleBtn = document.createElement("button");
+            toggleBtn.type = "button";
+            toggleBtn.id = "gprPipeColorToggleBtn";
+            toggleBtn.className = "pipe-color-toggle-btn";
+            toggleBtn.textContent = "▼";
+        }
+        if (toggleBtn.parentElement !== titleRow) {
+            titleRow.appendChild(toggleBtn);
+        }
+
+        // 2) 移除旧版弹窗下方的“管道材质：当前类型 + 色块”行，以及旧版局部坐标行。
+        popup.querySelectorAll(".pipe-material-row").forEach(row => row.remove());
+        const legacyMaterialEl = popup.querySelector("#gprPipePopupMaterial");
+        if (legacyMaterialEl) {
+            const row = legacyMaterialEl.closest(".gpr-pipe-popup-item");
+            if (row) row.remove();
+            else legacyMaterialEl.remove();
+        }
+        const legacySwatchEl = popup.querySelector("#gprPipePopupColorSwatch");
+        if (legacySwatchEl) legacySwatchEl.remove();
+        const legacyLocalEl = popup.querySelector("#gprPipePopupLocal");
+        if (legacyLocalEl) {
+            const legacyRow = legacyLocalEl.closest(".gpr-pipe-popup-item");
+            if (legacyRow) legacyRow.remove();
+            else legacyLocalEl.remove();
+        }
+
+        // 3) 下拉按钮只控制材质按钮组；按钮组默认折叠。
+        let section = popup.querySelector("#gprPipeColorSection");
+        if (!section) {
+            section = document.createElement("div");
+            section.id = "gprPipeColorSection";
+            section.className = "gpr-pipe-color-section";
+            popup.appendChild(section);
+        }
+
+        let actionPanel = section.querySelector(".gpr-pipe-color-actions");
+        if (!actionPanel) {
+            actionPanel = document.createElement("div");
+            actionPanel.className = "gpr-pipe-color-actions collapsed";
+            section.appendChild(actionPanel);
+        }
+        actionPanel.innerHTML = `
+            <button type="button" data-gpr-pipe-material="cable" class="pipe-color-btn pipe-color-cable"><span class="pipe-color-dot"></span>地下电缆</button>
+            <button type="button" data-gpr-pipe-material="pvc" class="pipe-color-btn pipe-color-pvc"><span class="pipe-color-dot"></span>PVC管</button>
+            <button type="button" data-gpr-pipe-material="metal" class="pipe-color-btn pipe-color-metal"><span class="pipe-color-dot"></span>金属管道</button>
+            <button type="button" data-gpr-pipe-material-reset="1" class="pipe-color-btn pipe-color-reset">恢复默认</button>
+        `;
+
+        if (toggleBtn.dataset.bound !== "1") {
+            toggleBtn.dataset.bound = "1";
+            toggleBtn.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                const collapsed = actionPanel.classList.toggle("collapsed");
+                toggleBtn.textContent = collapsed ? "▼" : "▲";
+                refreshGprPipeMaterialButtonActiveState(popup, selectedGprPipeObject);
+            });
+        }
+
+        actionPanel.querySelectorAll("[data-gpr-pipe-material]").forEach(btn => {
+            btn.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                setSelectedGprPipeMaterialColor(this.dataset.gprPipeMaterial);
+            });
+        });
+
+        const resetBtn = actionPanel.querySelector("[data-gpr-pipe-material-reset]");
+        if (resetBtn) {
+            resetBtn.addEventListener("click", function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+                resetSelectedGprPipeMaterialColor();
+            });
+        }
+    }
+
+    function refreshGprPipeMaterialButtonActiveState(popup, obj) {
+        if (!popup) return;
+        const key = obj && obj.userData ? (obj.userData.gprPipeColorKey || obj.userData.gprPipeMeta?.colorKey) : "";
+        const assignment = getGprPipeAssignmentByKey(key);
+        const activeType = assignment ? normalizeGprPipeMaterialType(assignment.materialType) : "";
+
+        popup.querySelectorAll("[data-gpr-pipe-material]").forEach(btn => {
+            const btnType = normalizeGprPipeMaterialType(btn.dataset.gprPipeMaterial);
+            const isActive = !!activeType && activeType === btnType;
+            btn.classList.toggle("active", isActive);
+            btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+        });
+
+        const resetBtn = popup.querySelector("[data-gpr-pipe-material-reset]");
+        if (resetBtn) {
+            const isDefault = !assignment;
+            resetBtn.classList.toggle("active", isDefault);
+            resetBtn.setAttribute("aria-pressed", isDefault ? "true" : "false");
+        }
+    }
+
+    function updateGprPipeColorControls(obj) {
+        const popup = ensureGprPipeInfoPopup();
+        ensureGprPipeColorControls(popup);
+        if (!popup) return;
+
+        const key = obj && obj.userData ? (obj.userData.gprPipeColorKey || obj.userData.gprPipeMeta?.colorKey) : "";
+        const assignment = getGprPipeAssignmentByKey(key);
+        const meta = obj && obj.userData ? (obj.userData.gprPipeMeta || {}) : {};
+        const fallbackColorHex = normalizeGprPipeColorHex(meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
+        const activeColorHex = assignment ? normalizeGprPipeColorHex(assignment.colorHex) : fallbackColorHex;
+
+        updateGprPipePopupTitle(assignment);
+
+        const materialEl = $("gprPipePopupMaterial");
+        if (materialEl) {
+            materialEl.textContent = assignment ? assignment.materialName : "未指定（默认识别色）";
+        }
+
+        const swatchEl = $("gprPipePopupColorSwatch");
+        if (swatchEl) {
+            swatchEl.style.background = gprPipeColorHexToCss(activeColorHex);
+            swatchEl.title = gprPipeColorHexToCss(activeColorHex);
+        }
+
+        refreshGprPipeMaterialButtonActiveState(popup, obj);
+    }
+
+    function setSelectedGprPipeMaterialColor(materialType) {
+        const material = getGprPipeMaterialByType(materialType);
+        if (!material) return;
+        if (!selectedGprPipeObject || !selectedGprPipeObject.userData) {
+            alert("请先点击三维视图中已经连接好的地下管道。 ");
+            return;
+        }
+
+        const key = selectedGprPipeObject.userData.gprPipeColorKey || selectedGprPipeObject.userData.gprPipeMeta?.colorKey;
+        if (!key) {
+            alert("当前管道缺少可保存的颜色标识，请重新处理GPR数据后再试。 ");
+            return;
+        }
+
+        gprPipeColorAssignments.set(String(key), {
+            pipeColorKey: String(key),
+            materialType: material.type,
+            materialName: material.name,
+            colorHex: material.colorHex,
+            colorCss: material.colorCss,
+            updatedAt: Date.now()
+        });
+
+        applyGprPipeColorAssignmentToScene(key);
+        updateGprPipeColorControls(selectedGprPipeObject);
+        saveGprAnnotationCalibration("pipe-material-color-change");
+        // 不在页面状态栏显示“已指定管道颜色”的提示，避免占用三维重建顶部提示区域。
+        setStatus("", "");
+        console.log(`✅ 已将选中地下管道指定为${material.name}（${material.colorCss}），并保存到GPR校准文件。`);
+    }
+
+    function resetSelectedGprPipeMaterialColor() {
+        if (!selectedGprPipeObject || !selectedGprPipeObject.userData) return;
+        const key = selectedGprPipeObject.userData.gprPipeColorKey || selectedGprPipeObject.userData.gprPipeMeta?.colorKey;
+        if (!key) return;
+
+        gprPipeColorAssignments.delete(String(key));
+        applyGprPipeColorAssignmentToScene(key);
+        updateGprPipeColorControls(selectedGprPipeObject);
+        saveGprAnnotationCalibration("pipe-material-color-reset");
+        // 不在页面状态栏显示“已恢复默认颜色”的提示，避免占用三维重建顶部提示区域。
+        setStatus("", "");
+        console.log("✅ 已恢复选中地下管道的默认识别颜色，并同步保存到GPR校准文件。");
+    }
+
     function recomputeForcedPipeCountersFromLoadedData() {
         let maxGroupNo = 0;
         let maxPipeOrder = -1;
@@ -2095,7 +2472,7 @@
         currentGprAnnotationStorageKey = getGprFolderAnnotationKey(folderPath);
 
         return {
-            version: 3,
+            version: 4,
             savedAt: new Date().toISOString(),
             reason,
             folderPath,
@@ -2105,6 +2482,7 @@
             manualMigAnnotationsBySegment: mapToStorageArray(manualMigAnnotationsBySegment, "array"),
             ignoredAutoMigAnnotationsBySegment: mapToStorageArray(ignoredAutoMigAnnotationsBySegment, "set"),
             forcedPipeAnnotationsBySegment: mapToStorageArray(forcedPipeAnnotationsBySegment, "array"),
+            gprPipeColorAssignments: serializeGprPipeColorAssignments(),
             forcedPipeGroupCounter,
             forcedPipeAnnotationOrder
         };
@@ -2187,6 +2565,7 @@
             restoreArrayMap(manualMigAnnotationsBySegment, payload.manualMigAnnotationsBySegment, "array");
             restoreArrayMap(ignoredAutoMigAnnotationsBySegment, payload.ignoredAutoMigAnnotationsBySegment, "set");
             restoreArrayMap(forcedPipeAnnotationsBySegment, payload.forcedPipeAnnotationsBySegment, "array");
+            restoreGprPipeColorAssignments(payload.gprPipeColorAssignments || payload.pipeColorAssignments);
 
             forcedPipeGroupCounter = Number(payload.forcedPipeGroupCounter || 0);
             forcedPipeAnnotationOrder = Number(payload.forcedPipeAnnotationOrder || 0);
@@ -2195,11 +2574,13 @@
             const manualCount = Array.from(manualMigAnnotationsBySegment.values()).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
             const ignoredCount = Array.from(ignoredAutoMigAnnotationsBySegment.values()).reduce((sum, set) => sum + (set ? set.size : 0), 0);
             const forcedCount = getTotalForcedPipeAnnotationCount();
+            const pipeColorCount = gprPipeColorAssignments.size;
 
             console.log("✅ 已从机器狗主机 GPR 文件夹加载标注校准：", {
                 manualCount,
                 ignoredCount,
                 forcedCount,
+                pipeColorCount,
                 file: currentGprAnnotationStorageKey
             });
 
@@ -2208,6 +2589,7 @@
                 manualCount,
                 ignoredCount,
                 forcedCount,
+                pipeColorCount,
                 savedAt: payload.savedAt || "",
                 filePath: currentGprAnnotationStorageKey
             };
@@ -2242,6 +2624,8 @@
         manualMigAnnotationsBySegment.clear();
         ignoredAutoMigAnnotationsBySegment.clear();
         forcedPipeAnnotationsBySegment.clear();
+        gprPipeColorAssignments.clear();
+        selectedGprPipeObject = null;
         forcedPipeGroupCounter = 0;
         forcedPipeAnnotationOrder = 0;
 
@@ -4373,6 +4757,8 @@
         manualMigAnnotationsBySegment.clear();
         ignoredAutoMigAnnotationsBySegment.clear();
         forcedPipeAnnotationsBySegment.clear();
+        gprPipeColorAssignments.clear();
+        selectedGprPipeObject = null;
 
         const folderInputForCalibration = $("folderPathInput");
         const folderPathForCalibration = folderInputForCalibration ? folderInputForCalibration.value.trim() : currentGprFolderPath;
@@ -4553,7 +4939,15 @@
     // ==========================================
     function ensureGprPipeInfoPopup() {
         let popup = $("gprPipeInfoPopup");
-        if (popup) return popup;
+        if (popup) {
+            ensureGprPipeColorControls(popup);
+            const existingCloseBtn = popup.querySelector(".gpr-pipe-popup-close");
+            if (existingCloseBtn && existingCloseBtn.dataset.boundHide !== "1") {
+                existingCloseBtn.dataset.boundHide = "1";
+                existingCloseBtn.onclick = hideGprPipeInfoPopup;
+            }
+            return popup;
+        }
 
         const container = $("threeContainer");
         const parent = container ? (container.closest(".gpr-view-3d") || container.parentElement) : document.body;
@@ -4565,11 +4959,22 @@
         popup.style.display = "none";
         popup.innerHTML = `
             <div class="gpr-pipe-popup-close">×</div>
-            <div class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+            <div class="gpr-pipe-popup-title-row">
+                <div id="gprPipePopupTitle" class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+                <button type="button" id="gprPipeColorToggleBtn" class="pipe-color-toggle-btn">▼</button>
+            </div>
             <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps" class="hl-text">--</span></div>
             <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth" class="hl-text">--</span></div>
-            <div class="gpr-pipe-popup-item"><strong>局部坐标：</strong><span id="gprPipePopupLocal" class="hl-text">--</span></div>
+            <div id="gprPipeColorSection" class="gpr-pipe-color-section">
+                <div class="gpr-pipe-color-actions collapsed">
+                    <button type="button" data-gpr-pipe-material="cable" class="pipe-color-btn pipe-color-cable"><span class="pipe-color-dot"></span>地下电缆</button>
+                    <button type="button" data-gpr-pipe-material="pvc" class="pipe-color-btn pipe-color-pvc"><span class="pipe-color-dot"></span>PVC管</button>
+                    <button type="button" data-gpr-pipe-material="metal" class="pipe-color-btn pipe-color-metal"><span class="pipe-color-dot"></span>金属管道</button>
+                    <button type="button" data-gpr-pipe-material-reset="1" class="pipe-color-btn pipe-color-reset">恢复默认</button>
+                </div>
+            </div>
         `;
+        ensureGprPipeColorControls(popup);
         const closeBtn = popup.querySelector(".gpr-pipe-popup-close");
         if (closeBtn) closeBtn.onclick = hideGprPipeInfoPopup;
         parent.appendChild(popup);
@@ -4580,6 +4985,7 @@
         const popup = $("gprPipeInfoPopup");
         if (popup) popup.style.display = "none";
         gprPipePopup3DPos = null;
+        selectedGprPipeObject = null;
     }
 
     function registerGprPipePickMesh(mesh, centerlinePoints, meta = {}) {
@@ -4591,11 +4997,16 @@
 
         if (cleanPoints.length < 2) return mesh;
 
+        const pipeColorKey = String(meta.colorKey || meta.pipeColorKey || makeGprPipeColorKeyFromPoints(cleanPoints, meta));
+        const mergedMeta = { ...(meta || {}), colorKey: pipeColorKey };
+
         mesh.userData = mesh.userData || {};
         mesh.userData.isGprUndergroundPipe = true;
         mesh.userData.gprCenterlinePoints = cleanPoints;
-        mesh.userData.gprPipeMeta = meta || {};
+        mesh.userData.gprPipeColorKey = pipeColorKey;
+        mesh.userData.gprPipeMeta = mergedMeta;
         mesh.name = meta.name || mesh.name || "地下管道可点击对象";
+        applyGprPipeSavedColorIfAny(mesh);
 
         if (!window.gprPipePickObjects) {
             window.gprPipePickObjects = [];
@@ -4663,6 +5074,7 @@
         }
         if (!obj || !obj.userData?.isGprUndergroundPipe) return false;
 
+        selectedGprPipeObject = obj;
         const centerline = obj.userData.gprCenterlinePoints || [];
         const closest = findClosestPointOnPolyline(intersection.point, centerline);
         const slam = gprWorldPointToSlam(closest);
@@ -4678,10 +5090,16 @@
 
         setTextSafe("gprPipePopupGps", gpsText);
         setTextSafe("gprPipePopupDepth", `${depth.toFixed(2)} m`);
-        setTextSafe("gprPipePopupLocal", `X=${slam.x.toFixed(3)} m，Y=${slam.y.toFixed(3)} m`);
+        updateGprPipeColorControls(obj);
 
         const popup = ensureGprPipeInfoPopup();
         if (!popup) return false;
+
+        // 每次重新点击管道时，默认收起下方“指定材质”操作区，只保留测点信息和当前材质。
+        const actionPanel = popup.querySelector(".gpr-pipe-color-actions");
+        const toggleBtn = popup.querySelector("#gprPipeColorToggleBtn");
+        if (actionPanel) actionPanel.classList.add("collapsed");
+        if (toggleBtn) toggleBtn.textContent = "▼";
 
         popup.style.display = "block";
         gprPipePopup3DPos = closest.clone();
@@ -5156,18 +5574,22 @@
                         && centers.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth
                         && segSet.size === centers.length;
 
+                    const autoPipeColorKey = makeGprPipeColorKeyFromCenters(centers, { source: "auto" });
+                    const autoDefaultColorHex = color.getHex();
+                    const autoRenderColorHex = resolveGprPipeColorHexByKey(autoPipeColorKey, autoDefaultColorHex);
+
                     if (canUseSmoothTube) {
                         const avgRadius = centers.reduce((sum, item) => sum + item.radius, 0) / centers.length;
                         const smoothTube = createSmoothTubeThroughPoints(
                             centers.map(item => item.center),
                             avgRadius,
-                            color.getHex()
+                            autoRenderColorHex
                         );
                         if (smoothTube) {
                             registerGprPipePickMesh(
                                 smoothTube,
                                 centers.map(item => item.center),
-                                { source: "auto", name: "自动识别地下管道", colorHex: color.getHex() }
+                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey }
                             );
                             pipelineGroup.add(smoothTube);
                         }
@@ -5179,12 +5601,12 @@
                             const cylinder = createHollowCylinderBetween(e.a.center, e.b.center, e.radius);
                             if (!cylinder) return;
                             if (cylinder.material && cylinder.material.color) {
-                                cylinder.material.color.copy(color);
+                                cylinder.material.color.setHex(autoRenderColorHex);
                             }
                             registerGprPipePickMesh(
                                 cylinder,
                                 [e.a.center, e.b.center],
-                                { source: "auto", name: "自动识别地下管道", colorHex: color.getHex() }
+                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey }
                             );
                             pipelineGroup.add(cylinder);
                         });
@@ -5211,6 +5633,7 @@
                     let pipeInfo = forcedPipeMap.get(centerObj.pipeGroupId);
                     if (!pipeInfo) {
                         pipeInfo = {
+                            pipeGroupId: centerObj.pipeGroupId,
                             colorHex: centerObj.pipeColorHex || 0x0099ff,
                             bySegment: new Map()
                         };
@@ -5244,13 +5667,18 @@
                     if (!Array.isArray(run) || run.length < 2) return;
 
                     const avgRadius = run.reduce((sum, item) => sum + item.radius, 0) / run.length;
+                    const forcedPipeColorKey = makeGprPipeColorKeyFromCenters(run, {
+                        source: "forced",
+                        pipeGroupId: pipeInfo.pipeGroupId || ""
+                    });
+                    const forcedRenderColorHex = resolveGprPipeColorHexByKey(forcedPipeColorKey, pipeColorHex);
                     let mesh = null;
 
                     if (PIPE_SMOOTH_CONFIG.enabled && run.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth) {
                         mesh = createSmoothTubeThroughPoints(
                             run.map(item => item.center),
                             avgRadius,
-                            pipeColorHex
+                            forcedRenderColorHex
                         );
                     }
 
@@ -5258,7 +5686,7 @@
                     if (!mesh && run.length === 2) {
                         mesh = createHollowCylinderBetween(run[0].center, run[1].center, avgRadius);
                         if (mesh && mesh.material && mesh.material.color) {
-                            mesh.material.color.setHex(pipeColorHex);
+                            mesh.material.color.setHex(forcedRenderColorHex);
                         }
                     }
 
@@ -5270,12 +5698,12 @@
                             const cylinder = createHollowCylinderBetween(a.center, b.center, (a.radius + b.radius) / 2);
                             if (!cylinder) continue;
                             if (cylinder.material && cylinder.material.color) {
-                                cylinder.material.color.setHex(pipeColorHex);
+                                cylinder.material.color.setHex(forcedRenderColorHex);
                             }
                             registerGprPipePickMesh(
                                 cylinder,
                                 [a.center, b.center],
-                                { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex }
+                                { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
                             );
                             onePipeGroup.add(cylinder);
                             forcedEdgeCount++;
@@ -5286,7 +5714,7 @@
                     registerGprPipePickMesh(
                         mesh,
                         run.map(item => item.center),
-                        { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex }
+                        { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
                     );
                     onePipeGroup.add(mesh);
                     forcedEdgeCount += Math.max(1, run.length - 1);
@@ -5535,8 +5963,8 @@
                 window.boxFaces.right.visible = (camX < window.boxCenter.x);
                 window.boxFaces.left.visible = (camX >= window.boxCenter.x);
 
-                // Y轴：如果你在上面看，就隐藏顶部网格，把底部当“地板”
-                window.boxFaces.top.visible = (camY < window.boxCenter.y);
+                // Y轴：地下场景保持“开顶”显示，顶面网格永远不渲染，只保留底面作为地板。
+                window.boxFaces.top.visible = false;
                 window.boxFaces.bottom.visible = (camY >= window.boxCenter.y);
 
                 // Z轴：如果你在前面看，就隐藏前面网格，把后面当背景
@@ -5805,9 +6233,9 @@
         boxMesh.position.set(cx, cy, cz);
         axisGroup.add(boxMesh);
 
-        // ================= 2. 绘制 6 个面彩色网格 (动态分组版) =================
+        // ================= 2. 绘制 5 个面彩色网格（顶面开口） =================
 
-        // 创建全局对象保存 6 个面的网格组，方便外部调用
+        // 创建全局对象保存各面的网格组，方便外部调用
         window.boxFaces = {
             bottom: new THREE.Group(),
             top: new THREE.Group(),
@@ -5819,6 +6247,7 @@
 
         // 将它们统一添加到主坐标轴组中
         Object.values(window.boxFaces).forEach(g => axisGroup.add(g));
+        window.boxFaces.top.visible = false;
 
         // 记录长方体的几何中心，用于后续判断相机视角
         window.boxCenter = new THREE.Vector3(
@@ -5831,12 +6260,10 @@
         for (let i = 1; i < nTicks; i++) {
             let tX = (xLen / nTicks) * i;
             window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.minZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.maxZ), 0x00ffff));
-            window.boxFaces.top.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.minZ), new THREE.Vector3(bounds.minX + tX, 0, bounds.maxZ), 0x00ffff));
         }
         for (let i = 1; i < nTicks; i++) {
             let tZ = (zLen / nTicks) * i;
             window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0x00ffff));
-            window.boxFaces.top.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), 0x00ffff));
         }
 
         // 后面 (z = bounds.minZ) & 前面 (z = bounds.maxZ) 网格 (红色 Red)
@@ -5898,12 +6325,8 @@
         const planeZ = new THREE.PlaneGeometry(xLen, yLen);
         scaleUV(planeZ, xLen * repeatPerMeter, yLen * repeatPerMeter);
 
-        // 4. 创建长方体的 6 个面
-        const topFace = new THREE.Mesh(planeY, soilMaterial);
-        topFace.position.set(cx, 0, cz);
-        topFace.rotation.x = -Math.PI / 2;
-        axisGroup.add(topFace);
-
+        // 4. 创建长方体的 5 个面（不渲染顶面）
+        // 顶面不创建纹理面，保持地下场景“开顶”显示，避免遮挡内部管道与剖面。
         const bottomFace = new THREE.Mesh(planeY, soilMaterial);
         bottomFace.position.set(cx, -maxDepth, cz);
         bottomFace.rotation.x = Math.PI / 2;

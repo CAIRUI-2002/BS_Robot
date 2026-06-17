@@ -4005,13 +4005,25 @@ input[type="range"]::-webkit-slider-thumb {
     border-bottom: 1px solid rgba(255, 214, 80, 0.95);
 }
 
-.gpr-pipe-popup-title {
-    font-weight: bold;
-    color: #ffd650;
+.gpr-pipe-popup-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     padding-bottom: 6px;
     margin-bottom: 8px;
+    padding-right: 24px;
     border-bottom: 1px dashed rgba(255, 214, 80, 0.45);
+}
+
+.gpr-pipe-popup-title {
+    flex: 1;
+    min-width: 0;
+    font-weight: bold;
+    color: #ffd650;
     letter-spacing: 0.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .gpr-pipe-popup-item {
@@ -4038,4 +4050,157 @@ input[type="range"]::-webkit-slider-thumb {
 .gpr-pipe-popup-close:hover {
     color: #ffffff;
     text-shadow: 0 0 8px #ffd650;
+}
+
+
+/* ==========================================
+   ✅ 三维重建页：地下管道材质颜色指定
+   ========================================== */
+.gpr-pipe-color-section {
+    margin-top: 6px;
+    padding-top: 0;
+    border-top: none;
+}
+
+.pipe-material-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.pipe-color-swatch {
+    display: inline-block;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.8);
+    box-shadow: 0 0 6px rgba(255, 255, 255, 0.35);
+    vertical-align: middle;
+}
+
+.gpr-pipe-color-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 7px;
+}
+
+.pipe-color-btn {
+    min-height: 25px;
+    padding: 3px 6px;
+    border-radius: 5px;
+    border: 1px solid rgba(120, 200, 255, 0.48);
+    background: rgba(5, 30, 55, 0.78);
+    color: #eaf6ff;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    transition: all 0.16s ease;
+}
+
+.pipe-color-btn:hover {
+    filter: brightness(1.15);
+    border-color: #ffffff;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.35);
+}
+
+.pipe-color-btn.active {
+    color: #ffffff;
+    border-color: #ffffff;
+    background: rgba(0, 145, 255, 0.72);
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.6);
+}
+
+.pipe-color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.78);
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.pipe-color-cable .pipe-color-dot {
+    background: #050505;
+}
+
+.pipe-color-pvc .pipe-color-dot {
+    background: #ffffff;
+}
+
+.pipe-color-steel .pipe-color-dot {
+    background: #c0c0c0;
+}
+
+.pipe-color-reset {
+    color: #ffe6a3;
+    border-color: rgba(255, 214, 80, 0.45);
+}
+
+/* ==========================================
+   ✅ 三维重建页：管道材质指定区域折叠显示
+   ========================================== */
+.pipe-color-toggle-btn {
+    flex-shrink: 0;
+    margin-left: 0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 214, 80, 0.55);
+    background: rgba(6, 35, 60, 0.86);
+    color: #ffd650;
+    font-size: 12px;
+    cursor: pointer;
+    line-height: 1.5;
+}
+
+.pipe-color-toggle-btn:hover {
+    border-color: #ffffff;
+    color: #ffffff;
+    box-shadow: 0 0 8px rgba(255, 214, 80, 0.35);
+}
+
+.gpr-pipe-color-actions.collapsed {
+    display: none;
+}
+
+.pipe-color-metal .pipe-color-dot,
+.pipe-color-steel .pipe-color-dot {
+    background: #c0c0c0;
+}
+
+
+/* ✅ 弹窗标题右侧材质下拉按钮：仅显示箭头，不显示“指定材质”文字 */
+.pipe-color-toggle-btn {
+    min-width: 34px;
+    height: 26px;
+    padding: 2px 8px;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 800;
+}
+
+/* ✅ 当前已指定的材质按钮高亮显示 */
+.pipe-color-btn.active {
+    color: #ffffff;
+    border-color: #00e5ff;
+    background: linear-gradient(180deg, rgba(0, 165, 255, 0.92), rgba(0, 90, 170, 0.86));
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.75), inset 0 0 8px rgba(255, 255, 255, 0.16);
+}
+
+.pipe-color-btn.active::after {
+    content: "✓";
+    margin-left: 3px;
+    color: #ffffff;
+    font-weight: 900;
+}
+
+.pipe-color-reset.active {
+    color: #ffe6a3;
+    border-color: rgba(255, 214, 80, 0.85);
+    background: rgba(110, 80, 0, 0.45);
+    box-shadow: 0 0 10px rgba(255, 214, 80, 0.45);
 }
