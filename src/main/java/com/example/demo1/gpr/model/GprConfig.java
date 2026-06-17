@@ -43,7 +43,7 @@ public class GprConfig {
     
     // ==================== Z 字几何参数 ====================
     private double phiCableDeg = 0.0;  // 电缆初始角度 (度)
-    private double thetaDeg = 60.0;    // Z字转角 (度)
+    private double thetaDeg = 75.0;    // Z字转角 (度)
     private double startX = 0.0;       // 起点X坐标
     private double startY = 0.0;       // 起点Y坐标
     

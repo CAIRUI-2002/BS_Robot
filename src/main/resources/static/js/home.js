@@ -23,6 +23,8 @@
     window.headingOffset = 0;       // 两个坐标系的角度差 (弧度)
     window.isGpsCalibrated = false; // 是否已完成标定
     window.currentGps = null;       // 机器狗当前的最新 GPS
+    window.geoTransform = null;     // ✅ 多点轨迹标定结果：SLAM -> GPS局部米制坐标的二维相似变换
+    window.geoCalibSamples = [];    // ✅ 多点轨迹标定采样缓存 [{x,y,lat,lon,status,t}]
 
     // ====== 🌊 自适应检测全局变量 ======
     const HISTORY_SIZE = 50;  // 记录最近 50 帧的数据作为背景参考
@@ -290,22 +292,351 @@
         };
     }
 
+
+    // ==========================================
+    // ✅ 多点轨迹 GPS/SLAM 标定工具函数
+    // 适配激光雷达经纬度只有小数点后 6 位的情况：
+    // 不再依赖机器狗直线移动 1 米，而是采集一段不规则轨迹，
+    // 用 RANSAC + 二维相似变换同时求解 scale / 旋转角 / 平移量。
+    // ==========================================
+    const TRAJECTORY_GEO_CALIB_CONFIG = {
+        enabled: true,
+        gpsDecimals: 6,
+        minSampleDistanceM: 0.35,      // 6位经纬度量化约0.1m，采样不宜过密
+        minSamples: 30,
+        minTotalTravelM: 8.0,
+        minSpatialSpanM: 3.0,
+        maxRmsErrorM: 0.45,
+        maxPointErrorM: 1.20,
+        ransacIterations: 90,
+        ransacInlierThresholdM: 0.60,
+        statusLogIntervalMs: 1200
+    };
+
+    function normalizeAngleRad(rad) {
+        let v = Number(rad) || 0;
+        while (v > Math.PI) v -= 2 * Math.PI;
+        while (v < -Math.PI) v += 2 * Math.PI;
+        return v;
+    }
+
+    function parseGpsNumber(value) {
+        if (typeof value === "number") return value;
+        if (value === null || value === undefined) return NaN;
+        return parseFloat(String(value).replace(/[^\d.\-+]/g, ""));
+    }
+
+    function gpsToLocalMeters(lat, lon, originLat, originLon) {
+        const lat0 = Number(originLat);
+        const lon0 = Number(originLon);
+        const north = (Number(lat) - lat0) * 111320;
+        const east = (Number(lon) - lon0) * (111320 * Math.cos(lat0 * Math.PI / 180));
+        return { east, north };
+    }
+
+    function localMetersToGps(east, north, originLat, originLon) {
+        const lat0 = Number(originLat);
+        const lon0 = Number(originLon);
+        return {
+            lat: lat0 + Number(north) / 111320,
+            lon: lon0 + Number(east) / (111320 * Math.cos(lat0 * Math.PI / 180))
+        };
+    }
+
+    function transformPointByGeoTransform(transform, x, y) {
+        if (!transform) return null;
+        const scale = Number(transform.scale ?? 1);
+        const theta = Number(transform.theta ?? transform.headingOffset ?? 0);
+        const tx = Number(transform.tx ?? 0);
+        const ty = Number(transform.ty ?? 0);
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        return {
+            east: scale * (cos * Number(x) - sin * Number(y)) + tx,
+            north: scale * (sin * Number(x) + cos * Number(y)) + ty
+        };
+    }
+
+    function inverseTransformPointByGeoTransform(transform, east, north) {
+        if (!transform) return null;
+        const scale = Number(transform.scale ?? 1);
+        if (!Number.isFinite(scale) || Math.abs(scale) < 1e-9) return null;
+        const theta = Number(transform.theta ?? transform.headingOffset ?? 0);
+        const tx = Number(transform.tx ?? 0);
+        const ty = Number(transform.ty ?? 0);
+        const dx = Number(east) - tx;
+        const dy = Number(north) - ty;
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        return {
+            x: (cos * dx + sin * dy) / scale,
+            y: (-sin * dx + cos * dy) / scale
+        };
+    }
+
+    function normalizeLoadedGeoTransform(transform) {
+        if (!transform || typeof transform !== "object") return null;
+        const originLat = Number(transform.originLat ?? transform.gpsOrigin?.lat ?? transform.origin?.lat);
+        const originLon = Number(transform.originLon ?? transform.gpsOrigin?.lon ?? transform.origin?.lon);
+        const scale = Number(transform.scale ?? 1);
+        const theta = Number(transform.theta ?? transform.headingOffset ?? transform.yawRad ?? 0);
+        const tx = Number(transform.tx ?? transform.translationEast ?? 0);
+        const ty = Number(transform.ty ?? transform.translationNorth ?? 0);
+        if (![originLat, originLon, scale, theta, tx, ty].every(Number.isFinite)) return null;
+        return {
+            ...transform,
+            method: transform.method || "trajectory_similarity_2d",
+            originLat,
+            originLon,
+            scale,
+            theta,
+            tx,
+            ty
+        };
+    }
+
+    function resetTrajectoryGeoCalibration(reason = "manual") {
+        window.geoCalibSamples = [];
+        window.geoTransform = null;
+        window.isGpsCalibrated = false;
+        window.gpsAnchor = null;
+        window.slamAnchor = null;
+        window.headingOffset = 0;
+        window.__lastGeoCalibStatusAt = 0;
+        console.log("🔄 已重置多点轨迹GPS/SLAM标定：", reason);
+    }
+    window.resetTrajectoryGeoCalibration = resetTrajectoryGeoCalibration;
+
+    function computeTrajectoryQuality(samples) {
+        const arr = Array.isArray(samples) ? samples : [];
+        if (arr.length < 2) {
+            return { ready: false, totalTravelM: 0, spatialSpanM: 0, uniqueGpsCount: arr.length };
+        }
+
+        let totalTravelM = 0;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        const gpsKeys = new Set();
+
+        arr.forEach((s, i) => {
+            minX = Math.min(minX, s.x);
+            maxX = Math.max(maxX, s.x);
+            minY = Math.min(minY, s.y);
+            maxY = Math.max(maxY, s.y);
+            gpsKeys.add(`${Number(s.lat).toFixed(6)},${Number(s.lon).toFixed(6)}`);
+            if (i > 0) {
+                const p = arr[i - 1];
+                totalTravelM += Math.hypot(s.x - p.x, s.y - p.y);
+            }
+        });
+
+        const spatialSpanM = Math.hypot(maxX - minX, maxY - minY);
+        return {
+            ready: arr.length >= TRAJECTORY_GEO_CALIB_CONFIG.minSamples &&
+                totalTravelM >= TRAJECTORY_GEO_CALIB_CONFIG.minTotalTravelM &&
+                spatialSpanM >= TRAJECTORY_GEO_CALIB_CONFIG.minSpatialSpanM &&
+                gpsKeys.size >= Math.max(6, Math.floor(arr.length * 0.35)),
+            totalTravelM,
+            spatialSpanM,
+            uniqueGpsCount: gpsKeys.size
+        };
+    }
+
+    function fitSimilarityTransform2D(pairs) {
+        if (!Array.isArray(pairs) || pairs.length < 2) return null;
+        let meanPx = 0, meanPy = 0, meanQx = 0, meanQy = 0;
+        pairs.forEach(pair => {
+            meanPx += pair.px;
+            meanPy += pair.py;
+            meanQx += pair.qx;
+            meanQy += pair.qy;
+        });
+        const n = pairs.length;
+        meanPx /= n; meanPy /= n; meanQx /= n; meanQy /= n;
+
+        let a = 0, b = 0, denom = 0;
+        pairs.forEach(pair => {
+            const px = pair.px - meanPx;
+            const py = pair.py - meanPy;
+            const qx = pair.qx - meanQx;
+            const qy = pair.qy - meanQy;
+            a += px * qx + py * qy;
+            b += px * qy - py * qx;
+            denom += px * px + py * py;
+        });
+        if (denom < 1e-9) return null;
+
+        const theta = Math.atan2(b, a);
+        const scale = Math.sqrt(a * a + b * b) / denom;
+        const cos = Math.cos(theta);
+        const sin = Math.sin(theta);
+        const tx = meanQx - scale * (cos * meanPx - sin * meanPy);
+        const ty = meanQy - scale * (sin * meanPx + cos * meanPy);
+
+        const transform = { method: "trajectory_similarity_2d", scale, theta, tx, ty, sampleCount: n };
+        const errors = pairs.map(pair => {
+            const pred = transformPointByGeoTransform(transform, pair.px, pair.py);
+            return Math.hypot(pred.east - pair.qx, pred.north - pair.qy);
+        });
+        transform.rmsErrorM = Math.sqrt(errors.reduce((sum, e) => sum + e * e, 0) / errors.length);
+        transform.maxErrorM = Math.max(...errors);
+        return transform;
+    }
+
+    function randomPickTwo(pairs) {
+        const i = Math.floor(Math.random() * pairs.length);
+        let j = Math.floor(Math.random() * pairs.length);
+        while (j === i) j = Math.floor(Math.random() * pairs.length);
+        return [pairs[i], pairs[j]];
+    }
+
+    function fitSimilarityTransform2DRansac(pairs) {
+        if (!Array.isArray(pairs) || pairs.length < 6) return fitSimilarityTransform2D(pairs);
+        let bestInliers = [];
+        for (let k = 0; k < TRAJECTORY_GEO_CALIB_CONFIG.ransacIterations; k++) {
+            const candidate = fitSimilarityTransform2D(randomPickTwo(pairs));
+            if (!candidate) continue;
+            const inliers = pairs.filter(pair => {
+                const pred = transformPointByGeoTransform(candidate, pair.px, pair.py);
+                const err = Math.hypot(pred.east - pair.qx, pred.north - pair.qy);
+                return err <= TRAJECTORY_GEO_CALIB_CONFIG.ransacInlierThresholdM;
+            });
+            if (inliers.length > bestInliers.length) bestInliers = inliers;
+        }
+        const refined = bestInliers.length >= 6 ? fitSimilarityTransform2D(bestInliers) : fitSimilarityTransform2D(pairs);
+        if (!refined) return null;
+        refined.inlierCount = bestInliers.length >= 6 ? bestInliers.length : pairs.length;
+        refined.outlierCount = pairs.length - refined.inlierCount;
+        refined.ransacThresholdM = TRAJECTORY_GEO_CALIB_CONFIG.ransacInlierThresholdM;
+        refined.rawSampleCount = pairs.length;
+        return refined;
+    }
+
+    function finishTrajectoryGeoCalibration() {
+        const samples = Array.isArray(window.geoCalibSamples) ? window.geoCalibSamples : [];
+        const quality = computeTrajectoryQuality(samples);
+        if (!quality.ready) return false;
+
+        const origin = samples[0];
+        const pairs = samples.map(s => {
+            const q = gpsToLocalMeters(s.lat, s.lon, origin.lat, origin.lon);
+            return {
+                px: Number(s.x),
+                py: Number(s.y),
+                qx: q.east,
+                qy: q.north,
+                lat: s.lat,
+                lon: s.lon,
+                t: s.t
+            };
+        }).filter(p => [p.px, p.py, p.qx, p.qy].every(Number.isFinite));
+
+        const transform = fitSimilarityTransform2DRansac(pairs);
+        if (!transform) {
+            setStatus("❌ 轨迹标定失败：有效样本不足或轨迹退化。", "error");
+            return false;
+        }
+
+        if (transform.rmsErrorM > TRAJECTORY_GEO_CALIB_CONFIG.maxRmsErrorM ||
+            transform.maxErrorM > TRAJECTORY_GEO_CALIB_CONFIG.maxPointErrorM) {
+            console.warn("⚠️ 轨迹标定误差过大，继续采样：", transform);
+            setStatus(
+                `⚠️ 轨迹标定误差偏大：RMS=${transform.rmsErrorM.toFixed(2)}m，最大=${transform.maxErrorM.toFixed(2)}m，请继续移动扩大轨迹范围。`,
+                "error"
+            );
+            return false;
+        }
+
+        window.geoTransform = {
+            ...transform,
+            originLat: origin.lat,
+            originLon: origin.lon,
+            gpsDecimals: TRAJECTORY_GEO_CALIB_CONFIG.gpsDecimals,
+            totalTravelM: Number(quality.totalTravelM.toFixed(3)),
+            spatialSpanM: Number(quality.spatialSpanM.toFixed(3)),
+            uniqueGpsCount: quality.uniqueGpsCount,
+            calibratedAt: new Date().toISOString()
+        };
+
+        // 兼容旧代码：仍同步写入 gpsAnchor / slamAnchor / headingOffset。
+        window.gpsAnchor = { lat: origin.lat, lon: origin.lon };
+        window.slamAnchor = { x: 0, y: 0, z: 0 };
+        window.headingOffset = normalizeAngleRad(window.geoTransform.theta);
+        window.isGpsCalibrated = true;
+
+        console.log("✅ 多点轨迹GPS/SLAM标定完成：", window.geoTransform);
+        setStatus(
+            `✅ 轨迹标定完成：样本${transform.rawSampleCount || transform.sampleCount}个，内点${transform.inlierCount || transform.sampleCount}个，RMS=${transform.rmsErrorM.toFixed(2)}m，scale=${transform.scale.toFixed(4)}，角度=${(transform.theta * 180 / Math.PI).toFixed(2)}°`,
+            "success"
+        );
+        return true;
+    }
+
+    function addGeoCalibrationSample(rawLat, rawLon, pose, status = "") {
+        if (!TRAJECTORY_GEO_CALIB_CONFIG.enabled) return;
+        if (window.isGpsCalibrated || window.geoTransform) return;
+        if (!pose || pose.x === -999) return;
+
+        const lat = parseGpsNumber(rawLat);
+        const lon = parseGpsNumber(rawLon);
+        const x = Number(pose.x);
+        const y = Number(pose.y);
+        if (![lat, lon, x, y].every(Number.isFinite)) return;
+
+        if (!Array.isArray(window.geoCalibSamples)) window.geoCalibSamples = [];
+        const samples = window.geoCalibSamples;
+        const sample = { lat, lon, x, y, status: status || "", t: Date.now() };
+
+        if (samples.length === 0) {
+            samples.push(sample);
+            window.gpsAnchor = { lat, lon };
+            window.slamAnchor = { x, y, z: Number(pose.z ?? 0) };
+            setStatus("📍 开始采集多点GPS/SLAM轨迹标定样本，请正常移动机器狗，不要求直线。", "warning");
+            return;
+        }
+
+        const last = samples[samples.length - 1];
+        const moveDist = Math.hypot(x - last.x, y - last.y);
+        if (moveDist < TRAJECTORY_GEO_CALIB_CONFIG.minSampleDistanceM) return;
+
+        // 6位经纬度会出现格点重复；完全重复的GPS点不参与拟合，避免把量化平台期当成真实轨迹。
+        if (Number(lat).toFixed(6) === Number(last.lat).toFixed(6) &&
+            Number(lon).toFixed(6) === Number(last.lon).toFixed(6)) {
+            return;
+        }
+
+        samples.push(sample);
+        const quality = computeTrajectoryQuality(samples);
+        const now = Date.now();
+        if (now - (window.__lastGeoCalibStatusAt || 0) > TRAJECTORY_GEO_CALIB_CONFIG.statusLogIntervalMs) {
+            window.__lastGeoCalibStatusAt = now;
+            setStatus(
+                `📍 轨迹标定采样中：${samples.length}/${TRAJECTORY_GEO_CALIB_CONFIG.minSamples}点，累计${quality.totalTravelM.toFixed(1)}m，跨度${quality.spatialSpanM.toFixed(1)}m，GPS格点${quality.uniqueGpsCount}个`,
+                "warning"
+            );
+        }
+
+        if (quality.ready) finishTrajectoryGeoCalibration();
+    }
+    window.addGeoCalibrationSample = addGeoCalibrationSample;
+
     function applyLoadedMapGeoMetadata(meta, sourceName = "") {
         if (!meta || typeof meta !== "object") return false;
 
         const calibration = meta.calibration || meta.gpsCalibration || meta;
-        const gpsAnchor = clonePlainGps(calibration.gpsAnchor);
-        const slamAnchor = clonePlainSlam(calibration.slamAnchor);
-        const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? 0);
+        const loadedTransform = normalizeLoadedGeoTransform(calibration.geoTransform || meta.geoTransform || calibration.transform);
+        const gpsAnchor = clonePlainGps(calibration.gpsAnchor) || (loadedTransform ? { lat: loadedTransform.originLat, lon: loadedTransform.originLon } : null);
+        const slamAnchor = clonePlainSlam(calibration.slamAnchor) || (loadedTransform ? { x: 0, y: 0, z: 0 } : null);
+        const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? loadedTransform?.theta ?? 0);
 
-        if (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset)) {
-            console.warn("⚠️ 点云经纬度元数据缺少 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
+        if (!loadedTransform && (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset))) {
+            console.warn("⚠️ 点云经纬度元数据缺少 geoTransform 或 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
             return false;
         }
 
+        window.geoTransform = loadedTransform;
         window.gpsAnchor = gpsAnchor;
         window.slamAnchor = slamAnchor;
-        window.headingOffset = headingOffset;
+        window.headingOffset = normalizeAngleRad(headingOffset);
         window.isGpsCalibrated = true;
 
         if (calibration.currentGps) {
@@ -320,7 +651,8 @@
             source: window.loadedPointCloudGeoSource,
             gpsAnchor: window.gpsAnchor,
             slamAnchor: window.slamAnchor,
-            headingOffset: window.headingOffset
+            headingOffset: window.headingOffset,
+            geoTransform: window.geoTransform
         });
 
         return true;
@@ -1071,7 +1403,8 @@
     function slamYawToGeoYawRad(slamYaw) {
         // SLAM 数学角：0=局部X正向；headingOffset 转为真实 ENU 数学角：0=东，90=北；
         // 履带车 RTK 航向角约定：0=北，90=东，因此用 PI/2 - mathYaw 转换。
-        const mathGlobalYaw = normalizeRad(slamYaw + (window.headingOffset || 0));
+        const transformYaw = window.geoTransform ? Number(window.geoTransform.theta || 0) : (window.headingOffset || 0);
+        const mathGlobalYaw = normalizeRad(slamYaw + transformYaw);
         return normalizeRad((Math.PI / 2) - mathGlobalYaw);
     }
 
@@ -3462,52 +3795,43 @@
 
     // SLAM 本地坐标 (x,y) 转 全局 GPS 经纬度 (lat,lon)
     window.slamToGps = function (targetX, targetY) {
-        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
-            return null; // 尚未标定完成
+        // ✅ 新版优先：多点轨迹相似变换，包含 scale / rotation / translation。
+        if (window.geoTransform) {
+            const pred = transformPointByGeoTransform(window.geoTransform, targetX, targetY);
+            if (!pred) return null;
+            return localMetersToGps(pred.east, pred.north, window.geoTransform.originLat, window.geoTransform.originLon);
         }
 
-        // 1. 计算目标点相对于锚点的位移向量 (单位：米)
-        const dx = targetX - window.slamAnchor.x;
-        const dy = targetY - window.slamAnchor.y;
+        // ✅ 旧版兼容：gpsAnchor + slamAnchor + headingOffset。
+        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
+            return null;
+        }
 
-        // 2. 将向量旋转到真实地球的正东、正北方向
+        const dx = Number(targetX) - Number(window.slamAnchor.x);
+        const dy = Number(targetY) - Number(window.slamAnchor.y);
         const trueDx = dx * Math.cos(window.headingOffset) - dy * Math.sin(window.headingOffset);
         const trueDy = dx * Math.sin(window.headingOffset) + dy * Math.cos(window.headingOffset);
-
-        // 3. 地理常数换算：将米转换回经纬度偏移
-        // 纬度 1度 ≈ 111320米，经度 1度 ≈ 111320 * cos(纬度) 米
-        const latOffset = trueDy / 111320;
-        const lonOffset = trueDx / (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
-
-        // 4. 返回叠加后的绝对经纬度
-        return {
-            lat: window.gpsAnchor.lat + latOffset,
-            lon: window.gpsAnchor.lon + lonOffset
-        };
+        return localMetersToGps(trueDx, trueDy, window.gpsAnchor.lat, window.gpsAnchor.lon);
     };
 
-    // ====== 🌍 全局新增：全球 GPS 经纬度转 SLAM 本地坐标 (x,y) ======
+    // ====== 🌍 全球 GPS 经纬度转 SLAM 本地坐标 (x,y) ======
     window.gpsToSlam = function (lat, lon) {
-        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
-            return null; // 尚未完成 GPS 标定，无法转换
+        // ✅ 新版优先：多点轨迹相似变换的逆变换。
+        if (window.geoTransform) {
+            const q = gpsToLocalMeters(lat, lon, window.geoTransform.originLat, window.geoTransform.originLon);
+            return inverseTransformPointByGeoTransform(window.geoTransform, q.east, q.north);
         }
 
-        // 1. 计算地理坐标相较于地理锚点的经纬度偏移量
-        const latOffset = lat - window.gpsAnchor.lat;
-        const lonOffset = lon - window.gpsAnchor.lon;
+        // ✅ 旧版兼容。
+        if (!window.isGpsCalibrated || !window.gpsAnchor || !window.slamAnchor) {
+            return null;
+        }
 
-        // 2. 将经纬度偏移换算为真实的地球正东、正北方向位移（米）
-        const trueDy = latOffset * 111320;
-        const trueDx = lonOffset * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
-
-        // 3. 逆向旋转坐标系（旋转角度为 -headingOffset）
+        const q = gpsToLocalMeters(lat, lon, window.gpsAnchor.lat, window.gpsAnchor.lon);
         const cosO = Math.cos(window.headingOffset);
         const sinO = Math.sin(window.headingOffset);
-
-        const dx = trueDx * cosO + trueDy * sinO;
-        const dy = -trueDx * sinO + trueDy * cosO;
-
-        // 4. 叠加局部锚点坐标，还原为 SLAM 坐标
+        const dx = q.east * cosO + q.north * sinO;
+        const dy = -q.east * sinO + q.north * cosO;
         return {
             x: window.slamAnchor.x + dx,
             y: window.slamAnchor.y + dy
@@ -4390,36 +4714,18 @@
                     const gpsData = JSON.parse(message.body);
                     // 只有在信号良好 (qual > 0) 时才处理
                     if (gpsData.qual > 0) {
-                        window.currentGps = gpsData;
+                        const gpsLat = parseGpsNumber(gpsData.lat);
+                        const gpsLon = parseGpsNumber(gpsData.lon);
+                        window.currentGps = { ...gpsData, lat: gpsLat, lon: gpsLon };
 
                         // ⚠️ 假设 currentRobotPose 在这里可以获取到 (它在下方定义的)
                         const pose = window.currentRobotPose;
 
-                        // --- 自动标定逻辑 ---
-                        if (!window.isGpsCalibrated && pose && pose.x !== -999) {
-                            if (!window.gpsAnchor) {
-                                // 1. 钉下锚点
-                                window.gpsAnchor = { lat: gpsData.lat, lon: gpsData.lon };
-                                window.slamAnchor = { x: pose.x, y: pose.y };
-                                console.log("📍 GPS基准锚点已记录!");
-                            } else {
-                                // 2. 机器狗走出 1 米后，计算角度差
-                                const dx = pose.x - window.slamAnchor.x;
-                                const dy = pose.y - window.slamAnchor.y;
-                                const dist = Math.hypot(dx, dy);
-
-                                if (dist > 1.0) {
-                                    const slamAngle = Math.atan2(dy, dx);
-
-                                    const latMeters = (gpsData.lat - window.gpsAnchor.lat) * 111320;
-                                    const lonMeters = (gpsData.lon - window.gpsAnchor.lon) * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
-                                    const gpsAngle = Math.atan2(latMeters, lonMeters); // Y(北), X(东)
-
-                                    window.headingOffset = gpsAngle - slamAngle;
-                                    window.isGpsCalibrated = true;
-                                    console.log(`🧭 GPS标定完成! 偏角: ${(window.headingOffset * 180 / Math.PI).toFixed(2)}度`);
-                                }
-                            }
+                        // ✅ 多点轨迹标定：替代原来的“走出1米单向量标定”。
+                        // 机器狗可直线、转弯或不规则移动；系统会采集多组 SLAM/GPS 样本，
+                        // 用 RANSAC + 二维相似变换求解 scale / 旋转角 / 平移量。
+                        if (!window.isGpsCalibrated && !window.geoTransform && pose && pose.x !== -999) {
+                            addGeoCalibrationSample(gpsLat, gpsLon, pose, gpsData.status || gpsData.qual);
                         }
                     }
                 } catch (e) {
@@ -9940,16 +10246,17 @@
 
         function buildCurrentVisibleMapGeoMetadata(pcdFileName, pointCount) {
             const hasCalibration = !!(
-                window.isGpsCalibrated &&
-                window.gpsAnchor &&
-                window.slamAnchor &&
-                Number.isFinite(Number(window.headingOffset))
+                window.geoTransform ||
+                (window.isGpsCalibrated &&
+                    window.gpsAnchor &&
+                    window.slamAnchor &&
+                    Number.isFinite(Number(window.headingOffset)))
             );
 
             const bounds = computeCurrentVisibleMapBounds();
 
             return {
-                version: 1,
+                version: 2,
                 type: "slam_pcd_geo_metadata",
                 createdAt: new Date().toISOString(),
                 pcdFileName: pcdFileName,
@@ -9957,18 +10264,30 @@
                 coordinateSystem: {
                     pcd: "SLAM局部坐标，字段为 x y z rgb，单位m，Z轴向上",
                     gprViewTransform: "三维重建页显示时使用 (x, y, z) -> (x, z, -y) 变换，保持与路径页方向一致",
-                    gpsTransform: "通过 gpsAnchor + slamAnchor + headingOffset 将 SLAM 平面坐标换算为经纬度"
+                    gpsTransform: "优先通过 geoTransform(scale + rotation + translation) 将 SLAM 平面坐标换算为经纬度；兼容旧版 gpsAnchor + slamAnchor + headingOffset"
                 },
                 calibration: {
                     isGpsCalibrated: hasCalibration,
                     gpsAnchor: clonePlainGps(window.gpsAnchor),
                     slamAnchor: clonePlainSlam(window.slamAnchor),
                     headingOffset: Number.isFinite(Number(window.headingOffset)) ? Number(window.headingOffset) : 0,
-                    currentGps: clonePlainGps(window.currentGps)
+                    currentGps: clonePlainGps(window.currentGps),
+                    geoTransform: window.geoTransform || null,
+                    method: window.geoTransform ? "trajectory_similarity_2d_ransac" : "legacy_heading_offset",
+                    gpsDecimals: window.geoTransform?.gpsDecimals ?? 6,
+                    rmsErrorM: window.geoTransform?.rmsErrorM ?? null,
+                    maxErrorM: window.geoTransform?.maxErrorM ?? null,
+                    scale: window.geoTransform?.scale ?? null,
+                    sampleCount: window.geoTransform?.rawSampleCount || window.geoTransform?.sampleCount || null,
+                    inlierCount: window.geoTransform?.inlierCount || null,
+                    outlierCount: window.geoTransform?.outlierCount || null,
+                    totalTravelM: window.geoTransform?.totalTravelM ?? null,
+                    spatialSpanM: window.geoTransform?.spatialSpanM ?? null,
+                    calibratedAt: window.geoTransform?.calibratedAt || null
                 },
                 mapBounds: bounds,
                 usage: {
-                    loadTip: "读取点云时同时选择本 .geo.json 文件，可自动恢复 window.gpsAnchor/window.slamAnchor/window.headingOffset。",
+                    loadTip: "读取点云时同时选择本 .geo.json 文件，可自动恢复 window.geoTransform；旧版文件仍恢复 window.gpsAnchor/window.slamAnchor/window.headingOffset。",
                     crawlerTip: "恢复标定后，三维重建页指定扫描区域会调用 slamToGps() 生成履带小车经纬度航点。"
                 }
             };
@@ -9978,18 +10297,20 @@
             if (!meta || typeof meta !== "object") return false;
 
             const calibration = meta.calibration || meta.gpsCalibration || meta;
-            const gpsAnchor = clonePlainGps(calibration.gpsAnchor);
-            const slamAnchor = clonePlainSlam(calibration.slamAnchor);
-            const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? 0);
+            const loadedTransform = normalizeLoadedGeoTransform(calibration.geoTransform || meta.geoTransform || calibration.transform);
+            const gpsAnchor = clonePlainGps(calibration.gpsAnchor) || (loadedTransform ? { lat: loadedTransform.originLat, lon: loadedTransform.originLon } : null);
+            const slamAnchor = clonePlainSlam(calibration.slamAnchor) || (loadedTransform ? { x: 0, y: 0, z: 0 } : null);
+            const headingOffset = Number(calibration.headingOffset ?? calibration.headingOffsetRad ?? loadedTransform?.theta ?? 0);
 
-            if (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset)) {
-                console.warn("⚠️ 点云经纬度元数据缺少 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
+            if (!loadedTransform && (!gpsAnchor || !slamAnchor || !Number.isFinite(headingOffset))) {
+                console.warn("⚠️ 点云经纬度元数据缺少 geoTransform 或 gpsAnchor / slamAnchor / headingOffset，已跳过恢复：", meta);
                 return false;
             }
 
+            window.geoTransform = loadedTransform;
             window.gpsAnchor = gpsAnchor;
             window.slamAnchor = slamAnchor;
-            window.headingOffset = headingOffset;
+            window.headingOffset = normalizeAngleRad(headingOffset);
             window.isGpsCalibrated = true;
             if (calibration.currentGps) {
                 const currentGps = clonePlainGps(calibration.currentGps);
@@ -10003,7 +10324,8 @@
                 source: window.loadedPointCloudGeoSource,
                 gpsAnchor: window.gpsAnchor,
                 slamAnchor: window.slamAnchor,
-                headingOffset: window.headingOffset
+                headingOffset: window.headingOffset,
+                geoTransform: window.geoTransform
             });
 
             return true;
@@ -10698,8 +11020,8 @@
             // ==========================================
             if (data.rtk && data.rtk.lat && data.rtk.lon) {
                 // 1. 字符串清洗：去掉 "°N"、"°E" 等后缀，提取纯浮点数
-                const rawLat = parseFloat(data.rtk.lat.replace(/[^\d.-]/g, ''));
-                const rawLon = parseFloat(data.rtk.lon.replace(/[^\d.-]/g, ''));
+                const rawLat = parseGpsNumber(data.rtk.lat);
+                const rawLon = parseGpsNumber(data.rtk.lon);
 
                 // 2. 获取固定解状态
                 const status = data.rtk.status;
@@ -10720,80 +11042,10 @@
                 }
                 // 👆==========================================👆
 
-                // 3. 🌟 新增：触发轨迹配准(Kabsch)自动标定逻辑
-                if (isGoodSignal && !window.isGpsCalibrated && pose && pose.x !== -999) {
-                    // A. 初始化：钉下起始锚点，并创建数组准备收集两张“图纸”上的轨迹
-                    if (!window.gpsAnchor) {
-                        window.gpsAnchor = { lat: rawLat, lon: rawLon };
-                        window.slamAnchor = { x: pose.x, y: pose.y };
-                        window.calibSlamPts = []; // 存放完美形状的 SLAM 轨迹
-                        window.calibRtkPts = [];  // 存放带有手抖误差的 RTK 轨迹
-                        console.log(`📍 RTK基准锚点已记录! 纬度: ${rawLat}, 经度: ${rawLon}`);
-                        setStatus("📍 RTK锚点已固定，请遥控机器狗随意走动收集轨迹...", "warning");
-                    } else {
-                        // B. 采样过滤：每走出 0.1 米，才记录一个点 (防止原地打转导致重复数据堆积)
-                        const ptsCount = window.calibSlamPts.length;
-                        const lastSlam = ptsCount > 0 ? window.calibSlamPts[ptsCount - 1] : window.slamAnchor;
-
-                        const dx = pose.x - lastSlam.x;
-                        const dy = pose.y - lastSlam.y;
-                        const moveDist = Math.hypot(dx, dy);
-
-                        if (moveDist >= 0.1) {
-                            // 记录当前的 SLAM 局部坐标
-                            window.calibSlamPts.push({ x: pose.x, y: pose.y });
-
-                            // 将当前的 RTK 经纬度，转化为相较于起点的物理距离 (东向 E，北向 N，单位：米)
-                            const eMeters = (rawLon - window.gpsAnchor.lon) * (111320 * Math.cos(window.gpsAnchor.lat * Math.PI / 180));
-                            const nMeters = (rawLat - window.gpsAnchor.lat) * 111320;
-                            window.calibRtkPts.push({ e: eMeters, n: nMeters });
-
-                            // 设定需要收集的点数 (30 个点 × 0.1米/点 = 机器狗大约要走 3 米左右的任意不规则路径)
-                            const requiredPts = 30;
-                            setStatus(`📍 收集标定轨迹中... (${ptsCount + 1}/${requiredPts})`, "warning");
-
-                            // C. 轨迹收齐后，执行图形配准 (最小二乘法) 求解最精准旋转角
-                            if (window.calibSlamPts.length >= requiredPts) {
-                                let sumX = 0, sumY = 0, sumE = 0, sumN = 0;
-                                const N = window.calibSlamPts.length;
-
-                                // 步骤 1：把两张“图纸”的中心钉在一起 (求两套轨迹各自的重心)
-                                for (let i = 0; i < N; i++) {
-                                    sumX += window.calibSlamPts[i].x;
-                                    sumY += window.calibSlamPts[i].y;
-                                    sumE += window.calibRtkPts[i].e;
-                                    sumN += window.calibRtkPts[i].n;
-                                }
-                                const cX = sumX / N, cY = sumY / N, cE = sumE / N, cN = sumN / N;
-
-                                // 步骤 2：计算轨迹形状的交叉相关性 (比对形状的吻合度)
-                                let sumCross = 0; // Σ (x*n - y*e)
-                                let sumDot = 0;   // Σ (x*e + y*n)
-
-                                for (let i = 0; i < N; i++) {
-                                    // 计算每个点距离自己重心的偏差
-                                    const devX = window.calibSlamPts[i].x - cX;
-                                    const devY = window.calibSlamPts[i].y - cY;
-                                    const devE = window.calibRtkPts[i].e - cE;
-                                    const devN = window.calibRtkPts[i].n - cN;
-
-                                    sumCross += (devX * devN - devY * devE);
-                                    sumDot += (devX * devE + devY * devN);
-                                }
-
-                                // 步骤 3：旋转“图纸”，算出误差最小、最贴合的那个终极角度！
-                                window.headingOffset = Math.atan2(sumCross, sumDot);
-                                window.isGpsCalibrated = true;
-
-                                // 扫尾：释放不再需要的数组内存
-                                delete window.calibSlamPts;
-                                delete window.calibRtkPts;
-
-                                console.log(`🧭 轨迹对齐标定完成! 利用 ${N} 个点拟合，最终偏角: ${(window.headingOffset * 180 / Math.PI).toFixed(2)}度`);
-                                setStatus("✅ 轨迹无感标定完成！现在点击破损点可获取高精经纬度。", "success");
-                            }
-                        }
-                    }
+                // 3. ✅ 多点轨迹相似变换自动标定
+                // 不要求机器狗直线运动；适配 6 位经纬度，通过多点轨迹整体拟合 scale / rotation / translation。
+                if (isGoodSignal && !window.isGpsCalibrated && !window.geoTransform && pose && pose.x !== -999) {
+                    addGeoCalibrationSample(rawLat, rawLon, pose, status);
                 }
             }
             // ==========================================
