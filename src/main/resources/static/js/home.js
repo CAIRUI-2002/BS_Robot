@@ -111,6 +111,7 @@
     let showAnnotation = false;      // 标注开关状态
     let annotation3DGroups = [];     // 存储 3D 标注对象
     let gprResult = null;            // 缓存 GPR 结果
+    let gprPipePopup3DPos = null;    // 三维重建页地下管道点击弹窗对应的世界坐标
 
     // ✅ GPR 标注校准持久化状态
     // 说明：以“GPR 数据文件夹路径”为依据，把手动红圈、删除的自动红圈和彩色倾斜管道标注保存到机器狗主机的 GPR 数据文件夹中。
@@ -436,6 +437,9 @@
         let isPanning = false;
         let lastX = 0;
         let lastY = 0;
+        let clickStartX = 0;
+        let clickStartY = 0;
+        let hasDraggedForView = false;
 
         dom.addEventListener("mousedown", e => {
             if (e.button === 0) {
@@ -449,6 +453,9 @@
             }
             lastX = e.clientX;
             lastY = e.clientY;
+            clickStartX = e.clientX;
+            clickStartY = e.clientY;
+            hasDraggedForView = false;
         });
 
         window.addEventListener("mouseup", () => {
@@ -458,9 +465,17 @@
 
         dom.addEventListener("contextmenu", e => e.preventDefault());
 
+        dom.addEventListener("click", e => {
+            if (hasDraggedForView) return;
+            handleGprPipeClick(e, camera, dom);
+        });
+
         dom.addEventListener("mousemove", e => {
             const dx = e.clientX - lastX;
             const dy = e.clientY - lastY;
+            if (Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY) > 4) {
+                hasDraggedForView = true;
+            }
 
             if (isRotating) {
                 theta += dx * 0.005;
@@ -479,9 +494,13 @@
                 updateCamera();
             }
 
+            updateGprPipeHoverCursor(e, camera, dom, isRotating || isPanning);
+
             lastX = e.clientX;
             lastY = e.clientY;
         });
+
+        dom.addEventListener("mouseleave", () => resetGprPipeHoverCursor(dom));
 
         dom.addEventListener("wheel", e => {
             e.preventDefault();
@@ -4352,6 +4371,245 @@
 
     // ====================== Z 字型三维拼接 ======================
 
+
+    // ==========================================
+    // ✅ 三维重建页：地下管道点击信息弹窗
+    // 说明：管道 Mesh 生成时会注册中心线点；点击管道后，取点击点到中心线最近点作为测点，
+    //       由 GPR 世界坐标反推 SLAM 平面坐标，再复用 slamToGps() 显示经纬度。
+    // ==========================================
+    function ensureGprPipeInfoPopup() {
+        let popup = $("gprPipeInfoPopup");
+        if (popup) return popup;
+
+        const container = $("threeContainer");
+        const parent = container ? (container.closest(".gpr-view-3d") || container.parentElement) : document.body;
+        if (!parent) return null;
+
+        popup = document.createElement("div");
+        popup.id = "gprPipeInfoPopup";
+        popup.className = "gpr-pipe-info-popup";
+        popup.style.display = "none";
+        popup.innerHTML = `
+            <div class="gpr-pipe-popup-close">×</div>
+            <div class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+            <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps" class="hl-text">--</span></div>
+            <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth" class="hl-text">--</span></div>
+            <div class="gpr-pipe-popup-item"><strong>局部坐标：</strong><span id="gprPipePopupLocal" class="hl-text">--</span></div>
+        `;
+        const closeBtn = popup.querySelector(".gpr-pipe-popup-close");
+        if (closeBtn) closeBtn.onclick = hideGprPipeInfoPopup;
+        parent.appendChild(popup);
+        return popup;
+    }
+
+    function hideGprPipeInfoPopup() {
+        const popup = $("gprPipeInfoPopup");
+        if (popup) popup.style.display = "none";
+        gprPipePopup3DPos = null;
+    }
+
+    function registerGprPipePickMesh(mesh, centerlinePoints, meta = {}) {
+        if (!mesh || !Array.isArray(centerlinePoints) || centerlinePoints.length < 2) return mesh;
+
+        const cleanPoints = centerlinePoints
+            .map(p => p && p.clone ? p.clone() : new THREE.Vector3(Number(p.x), Number(p.y), Number(p.z)))
+            .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z));
+
+        if (cleanPoints.length < 2) return mesh;
+
+        mesh.userData = mesh.userData || {};
+        mesh.userData.isGprUndergroundPipe = true;
+        mesh.userData.gprCenterlinePoints = cleanPoints;
+        mesh.userData.gprPipeMeta = meta || {};
+        mesh.name = meta.name || mesh.name || "地下管道可点击对象";
+
+        if (!window.gprPipePickObjects) {
+            window.gprPipePickObjects = [];
+        }
+        if (!window.gprPipePickObjects.includes(mesh)) {
+            window.gprPipePickObjects.push(mesh);
+        }
+        return mesh;
+    }
+
+    function isObjectEffectivelyVisible(obj) {
+        let cur = obj;
+        while (cur) {
+            if (cur.visible === false) return false;
+            cur = cur.parent;
+        }
+        return true;
+    }
+
+    function findClosestPointOnSegment(point, a, b) {
+        const ab = new THREE.Vector3().subVectors(b, a);
+        const lenSq = ab.lengthSq();
+        if (lenSq < 1e-12) return a.clone();
+        const t = Math.max(0, Math.min(1, new THREE.Vector3().subVectors(point, a).dot(ab) / lenSq));
+        return a.clone().add(ab.multiplyScalar(t));
+    }
+
+    function findClosestPointOnPolyline(point, points) {
+        if (!Array.isArray(points) || points.length === 0) return point.clone();
+        if (points.length === 1) return points[0].clone();
+
+        let best = points[0].clone();
+        let bestDistSq = Infinity;
+        for (let i = 0; i < points.length - 1; i++) {
+            const p = findClosestPointOnSegment(point, points[i], points[i + 1]);
+            const d = p.distanceToSquared(point);
+            if (d < bestDistSq) {
+                bestDistSq = d;
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    function gprWorldPointToSlam(point) {
+        // GPR 三维重建页：X/Z 为水平面，Y 为高度/深度；
+        // slamPointToGprVector 的逆变换为：GPR(x,y,z) -> SLAM(x,-z)。
+        return {
+            x: Number(point.x),
+            y: -Number(point.z)
+        };
+    }
+
+    function setTextSafe(id, text) {
+        const el = $(id);
+        if (el) el.textContent = text;
+    }
+
+    function showGprPipeInfoPopupFromHit(intersection) {
+        if (!intersection) return false;
+
+        let obj = intersection.object;
+        while (obj && !obj.userData?.isGprUndergroundPipe && obj.parent) {
+            obj = obj.parent;
+        }
+        if (!obj || !obj.userData?.isGprUndergroundPipe) return false;
+
+        const centerline = obj.userData.gprCenterlinePoints || [];
+        const closest = findClosestPointOnPolyline(intersection.point, centerline);
+        const slam = gprWorldPointToSlam(closest);
+        const depth = Math.max(0, -closest.y);
+
+        let gpsText = "GPS未标定";
+        if (typeof window.slamToGps === "function") {
+            const gps = window.slamToGps(slam.x, slam.y);
+            if (gps && Number.isFinite(gps.lat) && Number.isFinite(gps.lon)) {
+                gpsText = `纬度 ${gps.lat.toFixed(8)}，经度 ${gps.lon.toFixed(8)}`;
+            }
+        }
+
+        setTextSafe("gprPipePopupGps", gpsText);
+        setTextSafe("gprPipePopupDepth", `${depth.toFixed(2)} m`);
+        setTextSafe("gprPipePopupLocal", `X=${slam.x.toFixed(3)} m，Y=${slam.y.toFixed(3)} m`);
+
+        const popup = ensureGprPipeInfoPopup();
+        if (!popup) return false;
+
+        popup.style.display = "block";
+        gprPipePopup3DPos = closest.clone();
+        updateGprPipeInfoPopupPosition();
+        return true;
+    }
+
+    function updateGprPipeInfoPopupPosition() {
+        const popup = $("gprPipeInfoPopup");
+        if (!popup || popup.style.display === "none" || !gprPipePopup3DPos || !window.gprCamera || !window.gprRenderer) {
+            return;
+        }
+
+        const dom = window.gprRenderer.domElement;
+        if (!dom) return;
+
+        const vector = gprPipePopup3DPos.clone().project(window.gprCamera);
+        if (vector.z < -1 || vector.z > 1) {
+            popup.style.opacity = "0";
+            return;
+        }
+        popup.style.opacity = "1";
+
+        const domRect = dom.getBoundingClientRect();
+        const parent = popup.offsetParent || popup.parentElement || document.body;
+        const parentRect = parent.getBoundingClientRect();
+        const x = domRect.left + (vector.x * 0.5 + 0.5) * domRect.width - parentRect.left;
+        const y = domRect.top + (-vector.y * 0.5 + 0.5) * domRect.height - parentRect.top;
+
+        const margin = 10;
+        const clampedX = Math.max(margin, Math.min(parentRect.width - margin, x));
+        const clampedY = Math.max(margin, Math.min(parentRect.height - margin, y));
+        popup.style.left = clampedX + "px";
+        popup.style.top = clampedY + "px";
+    }
+
+    function getGprPipeIntersectionFromMouse(event, camera, dom) {
+        if (!event || !camera || !dom || typeof THREE === "undefined") return null;
+
+        const candidates = (window.gprPipePickObjects || []).filter(isObjectEffectivelyVisible);
+        if (!candidates.length) return null;
+
+        const rect = dom.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+
+        const mouse = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.params.Line = { threshold: 0.12 };
+        raycaster.setFromCamera(mouse, camera);
+
+        const hits = raycaster.intersectObjects(candidates, true);
+        return hits.length ? hits[0] : null;
+    }
+
+    function resetGprPipeHoverCursor(dom) {
+        if (!dom) return;
+        if (dom.style.cursor === "pointer") {
+            dom.style.cursor = "";
+        }
+        if (dom.title === "点击查看此处经纬度和深度") {
+            dom.removeAttribute("title");
+        }
+    }
+
+    function updateGprPipeHoverCursor(event, camera, dom, isViewDragging = false) {
+        if (!dom) return false;
+
+        // 手动指定扫描区域时需要保持十字光标，不抢占该交互状态。
+        if (manualScanPickState) return false;
+
+        if (isViewDragging) {
+            resetGprPipeHoverCursor(dom);
+            return false;
+        }
+
+        const hit = getGprPipeIntersectionFromMouse(event, camera, dom);
+        if (hit) {
+            dom.style.cursor = "pointer";
+            dom.title = "点击查看此处经纬度和深度";
+            return true;
+        }
+
+        resetGprPipeHoverCursor(dom);
+        return false;
+    }
+
+    function handleGprPipeClick(event, camera, dom) {
+        const hit = getGprPipeIntersectionFromMouse(event, camera, dom);
+        if (!hit) {
+            hideGprPipeInfoPopup();
+            return false;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        return showGprPipeInfoPopupFromHit(hit);
+    }
+
     // Z 字型三维拼接
     function render3DZigzagAll(result, useMigrated) {
         const container = $("threeContainer");
@@ -4386,6 +4644,8 @@
         // 👆 结束新增
 
         // 清空旧内容
+        hideGprPipeInfoPopup();
+        window.gprPipePickObjects = [];
         container.innerHTML = "";
         annotation3DGroups = []; // ✅ 清空旧的标注组
         window.currentPcdMesh = null;
@@ -4730,6 +4990,11 @@
                             color.getHex()
                         );
                         if (smoothTube) {
+                            registerGprPipePickMesh(
+                                smoothTube,
+                                centers.map(item => item.center),
+                                { source: "auto", name: "自动识别地下管道", colorHex: color.getHex() }
+                            );
                             pipelineGroup.add(smoothTube);
                         }
                     }
@@ -4742,6 +5007,11 @@
                             if (cylinder.material && cylinder.material.color) {
                                 cylinder.material.color.copy(color);
                             }
+                            registerGprPipePickMesh(
+                                cylinder,
+                                [e.a.center, e.b.center],
+                                { source: "auto", name: "自动识别地下管道", colorHex: color.getHex() }
+                            );
                             pipelineGroup.add(cylinder);
                         });
                     }
@@ -4828,12 +5098,22 @@
                             if (cylinder.material && cylinder.material.color) {
                                 cylinder.material.color.setHex(pipeColorHex);
                             }
+                            registerGprPipePickMesh(
+                                cylinder,
+                                [a.center, b.center],
+                                { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex }
+                            );
                             onePipeGroup.add(cylinder);
                             forcedEdgeCount++;
                         }
                         return;
                     }
 
+                    registerGprPipePickMesh(
+                        mesh,
+                        run.map(item => item.center),
+                        { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex }
+                    );
                     onePipeGroup.add(mesh);
                     forcedEdgeCount += Math.max(1, run.length - 1);
                 }
@@ -4967,6 +5247,9 @@
         let isPanning = false;
         let lastX = 0;
         let lastY = 0;
+        let clickStartX = 0;
+        let clickStartY = 0;
+        let hasDraggedForView = false;
 
         dom.addEventListener("mousedown", e => {
             if (e.button === 0) {           // 左键旋转
@@ -4980,6 +5263,9 @@
             }
             lastX = e.clientX;
             lastY = e.clientY;
+            clickStartX = e.clientX;
+            clickStartY = e.clientY;
+            hasDraggedForView = false;
         });
 
         window.addEventListener("mouseup", () => {
@@ -4989,9 +5275,17 @@
 
         dom.addEventListener("contextmenu", e => e.preventDefault());
 
+        dom.addEventListener("click", e => {
+            if (hasDraggedForView) return;
+            handleGprPipeClick(e, camera, dom);
+        });
+
         dom.addEventListener("mousemove", e => {
             const dx = e.clientX - lastX;
             const dy = e.clientY - lastY;
+            if (Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY) > 4) {
+                hasDraggedForView = true;
+            }
 
             if (isRotating) {
                 theta += dx * 0.005;
@@ -5012,9 +5306,13 @@
                 updateCamera();
             }
 
+            updateGprPipeHoverCursor(e, camera, dom, isRotating || isPanning);
+
             lastX = e.clientX;
             lastY = e.clientY;
         });
+
+        dom.addEventListener("mouseleave", () => resetGprPipeHoverCursor(dom));
 
         dom.addEventListener("wheel", e => {
             e.preventDefault();
@@ -5072,10 +5370,15 @@
                 window.boxFaces.back.visible = (camZ >= window.boxCenter.z);
             }
 
+            updateGprAxisLabelSprites(camera, renderer);
+
             renderer.render(scene, camera);
 
             if (typeof updatePopupPosition === 'function') {
                 updatePopupPosition();
+            }
+            if (typeof updateGprPipeInfoPopupPosition === 'function') {
+                updateGprPipeInfoPopupPosition();
             }
         }
         animate();
@@ -5131,10 +5434,12 @@
             false
         );
 
-        return new THREE.Mesh(
+        const mesh = new THREE.Mesh(
             geometry,
             new THREE.MeshBasicMaterial({ color: colorHex })
         );
+        mesh.userData.gprCenterlinePoints = cleanPoints.map(p => p.clone());
+        return mesh;
     }
 
     // 在两点之间生成一个空心圆柱体（沿两点连线方向）
@@ -5162,6 +5467,7 @@
         });
 
         const mesh = new THREE.Mesh(geometry, material);
+        mesh.userData.gprCenterlinePoints = [p1.clone(), p2.clone()];
 
         // 1. 放到中点
         mesh.position.copy(mid);
@@ -5302,7 +5608,8 @@
         const yLen = maxDepth; // 深度，向下为正
 
         const span = Math.max(xLen, zLen, yLen) || 1.0;
-        const tickSize = span * 0.03;
+        // ✅ 优化：将指向刻度数值的短线缩短一些，避免视觉上过长、过于突兀
+        const tickSize = span * 0.022;
         const labelSize = span * 0.06;
         const nTicks = 5;
 
@@ -5461,7 +5768,12 @@
             const val = bounds.minX + t;
             const label = makeTextSprite(val.toFixed(2), "#ffffff"); // 传递白色
             label.scale.set(labelSize, labelSize, 1);
-            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
+            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.35, 0));
+            // ✅ 修复：右下角 X/Z 两轴交汇处最后一个 X 轴刻度与 Z 轴刻度重叠，
+            // 将 X 轴最后一个刻度数字稍微向左挪一点。
+            if (i === nTicks) {
+                label.position.add(new THREE.Vector3(-tickSize * 1.3, 0, 0));
+            }
             axisGroup.add(label);
         }
         const xLabel = makeTextSprite("Distance(m)", "#ffffff");
@@ -5476,7 +5788,7 @@
             axisGroup.add(axisLine(pos, pos.clone().add(new THREE.Vector3(-tickSize, 0, 0))));
             const label = makeTextSprite(d.toFixed(1), "#ffffff");
             label.scale.set(labelSize, labelSize, 1);
-            label.position.copy(pos).add(new THREE.Vector3(-tickSize * 1.5, 0, 0));
+            label.position.copy(pos).add(new THREE.Vector3(-tickSize * 1.35, 0, 0));
             axisGroup.add(label);
         }
         const yLabel = makeTextSprite("Depth(m)", "#ffffff");
@@ -5493,12 +5805,18 @@
             const val = bounds.maxZ - t;
             const label = makeTextSprite(val.toFixed(2), "#ffffff");
             label.scale.set(labelSize, labelSize, 1);
-            label.position.copy(pos).add(new THREE.Vector3(0, -tickSize * 1.5, 0));
+            // ✅ 优化：Z 轴刻度数字整体向外侧轻微错开；
+            // 在与 X 轴交汇的第一个刻度处再额外右移/前移，避免两个数字重叠。
+            label.position.copy(pos).add(new THREE.Vector3(tickSize * 0.65, -tickSize * 1.25, 0));
+            if (i === 0) {
+                label.position.add(new THREE.Vector3(tickSize * 0.4, 0, tickSize * 0.5));
+            }
             axisGroup.add(label);
         }
     }
 
     // 用 Canvas 生成一个动态宽度的文字 Sprite
+    // variant = "tick"：刻度数字，弱背景、轻描边；variant = "axis"：轴标题，小型胶囊标签。
     function makeTextSprite(text, fontColor = "#ffffff") {
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
@@ -5536,6 +5854,26 @@
         sprite.userData.aspectRatio = canvas.width / canvas.height;
 
         return sprite;
+    }
+
+    // 根据相机距离动态调整坐标轴文字的世界尺寸，使它在屏幕上保持稳定像素大小。
+    function updateGprAxisLabelSprites(camera, renderer) {
+        if (!window.gprAxesGroup || !camera || !renderer || typeof THREE === "undefined") return;
+        const dom = renderer.domElement;
+        const viewportHeight = Math.max(dom.clientHeight || dom.height || 1, 1);
+        const fovRad = (camera.fov || 45) * Math.PI / 180;
+
+        window.gprAxesGroup.traverse(obj => {
+            if (!obj || !obj.userData || !obj.userData.isGprAxisLabel) return;
+            const pixelHeight = Number(obj.userData.pixelHeight || 22);
+            const distance = camera.position.distanceTo(obj.position);
+            let worldHeight = 2 * distance * Math.tan(fovRad / 2) * (pixelHeight / viewportHeight);
+            const minH = Number(obj.userData.minWorldHeight || 0.04);
+            const maxH = Number(obj.userData.maxWorldHeight || 0.4);
+            worldHeight = Math.max(minH, Math.min(maxH, worldHeight));
+            const aspect = Number(obj.userData.aspectRatio || 1);
+            obj.scale.set(worldHeight * aspect, worldHeight, 1);
+        });
     }
 
     // ==========================================

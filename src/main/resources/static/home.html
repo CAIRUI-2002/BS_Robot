@@ -192,6 +192,15 @@
                             <h3>三维视图（偏移后数据）</h3>
                             <div id="threeContainer"></div>
 
+                            <div id="gprPipeInfoPopup" class="gpr-pipe-info-popup" style="display: none;">
+                                <div class="gpr-pipe-popup-close"
+                                    onclick="document.getElementById('gprPipeInfoPopup').style.display='none'">×</div>
+                                <div class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
+                                <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps" class="hl-text">--</span></div>
+                                <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth" class="hl-text">--</span></div>
+                                <div class="gpr-pipe-popup-item"><strong>局部坐标：</strong><span id="gprPipePopupLocal" class="hl-text">--</span></div>
+                            </div>
+
                             <div id="btnToggleGrid" class="cyber-floating-btn">
                                 <span class="btn-icon">📏</span>
                                 <span class="btn-tooltip">隐藏/显示网格刻度线</span>
