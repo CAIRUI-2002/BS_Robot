@@ -9295,6 +9295,17 @@
                 window.lastFaultMarker =
                     faultMarkerGroup.children[faultMarkerGroup.children.length - 1] || null;
 
+                // ✅ 关键修复：从历史巡检结果恢复破损点后，同步恢复可发送给履带小车的破损点坐标
+                if (window.lastFaultMarker) {
+                    lastFaultCablePos = window.lastFaultMarker.position.clone();
+                    window.lastFaultCablePos = lastFaultCablePos.clone();
+
+                    console.log("✅ 已从历史巡检结果恢复破损点发送坐标：", window.lastFaultCablePos);
+                } else {
+                    lastFaultCablePos = null;
+                    window.lastFaultCablePos = null;
+                }
+
                 const dropdown = document.getElementById("inspectResultDropdown");
                 if (dropdown) dropdown.classList.add("hidden");
 
@@ -11879,8 +11890,31 @@
                     if (!params) return;
 
                     // 2. 点击“确定”后，再进行有效数据校验。
-                    if (!window.lastFaultCablePos) {
-                        alert("⚠️ 尚未检测到有效破损点，无法发送！");
+                    let faultSlamPos = window.lastFaultCablePos || null;
+
+                    // ✅ 兜底1：如果 lastFaultCablePos 没有同步，但 lastFaultMarker 存在，就从红色破损点模型中恢复
+                    if (!faultSlamPos && window.lastFaultMarker && window.lastFaultMarker.position) {
+                        faultSlamPos = window.lastFaultMarker.position.clone();
+                        window.lastFaultCablePos = faultSlamPos.clone();
+                    }
+
+                    // ✅ 兜底2：如果三维重建页已经加载了当前地图，也可从快照中的 faults 恢复
+                    if (!faultSlamPos && window.latestImportedInspectionMapSnapshot?.faults?.length > 0) {
+                        const f = window.latestImportedInspectionMapSnapshot.faults[
+                            window.latestImportedInspectionMapSnapshot.faults.length - 1
+                        ];
+
+                        faultSlamPos = new THREE.Vector3(
+                            Number(f.x),
+                            Number(f.y),
+                            Number(f.z ?? 0.08)
+                        );
+
+                        window.lastFaultCablePos = faultSlamPos.clone();
+                    }
+
+                    if (!faultSlamPos) {
+                        alert("⚠️ 当前地图中没有可发送的破损点坐标！");
                         return;
                     }
                     if (!window.isGpsCalibrated || !window.gpsAnchor) {
@@ -11896,7 +11930,7 @@
                     btnSendFault.disabled = true;
 
                     // 3. 上位机基于破损点、局部电缆切向和参数生成扫描路径
-                    const plan = buildUpperComputerScanPlan(window.lastFaultCablePos, params, {
+                    const plan = buildUpperComputerScanPlan(faultSlamPos, params, {
                         source: "fault",
                         taskPrefix: "scan"
                     });
