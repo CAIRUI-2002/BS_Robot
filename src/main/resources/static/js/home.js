@@ -851,7 +851,10 @@
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x000000);
 
-        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 10000);
+        // ✅ 三维重建页采用 Y 轴向上，这里显式固定 camera.up，避免平移/旋转过程中的轴向漂移。
+        camera.up.set(0, 1, 0);
+
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(width, height);
         container.appendChild(renderer.domElement);
@@ -864,28 +867,44 @@
         const axes = new THREE.AxesHelper(3);
         scene.add(axes);
 
-        let center = new THREE.Vector3(0, 0, 0);
+        // ✅ 与“路径查找及故障定点”页面保持一致：
+        // orbitTarget 是真正的视角中心。中键/右键平移时移动 orbitTarget，
+        // 左键旋转时始终围绕最新 orbitTarget 旋转。
+        const orbitTarget = new THREE.Vector3(0, 0, 0);
         let radius = 20;
         let theta = Math.PI / 4;
-        let phi = Math.PI / 5;
+        let phi = Math.PI / 3.5;
+
+        // ✅ 根据点云地图整体尺寸动态控制缩放范围
+        let controlSpan = 20;
 
         function updateCamera() {
-            const x = center.x + radius * Math.cos(phi) * Math.cos(theta);
-            const y = center.y + radius * Math.sin(phi);
-            const z = center.z + radius * Math.cos(phi) * Math.sin(theta);
+            // 路径页是 Z 轴向上：x/y 为水平面，z 为高度；
+            // 三维重建页是 Y 轴向上：x/z 为水平面，y 为高度。
+            const x = orbitTarget.x + radius * Math.sin(phi) * Math.cos(theta);
+            const y = orbitTarget.y + radius * Math.cos(phi);
+            const z = orbitTarget.z + radius * Math.sin(phi) * Math.sin(theta);
+
+            camera.up.set(0, 1, 0);
             camera.position.set(x, y, z);
-            camera.lookAt(center);
+            camera.lookAt(orbitTarget);
         }
 
         window.gprSetViewToBox = function (box) {
             if (!box || box.isEmpty()) return;
+
             const size = new THREE.Vector3();
-            box.getCenter(center);
+            box.getCenter(orbitTarget);
             box.getSize(size);
+
             const span = Math.max(size.x, size.y, size.z, 1.0);
-            radius = Math.max(span * 1.8, 5.0);
+            controlSpan = span;
+
+            // 初始视角拉开到能完整看到地图，后续滚轮仍允许继续放大/缩小。
+            radius = Math.max(span * 1.8, 3.0);
             theta = Math.PI / 4;
-            phi = Math.PI / 5;
+            phi = Math.PI / 3.5;
+
             updateCamera();
         };
         updateCamera();
@@ -893,24 +912,27 @@
         const dom = renderer.domElement;
         let isRotating = false;
         let isPanning = false;
-        let lastX = 0;
-        let lastY = 0;
+        let prevPos = { x: 0, y: 0 };
         let clickStartX = 0;
         let clickStartY = 0;
         let hasDraggedForView = false;
 
         dom.addEventListener("mousedown", e => {
+            e.preventDefault();
+
             if (e.button === 0) {
+                // 左键旋转
                 isRotating = true;
                 isPanning = false;
-            } else if (e.button === 1) {
+            } else if (e.button === 1 || e.button === 2) {
+                // 中键/右键平移
                 isPanning = true;
                 isRotating = false;
             } else {
                 return;
             }
-            lastX = e.clientX;
-            lastY = e.clientY;
+
+            prevPos = { x: e.offsetX, y: e.offsetY };
             clickStartX = e.clientX;
             clickStartY = e.clientY;
             hasDraggedForView = false;
@@ -929,41 +951,62 @@
         });
 
         dom.addEventListener("mousemove", e => {
-            const dx = e.clientX - lastX;
-            const dy = e.clientY - lastY;
+            const dx = e.offsetX - prevPos.x;
+            const dy = e.offsetY - prevPos.y;
+            prevPos = { x: e.offsetX, y: e.offsetY };
+
             if (Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY) > 4) {
                 hasDraggedForView = true;
             }
 
             if (isRotating) {
-                theta += dx * 0.005;
-                phi += dy * 0.005;
-                phi = Math.max(0.1, Math.min(Math.PI - 0.1, phi));
+                // ✅ 与路径查找页保持一致：左右拖动改变水平角，上下拖动改变俯仰角。
+                theta += dx * 0.01;
+                phi -= dy * 0.01;
+                phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
                 updateCamera();
             } else if (isPanning) {
-                const panSpeed = radius * 0.0015;
-                const dir = new THREE.Vector3();
-                camera.getWorldDirection(dir);
-                const up = new THREE.Vector3(0, 1, 0);
-                const right = new THREE.Vector3().crossVectors(dir, up).normalize().negate();
-                const camUp = new THREE.Vector3().crossVectors(right, dir).normalize();
-                center.add(right.multiplyScalar(dx * panSpeed));
-                center.add(camUp.multiplyScalar(-dy * panSpeed));
+                // ✅ 与路径查找页一致：平移只改变水平面的 orbitTarget，
+                // 不让目标点沿高度方向漂移，这样后续左键旋转会围绕当前视图中心旋转。
+                const speed = Math.max(radius * 0.002, 0.001);
+
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+
+                const right = new THREE.Vector3()
+                    .crossVectors(forward, camera.up)
+                    .normalize();
+
+                const forwardXZ = new THREE.Vector3(forward.x, 0, forward.z);
+                if (forwardXZ.lengthSq() > 1e-8) {
+                    forwardXZ.normalize();
+                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(forwardXZ, dy * speed);
+                } else {
+                    // 极端俯视角下的兜底处理
+                    const camUp = new THREE.Vector3(0, 0, 1);
+                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(camUp, dy * speed);
+                }
+
                 updateCamera();
             }
 
             updateGprPipeHoverCursor(e, camera, dom, isRotating || isPanning);
-
-            lastX = e.clientX;
-            lastY = e.clientY;
         });
 
         dom.addEventListener("mouseleave", () => resetGprPipeHoverCursor(dom));
 
         dom.addEventListener("wheel", e => {
             e.preventDefault();
-            radius *= e.deltaY > 0 ? 1.1 : 0.9;
-            radius = Math.max(2.0, Math.min(5000.0, radius));
+
+            radius *= (e.deltaY > 0 ? 1.1 : 0.9);
+
+            // 动态范围：小点云可继续放大，大点云可继续拉远。
+            const minRadius = 0.02;
+            const maxRadius = Math.max(controlSpan * 80.0, 1000.0);
+            radius = Math.max(minRadius, Math.min(maxRadius, radius));
+
             updateCamera();
         });
 
@@ -990,6 +1033,7 @@
         window.gprScene = scene;
         window.gprCamera = camera;
         window.gprRenderer = renderer;
+        window.gprOrbitTarget = orbitTarget;
     }
 
     function slamPointToGprVector(pt) {
@@ -1621,7 +1665,7 @@
         ensureStandaloneGprSceneForMap();
 
         // 如果三维重建页还没加载当前点云地图，自动加载一次，保证矩形和 Z 字路线显示在同一地图中。
-        if (!window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
+        if (!window.currentPcdGroup && !window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
             try {
                 loadCurrentPathFaultMapToGpr();
             } catch (e) {
@@ -1966,7 +2010,7 @@
             ensureStandaloneGprSceneForMap();
 
             // 有当前点云地图时尽量自动加载，便于用户在点云地图上选扫描区域；没有地图也允许在网格平面上选点。
-            if (!window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
+            if (!window.currentPcdGroup && !window.currentImportedInspectionMapGroup && typeof loadCurrentPathFaultMapToGpr === "function") {
                 try {
                     loadCurrentPathFaultMapToGpr();
                 } catch (e) {
@@ -3966,9 +4010,79 @@
         const btnLoadLocalPcd = $("btnLoadLocalPcd");
         const pcdLocalFileInput = $("pcdLocalFileInput");
 
+        function sanitizeLocalPcdPointsForGpr(points, maxDisplayPoints = 300000) {
+            if (!points || !points.geometry || typeof THREE === "undefined") return points;
+
+            const geom = points.geometry;
+            const posAttr = geom.getAttribute && geom.getAttribute("position");
+            if (!posAttr || !posAttr.array || posAttr.count <= 0) return points;
+
+            const colAttr = geom.getAttribute && geom.getAttribute("color");
+            const srcPos = posAttr.array;
+            const srcCol = colAttr && colAttr.array ? colAttr.array : null;
+
+            // 与路径查找页导出到三维重建页的逻辑一致：过滤无效点和极端离群点。
+            // 本地点云如果直接把所有原始点都放进 GPR 场景，远处离群点会拉大包围盒，
+            // 大点数也会让鼠标旋转/拖拽时重绘卡顿。
+            const valid = [];
+            for (let i = 0; i < srcPos.length; i += 3) {
+                const x = srcPos[i];
+                const y = srcPos[i + 1];
+                const z = srcPos[i + 2];
+                if (
+                    Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z) &&
+                    Math.abs(x) < 9000 && Math.abs(y) < 9000 && Math.abs(z) < 9000
+                ) {
+                    valid.push(i);
+                }
+            }
+
+            if (!valid.length) return points;
+
+            const stride = Math.max(1, Math.ceil(valid.length / maxDisplayPoints));
+            const keepCount = Math.ceil(valid.length / stride);
+            const dstPos = new Float32Array(keepCount * 3);
+            const dstCol = srcCol ? new Float32Array(keepCount * 3) : null;
+
+            let j = 0;
+            for (let k = 0; k < valid.length; k += stride) {
+                const i = valid[k];
+                dstPos[j] = srcPos[i];
+                dstPos[j + 1] = srcPos[i + 1];
+                dstPos[j + 2] = srcPos[i + 2];
+
+                if (dstCol) {
+                    dstCol[j] = srcCol[i] ?? 1.0;
+                    dstCol[j + 1] = srcCol[i + 1] ?? 1.0;
+                    dstCol[j + 2] = srcCol[i + 2] ?? 1.0;
+                }
+                j += 3;
+            }
+
+            const newGeom = new THREE.BufferGeometry();
+            newGeom.setAttribute("position", new THREE.BufferAttribute(dstPos, 3));
+            if (dstCol) newGeom.setAttribute("color", new THREE.BufferAttribute(dstCol, 3));
+
+            if (geom.dispose) geom.dispose();
+            points.geometry = newGeom;
+
+            if (!points.material) {
+                points.material = new THREE.PointsMaterial({ size: 0.05, sizeAttenuation: true });
+            }
+            points.material.size = 0.05;
+            points.material.sizeAttenuation = true;
+            points.material.vertexColors = !!dstCol;
+            points.material.needsUpdate = true;
+            points.frustumCulled = false;
+
+            console.log(`✅ 本地点云显示优化：原始有效点 ${valid.length} 个，三维重建页显示 ${keepCount} 个。`);
+            return points;
+        }
+
         function addLoadedPcdPointsToGprScene(points, sourceName, geoMeta = null) {
             clearCurrentGprExternalMapLayer();
 
+            points = sanitizeLocalPcdPointsForGpr(points);
             points.material.size = 0.05;
             points.geometry.computeBoundingBox();
 
@@ -4004,12 +4118,34 @@
 
             window.currentPcdMesh = points;
             window.currentPcdGroup = pcdGroup;
-            window.currentImportedInspectionMapGroup = null;
-            window.gprHasInspectionMapLayerLoaded = !!hasValidGeoMeta;
+            // ✅ 关键修复：本地点云也视为三维重建页已加载的地图层。
+            // 否则规划 Z 字路径时 renderScanPlanOnGpr/startManualScanAreaPlanning 会自动调用
+            // loadCurrentPathFaultMapToGpr()，把本地点云清掉并换成路径查找页面的地图，
+            // 造成“规划后突然变丝滑”的假象。
+            window.currentImportedInspectionMapGroup = pcdGroup;
+            window.gprHasInspectionMapLayerLoaded = true;
             window.latestImportedInspectionMapSnapshot = null;
 
-            const box = new THREE.Box3().setFromObject(pcdGroup);
-            updateGprCameraByBox(box);
+            // ✅ 本地点云加载完成后，不再取整幅点云包围盒中心。
+            // 直接以“当前点云地图自身坐标原点/中心原点”为中心构造一个小 box，
+            // 再调用和 Z 字路径规划相同的 updateGprCameraByBox()。
+            // 这样只加载本地点云时，相机的 orbitTarget / radius / controlSpan
+            // 就不会被整幅点云范围或离群点放大，操作手感会接近规划 Z 字路径后的状态。
+            const planLikeSpan = Math.max(DEFAULT_SCAN_PARAMS.length, DEFAULT_SCAN_PARAMS.width, 2.5);
+            const mapOriginCenter = pcdGroup.localToWorld(new THREE.Vector3(0, 0, 0));
+            const planLikeBox = new THREE.Box3(
+                new THREE.Vector3(mapOriginCenter.x - planLikeSpan / 2, mapOriginCenter.y - 0.25, mapOriginCenter.z - planLikeSpan / 2),
+                new THREE.Vector3(mapOriginCenter.x + planLikeSpan / 2, mapOriginCenter.y + 0.25, mapOriginCenter.z + planLikeSpan / 2)
+            );
+            updateGprCameraByBox(planLikeBox);
+            console.log("✅ 本地点云已按地图中心原点构造小 box 触发相机控制：", {
+                center: {
+                    x: Number(mapOriginCenter.x.toFixed(3)),
+                    y: Number(mapOriginCenter.y.toFixed(3)),
+                    z: Number(mapOriginCenter.z.toFixed(3))
+                },
+                span: planLikeSpan
+            });
         }
 
         if (btnLoadLocalPcd && pcdLocalFileInput) {
@@ -4031,8 +4167,13 @@
                 }
 
                 if (!window.gprScene) {
-                    alert("请先进入三维重建页面，并点击“开始处理”或加载当前点云地图初始化三维视图。 ");
-                    return;
+                    try {
+                        ensureStandaloneGprSceneForMap();
+                    } catch (e) {
+                        console.error("三维视图初始化失败:", e);
+                        alert("三维视图初始化失败：" + (e.message || e));
+                        return;
+                    }
                 }
 
                 try {
@@ -5597,7 +5738,7 @@
         // 👇 把 GPR scene 暴露到全局，让外部点云地图加载函数能够获取到它
         window.gprScene = scene;
 
-        const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 10000);
+        const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 10000);
         window.gprCamera = camera;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -6103,40 +6244,48 @@
         const centerX = (bounds.minX + bounds.maxX) / 2;
         const centerY = (bounds.minY + bounds.maxY) / 2;
         const centerZ = (bounds.minZ + bounds.maxZ) / 2;
-        const center = new THREE.Vector3(centerX, centerY, centerZ);
 
         const spanX = bounds.maxX - bounds.minX;
         const spanZ = bounds.maxZ - bounds.minZ;
         const spanY = bounds.maxY - bounds.minY;
         const span = Math.max(spanX, spanZ, spanY) || 1.0;
 
+        // ✅ 三维重建页相机操作统一改成“路径查找及故障定点”页面同款 orbitTarget 逻辑。
+        // 关键点：平移时只移动水平面 X/Z 上的 orbitTarget，不让中心点沿 Y 高度方向漂移；
+        // 左键旋转始终围绕最新 orbitTarget 旋转，因此中键拖到哪里，就围绕哪里旋转。
+        const orbitTarget = new THREE.Vector3(centerX, centerY, centerZ);
+        if (camera && camera.up) camera.up.set(0, 1, 0);
+
         // 相机控制范围。默认跟随 GPR 剖面尺寸；当加载当前点云地图后，
         // 由 gprSetViewToBox 更新为点云/电缆/破损点整体包围盒尺寸，避免拖拽和缩放被小剖面限制。
         let controlSpan = span;
 
-        let radius = span * 2.0;
-        let theta = Math.PI / 4; // 绕 Y 轴
-        let phi = Math.PI / 4;   // 仰角
+        let radius = Math.max(span * 2.0, 3.0);
+        let theta = Math.PI / 4;
+        let phi = Math.PI / 3.5;
 
         function updateCamera() {
-            const x = center.x + radius * Math.cos(phi) * Math.cos(theta);
-            const y = center.y + radius * Math.sin(phi);
-            const z = center.z + radius * Math.cos(phi) * Math.sin(theta);
+            // 路径查找页是 Z 轴向上；三维重建页是 Y 轴向上。
+            // 这里保持同样的 orbit 控制手感，只把高度轴从 Z 适配为 Y。
+            const x = orbitTarget.x + radius * Math.sin(phi) * Math.cos(theta);
+            const y = orbitTarget.y + radius * Math.cos(phi);
+            const z = orbitTarget.z + radius * Math.sin(phi) * Math.sin(theta);
+            camera.up.set(0, 1, 0);
             camera.position.set(x, y, z);
-            camera.lookAt(center);
+            camera.lookAt(orbitTarget);
         }
 
-        // ✅ 供“加载当前点云地图”按钮在导入后自动拉近视角
+        // ✅ 供“加载当前点云地图 / 本地地图”按钮在导入后自动拉近视角
         window.gprSetViewToBox = function (box) {
             if (!box || box.isEmpty()) return;
             const size = new THREE.Vector3();
-            box.getCenter(center);
+            box.getCenter(orbitTarget);
             box.getSize(size);
             const newSpan = Math.max(size.x, size.y, size.z, 1.0);
             controlSpan = newSpan;
             radius = Math.max(newSpan * 1.8, 3.0);
             theta = Math.PI / 4;
-            phi = Math.PI / 4;
+            phi = Math.PI / 3.5;
             updateCamera();
         };
 
@@ -6148,29 +6297,30 @@
             setStatus(`✅ GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。`, "success");
         }
 
-        // ========== 交互：左键旋转，中键平移，滚轮缩放 ==========
+        // ========== 交互：左键旋转，中键/右键平移，滚轮缩放 ==========
 
         const dom = renderer.domElement;
         let isRotating = false;
         let isPanning = false;
-        let lastX = 0;
-        let lastY = 0;
+        let prevPos = { x: 0, y: 0 };
         let clickStartX = 0;
         let clickStartY = 0;
         let hasDraggedForView = false;
 
         dom.addEventListener("mousedown", e => {
-            if (e.button === 0) {           // 左键旋转
+            e.preventDefault();
+
+            if (e.button === 0) {
                 isRotating = true;
                 isPanning = false;
-            } else if (e.button === 1 || e.button === 2) {    // 中键/右键平移
+            } else if (e.button === 1 || e.button === 2) {
                 isPanning = true;
                 isRotating = false;
             } else {
                 return;
             }
-            lastX = e.clientX;
-            lastY = e.clientY;
+
+            prevPos = { x: e.offsetX, y: e.offsetY };
             clickStartX = e.clientX;
             clickStartY = e.clientY;
             hasDraggedForView = false;
@@ -6189,44 +6339,60 @@
         });
 
         dom.addEventListener("mousemove", e => {
-            const dx = e.clientX - lastX;
-            const dy = e.clientY - lastY;
+            const dx = e.offsetX - prevPos.x;
+            const dy = e.offsetY - prevPos.y;
+            prevPos = { x: e.offsetX, y: e.offsetY };
+
             if (Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY) > 4) {
                 hasDraggedForView = true;
             }
 
             if (isRotating) {
-                theta += dx * 0.005;
-                phi += dy * 0.005;
-                const eps = 0.1;
-                phi = Math.max(eps, Math.min(Math.PI - eps, phi));
+                // 与路径查找页保持一致：左右拖动改变水平角，上下拖动改变俯仰角。
+                theta += dx * 0.01;
+                phi -= dy * 0.01;
+                phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
                 updateCamera();
             } else if (isPanning) {
-                const panSpeed = Math.max(controlSpan, radius) * 0.002;
-                const dir = new THREE.Vector3();
-                camera.getWorldDirection(dir);
-                const up = new THREE.Vector3(0, 1, 0);
-                const right = new THREE.Vector3().crossVectors(dir, up).normalize().negate();
-                const camUp = new THREE.Vector3().crossVectors(right, dir).normalize();
+                // 与路径查找页保持一致：按相机当前朝向在水平面上平移 orbitTarget。
+                // 三维重建页水平面为 X/Z，因此取 forward.x 和 forward.z，Y 不参与平移。
+                const speed = Math.max(radius * 0.002, 0.001);
 
-                center.add(right.multiplyScalar(dx * panSpeed));
-                center.add(camUp.multiplyScalar(-dy * panSpeed));
+                const forward = new THREE.Vector3();
+                camera.getWorldDirection(forward);
+
+                const right = new THREE.Vector3()
+                    .crossVectors(forward, camera.up)
+                    .normalize();
+
+                const forwardXZ = new THREE.Vector3(forward.x, 0, forward.z);
+                if (forwardXZ.lengthSq() > 1e-8) {
+                    forwardXZ.normalize();
+                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(forwardXZ, dy * speed);
+                } else {
+                    // 极端俯视角兜底：仍然只做水平面平移，避免 orbitTarget 高度漂移。
+                    const fallbackForward = new THREE.Vector3(Math.cos(theta), 0, Math.sin(theta)).normalize();
+                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(fallbackForward, dy * speed);
+                }
+
                 updateCamera();
             }
 
             updateGprPipeHoverCursor(e, camera, dom, isRotating || isPanning);
-
-            lastX = e.clientX;
-            lastY = e.clientY;
         });
 
         dom.addEventListener("mouseleave", () => resetGprPipeHoverCursor(dom));
 
         dom.addEventListener("wheel", e => {
             e.preventDefault();
-            const factor = e.deltaY > 0 ? 1.1 : 0.9;
-            radius *= factor;
-            radius = Math.max(controlSpan * 0.05, Math.min(controlSpan * 20.0, radius));
+            radius *= (e.deltaY > 0 ? 1.1 : 0.9);
+
+            // 与独立点云地图视图保持一致：按当前点云/剖面整体尺寸自适应缩放范围。
+            const minRadius = 0.02;
+            const maxRadius = Math.max(controlSpan * 80.0, 1000.0);
+            radius = Math.max(minRadius, Math.min(maxRadius, radius));
             updateCamera();
         });
 
