@@ -167,11 +167,9 @@
                         <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
                         <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
 
-                        <label for="pcdPathInput" class="pcd-label">点云路径：</label>
-                        <input type="text" id="pcdPathInput" placeholder="例如：/mnt/e/data/map.pcd" />
-                        <button id="btnLoadPcd" class="action-btn-small btn-pcd">加载点云</button>
                         <input type="file" id="pcdLocalFileInput" accept=".pcd,.json" multiple style="display: none;" />
                         <button id="btnLoadLocalPcd" class="action-btn-small btn-pcd" title="同时选择电脑本地的 .pcd 点云文件和同名 .geo.json 经纬度元数据文件">本地地图</button>
+                        <button id="btnClearGprPointCloudMap" class="action-btn-small btn-clear-pcd" title="清除三维重建页面中已加载的点云地图、电缆路径和破损点显示">清除地图</button>
                         <span id="gprStatus" class="gpr-status"></span>
                     </div>
 

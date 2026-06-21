@@ -790,6 +790,28 @@
         window.gprHasInspectionMapLayerLoaded = false;
     }
 
+    function clearGprPointCloudMapFromPage() {
+        const hadMapLayer = !!(
+            window.currentPcdGroup ||
+            window.currentPcdMesh ||
+            window.currentImportedInspectionMapGroup ||
+            window.gprHasInspectionMapLayerLoaded
+        );
+
+        clearCurrentGprExternalMapLayer();
+        window.latestImportedInspectionMapSnapshot = null;
+        window.loadedPointCloudGeoMetadata = null;
+        window.loadedPointCloudGeoSource = "";
+
+        if (hadMapLayer) {
+            setStatus("✅ 已清除三维重建页面中的点云地图。", "success");
+            console.log("🧹 已清除三维重建页面点云地图层。");
+        } else {
+            setStatus("当前三维重建页面没有已加载的点云地图。", "warning");
+        }
+    }
+    window.clearGprPointCloudMapFromPage = clearGprPointCloudMapFromPage;
+
     function updateGprCameraByBox(box) {
         if (!box || box.isEmpty() || !window.gprCamera) return;
 
@@ -3944,66 +3966,15 @@
         const pathFaultPanel = $("pathFaultPanel");
 
         const btnStart = $("btnStartGpr");
-        const btnLoadPcd = $("btnLoadPcd"); // 新增获取点云按钮
         const btnLoadCurrentPointCloudMap = $("btnLoadCurrentPointCloudMap"); // ✅ 加载路径页当前点云地图
+        const btnClearGprPointCloudMap = $("btnClearGprPointCloudMap"); // ✅ 清除三维重建页点云地图
 
         if (btnStart) btnStart.addEventListener("click", startGprProcessing);
         if (btnLoadCurrentPointCloudMap) {
             btnLoadCurrentPointCloudMap.addEventListener("click", loadCurrentPathFaultMapToGpr);
         }
-
-        // 👇========= 新增：点云加载事件绑定 =========👇
-        if (btnLoadPcd) {
-            btnLoadPcd.addEventListener("click", function () {
-                const pcdInput = $("pcdPathInput");
-                if (!pcdInput) return;
-                const pcdPath = pcdInput.value.trim();
-
-                if (!pcdPath) {
-                    alert("请先输入点云文件所在路径！");
-                    return;
-                }
-                if (!window.gprScene) {
-                    alert("请先点击'开始处理'加载地下雷达数据，再叠加地上点云！");
-                    return;
-                }
-
-                setStatus("正在加载地上点云，请稍候...", "warning");
-
-                // 拼接 Java 后端接口的 URL
-                const url = "/api/gpr/pcd?filePath=" + encodeURIComponent(pcdPath);
-
-                const geoMetaPromise = tryLoadServerPcdGeoMetadata(pcdPath);
-                const loader = new THREE.PCDLoader();
-                loader.load(url, async function (points) {
-                    let geoMeta = null;
-                    try {
-                        geoMeta = await geoMetaPromise;
-                    } catch (e) {
-                        console.warn("读取同名经纬度元数据失败：", e);
-                    }
-
-                    addLoadedPcdPointsToGprScene(points, pcdPath, geoMeta);
-
-                    if (geoMeta && window.isGpsCalibrated) {
-                        setStatus("✅ 点云加载完成，并已恢复经纬度标定，可在三维重建页指定扫描区域并发送履带小车。", "success");
-                    } else {
-                        setStatus("点云加载完成；未找到同名 .geo.json，经纬度标定未恢复。", "success");
-                    }
-                },
-                    // 加载进度回调
-                    function (xhr) {
-                        const percent = Math.round((xhr.loaded / xhr.total) * 100);
-                        if (percent > 0 && percent <= 100) {
-                            setStatus(`点云加载中: ${percent}%`, "warning");
-                        }
-                    },
-                    // 错误回调
-                    function (error) {
-                        console.error("点云加载报错:", error);
-                        setStatus("点云加载失败，请检查路径及文件格式！", "error");
-                    });
-            });
+        if (btnClearGprPointCloudMap) {
+            btnClearGprPointCloudMap.addEventListener("click", clearGprPointCloudMapFromPage);
         }
 
         // 👇========= 新增：读取电脑本地下载的 PCD 点云 =========👇
@@ -5175,9 +5146,29 @@
         if (!usePlannedLayout) return;
 
         try {
-            // GPR 处理会重建 threeContainer 和 WebGL 场景，因此这里需要把点云地图、电缆路径、
-            // 破损点以及规划矩形/Z 字虚线重新叠加到新场景中。
-            if (typeof loadCurrentPathFaultMapToGpr === "function") {
+            // ✅ GPR 渲染会重建 threeContainer 和 WebGL 场景。
+            // 这里不能再次直接调用 exportCurrentPathFaultMapForGpr()，
+            // 否则会重新读取“此刻路径查找页面的最新点云”，导致三维重建页地图自动更新。
+            // 正确做法：优先使用用户点击“加载当前点云地图”时保存下来的冻结快照。
+            const frozenSnapshot = window.latestImportedInspectionMapSnapshot || null;
+
+            if (frozenSnapshot && typeof loadCurrentPathFaultMapToGpr === "function") {
+                const realExporter = window.exportCurrentPathFaultMapForGpr;
+
+                try {
+                    // 临时让 loadCurrentPathFaultMapToGpr() 读取冻结快照，
+                    // 而不是读取路径查找页面的实时点云。
+                    window.exportCurrentPathFaultMapForGpr = function () {
+                        return frozenSnapshot;
+                    };
+
+                    loadCurrentPathFaultMapToGpr();
+                } finally {
+                    window.exportCurrentPathFaultMapForGpr = realExporter;
+                }
+            } else if (typeof loadCurrentPathFaultMapToGpr === "function") {
+                // 如果用户之前没有手动加载过地图，则保留原来的兜底逻辑：
+                // 自动加载当前路径页地图。
                 loadCurrentPathFaultMapToGpr();
             }
 

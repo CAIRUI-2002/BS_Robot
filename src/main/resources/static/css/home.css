@@ -593,6 +593,19 @@ body {
     border-color: #ffffff !important;
 }
 
+/* 三维重建页：清除已加载点云地图按钮 */
+.btn-clear-pcd {
+    background: rgba(180, 54, 54, 0.82) !important;
+    border: 1px solid #ff6b6b !important;
+    color: #ffffff !important;
+}
+
+.btn-clear-pcd:hover {
+    background: rgba(220, 68, 68, 1) !important;
+    box-shadow: 0 0 8px rgba(255, 90, 90, 0.75) !important;
+    border-color: #ffffff !important;
+}
+
 #gprStatus.gpr-status {
     margin-left: 10px;
     font-size: 13px;
