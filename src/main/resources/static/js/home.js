@@ -169,7 +169,7 @@
     // 指定结果与手动标注校准一起保存到 gpr_annotation_calibration.json；下次读取同一GPR文件夹时自动恢复。
     const GPR_PIPE_DEFAULT_COLOR_HEX = 0xffff00;
     const GPR_PIPE_MATERIAL_TYPES = [
-        { type: "cable", name: "地下电缆", title: "强电电缆测点信息", colorHex: 0x050505, colorCss: "#050505" },
+        { type: "cable", name: "地下电缆", title: "高压电缆测点信息", colorHex: 0x050505, colorCss: "#050505" },
         { type: "pvc", name: "PVC管", title: "PVC管道测点信息", colorHex: 0xffffff, colorCss: "#ffffff" },
         { type: "metal", name: "金属管道", title: "金属管道测点信息", colorHex: 0xc0c0c0, colorCss: "#c0c0c0" }
     ];
@@ -790,27 +790,319 @@
         window.gprHasInspectionMapLayerLoaded = false;
     }
 
+    function clearGpr2DCanvasById(canvasId) {
+        const canvas = $(canvasId);
+        if (!canvas) return;
+        const ctx = canvas.getContext && canvas.getContext("2d");
+        if (ctx) {
+            ctx.clearRect(0, 0, canvas.width || 0, canvas.height || 0);
+        }
+        // 重新设置尺寸可以同步清掉浏览器保留的旧图像缓存。
+        canvas.width = canvas.width || 1;
+        canvas.height = canvas.height || 1;
+        delete gpr2DRenderInfo[canvasId];
+    }
+
+    function clearGprReconstructionSceneCompletely() {
+        const container = $("threeContainer");
+
+        // 1) 停止旧 Three.js 动画循环，防止清空后仍继续 render 旧场景。
+        if (window.gprAnimId) {
+            cancelAnimationFrame(window.gprAnimId);
+            window.gprAnimId = null;
+        }
+
+        // 2) 关闭弹窗和临时交互提示。
+        try { if (typeof hideGprPipeInfoPopup === "function") hideGprPipeInfoPopup(); } catch (e) { }
+        try { if (typeof hideManualScanTip === "function") hideManualScanTip(); } catch (e) { }
+
+        // 3) 释放整套三维重建场景资源：点云、地下环境盒体、GPR剖面、管道、坐标轴、扫描路径。
+        if (window.gprScene) {
+            disposeThreeObjectForReuse(window.gprScene);
+            // 从 scene.children 中移除对象，避免 Three.js 仍保留旧层级引用。
+            while (window.gprScene.children && window.gprScene.children.length) {
+                window.gprScene.remove(window.gprScene.children[0]);
+            }
+        }
+
+        if (window.gprRenderer) {
+            try { window.gprRenderer.dispose(); } catch (e) { }
+            if (typeof window.gprRenderer.forceContextLoss === "function") {
+                try { window.gprRenderer.forceContextLoss(); } catch (e) { }
+            }
+            if (window.gprRenderer.domElement && window.gprRenderer.domElement.parentNode) {
+                window.gprRenderer.domElement.parentNode.removeChild(window.gprRenderer.domElement);
+            }
+        }
+
+        if (container) {
+            container.innerHTML = "";
+        }
+
+        // 4) 清空 3D 全局引用。
+        window.gprScene = null;
+        window.gprCamera = null;
+        window.gprRenderer = null;
+        window.gprSetViewToBox = null;
+        window.gprOrbitTarget = null;
+
+        window.currentPcdMesh = null;
+        window.currentPcdGroup = null;
+        window.currentImportedInspectionMapGroup = null;
+        window.gprHasInspectionMapLayerLoaded = false;
+
+        window.gprScanPlanGroup = null;
+        window.gprManualScanPickGroup = null;
+        window.gprSlicesGroup = null;
+        window.gprAxesGroup = null;
+        window.gprZPathLine = null;
+        window.boxFaces = null;
+        window.boxCenter = null;
+
+        window.gprPipePickObjects = [];
+        selectedGprPipeObject = null;
+        gprPipePopup3DPos = null;
+        annotation3DGroups = [];
+
+        // 5) 清空本次 GPR 处理结果和二维剖面显示，避免旧结果按钮再次触发旧管道重绘。
+        gprResult = null;
+        currentGprSegmentIndex = 0;
+        manualMigAnnotationMode = false;
+        forcedPipeAnnotationMode = false;
+        activeForcedPipeGroupId = null;
+        forcedPipeGroupCounter = 0;
+        forcedPipeAnnotationOrder = 0;
+        manualMigAnnotationsBySegment.clear();
+        ignoredAutoMigAnnotationsBySegment.clear();
+        forcedPipeAnnotationsBySegment.clear();
+        gprPipeColorAssignments.clear();
+
+        clearGpr2DCanvasById("raw2dCanvas");
+        clearGpr2DCanvasById("mig2dCanvas");
+
+        const segmentSelect = $("segmentSelect");
+        if (segmentSelect) {
+            segmentSelect.innerHTML = "";
+            segmentSelect.disabled = true;
+            segmentSelect.onchange = null;
+        }
+
+        const btnAnno = $("btnToggleAnnotation");
+        if (btnAnno) btnAnno.style.display = "none";
+        try { if (typeof setAnnotationButtonState === "function") setAnnotationButtonState(false); } catch (e) { }
+        try { if (typeof updateManualMigAnnotationUI === "function") updateManualMigAnnotationUI(); } catch (e) { }
+        try { if (typeof updateForcedPipeAnnotationUI === "function") updateForcedPipeAnnotationUI(); } catch (e) { }
+
+        // 6) 清空规划数据，避免下次处理 GPR 时继续沿用已经被用户清掉的旧扫描路径。
+        window.currentGprScanPlan = null;
+        window.currentGprScanPlanSavedAt = 0;
+    }
+
     function clearGprPointCloudMapFromPage() {
-        const hadMapLayer = !!(
+        const hadAnyContent = !!(
             window.currentPcdGroup ||
             window.currentPcdMesh ||
             window.currentImportedInspectionMapGroup ||
-            window.gprHasInspectionMapLayerLoaded
+            window.gprHasInspectionMapLayerLoaded ||
+            window.gprScene ||
+            window.gprSlicesGroup ||
+            window.gprAxesGroup ||
+            (window.gprPipePickObjects && window.gprPipePickObjects.length) ||
+            gprResult
         );
 
-        clearCurrentGprExternalMapLayer();
-        window.latestImportedInspectionMapSnapshot = null;
+        clearGprReconstructionSceneCompletely();
+        resetGprLoadedMapFreezeState();
         window.loadedPointCloudGeoMetadata = null;
         window.loadedPointCloudGeoSource = "";
 
-        if (hadMapLayer) {
-            setStatus("✅ 已清除三维重建页面中的点云地图。", "success");
-            console.log("🧹 已清除三维重建页面点云地图层。");
+        if (hadAnyContent) {
+            setStatus("✅ 已清除三维重建页面中的点云地图、地下环境、GPR剖面和管道渲染。", "success");
+            console.log("🧹 已清除三维重建页面全部三维显示内容：点云地图、地下环境、GPR剖面、管道、坐标轴和扫描路径。");
         } else {
-            setStatus("当前三维重建页面没有已加载的点云地图。", "warning");
+            setStatus("当前三维重建页面没有已加载的点云地图或地下渲染内容。", "warning");
         }
     }
     window.clearGprPointCloudMapFromPage = clearGprPointCloudMapFromPage;
+
+    // ==========================================
+    // ✅ 三维重建页点云地图冻结与恢复
+    // 说明：GPR 三维渲染会重建 threeContainer / scene，原来的点云对象会被销毁。
+    // 因此无论加载的是“当前点云地图”还是“本地点云文件”，都必须保存一份冻结快照，
+    // 渲染 GPR 剖面后再从快照恢复，避免重新读取实时点云导致地图自动变成扫描后的最新地图。
+    // ==========================================
+    window.gprLoadedMapSource = "";                 // "current" | "local" | ""
+    window.gprFrozenLocalPcdSnapshot = null;        // 本地点云文件冻结快照
+
+    function resetGprLoadedMapFreezeState() {
+        window.gprLoadedMapSource = "";
+        window.gprFrozenLocalPcdSnapshot = null;
+        window.latestImportedInspectionMapSnapshot = null;
+    }
+
+    function clonePlainObjectForGpr(value) {
+        if (value === null || value === undefined) return value;
+        try {
+            if (typeof structuredClone === "function") return structuredClone(value);
+        } catch (e) {
+            // 某些浏览器对 Three.js 对象或特殊字段 structuredClone 会失败，继续走 JSON 兜底。
+        }
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch (e) {
+            return value;
+        }
+    }
+
+    function cloneInspectionMapSnapshotForGpr(snapshot) {
+        if (!snapshot || typeof snapshot !== "object") return snapshot;
+
+        const pointCloud = snapshot.pointCloud || {};
+        const cloned = {
+            ...snapshot,
+            pointCloud: {
+                ...pointCloud,
+                count: Number(pointCloud.count || 0),
+                positions: pointCloud.positions ? new Float32Array(pointCloud.positions) : new Float32Array(0),
+                colors: pointCloud.colors ? new Float32Array(pointCloud.colors) : new Float32Array(0)
+            },
+            cablePath: Array.isArray(snapshot.cablePath)
+                ? snapshot.cablePath.map(p => clonePlainObjectForGpr(p))
+                : [],
+            faults: Array.isArray(snapshot.faults)
+                ? snapshot.faults.map(f => clonePlainObjectForGpr(f))
+                : []
+        };
+
+        cloned.__frozenForGpr = true;
+        cloned.__frozenAt = Date.now();
+        return cloned;
+    }
+
+    function getVectorSnapshot(v, fallback = { x: 0, y: 0, z: 0 }) {
+        return {
+            x: Number(v && Number.isFinite(v.x) ? v.x : fallback.x),
+            y: Number(v && Number.isFinite(v.y) ? v.y : fallback.y),
+            z: Number(v && Number.isFinite(v.z) ? v.z : fallback.z)
+        };
+    }
+
+    function applyVectorSnapshot(target, value) {
+        if (!target || !value) return;
+        target.set(Number(value.x || 0), Number(value.y || 0), Number(value.z || 0));
+    }
+
+    function freezeLocalPcdMapForGpr(points, pcdGroup, sourceName, geoMeta = null) {
+        if (!points || !points.geometry || !pcdGroup) return null;
+
+        const geom = points.geometry;
+        const posAttr = geom.getAttribute && geom.getAttribute("position");
+        if (!posAttr || !posAttr.array || posAttr.count <= 0) return null;
+
+        const colAttr = geom.getAttribute && geom.getAttribute("color");
+        const hasColors = !!(colAttr && colAttr.array && colAttr.array.length >= posAttr.array.length);
+
+        const snapshot = {
+            version: 1,
+            sourceName: sourceName || pcdGroup.name || "本地点云文件",
+            pointCount: posAttr.count,
+            positions: new Float32Array(posAttr.array),
+            colors: hasColors ? new Float32Array(colAttr.array) : null,
+            hasColors,
+            geoMeta: geoMeta ? clonePlainObjectForGpr(geoMeta) : null,
+            group: {
+                position: getVectorSnapshot(pcdGroup.position),
+                rotation: getVectorSnapshot(pcdGroup.rotation),
+                scale: getVectorSnapshot(pcdGroup.scale, { x: 1, y: 1, z: 1 })
+            },
+            points: {
+                position: getVectorSnapshot(points.position),
+                rotation: getVectorSnapshot(points.rotation),
+                scale: getVectorSnapshot(points.scale, { x: 1, y: 1, z: 1 })
+            },
+            material: {
+                size: Number(points.material && Number.isFinite(points.material.size) ? points.material.size : 0.05),
+                sizeAttenuation: points.material ? points.material.sizeAttenuation !== false : true,
+                vertexColors: !!hasColors
+            },
+            frozenAt: Date.now()
+        };
+
+        window.gprLoadedMapSource = "local";
+        window.gprFrozenLocalPcdSnapshot = snapshot;
+        window.latestImportedInspectionMapSnapshot = null;
+        return snapshot;
+    }
+
+    function restoreFrozenLocalPcdMapToGprScene(options = {}) {
+        const snapshot = window.gprFrozenLocalPcdSnapshot;
+        if (!snapshot || !snapshot.positions || !snapshot.positions.length) {
+            console.warn("⚠️ 未找到可恢复的本地点云冻结快照，已跳过恢复本地点云。");
+            return false;
+        }
+
+        const fitCamera = options.fitCamera !== false;
+        ensureStandaloneGprSceneForMap();
+        clearCurrentGprExternalMapLayer();
+
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(snapshot.positions), 3));
+        if (snapshot.hasColors && snapshot.colors) {
+            geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(snapshot.colors), 3));
+        }
+        geom.computeBoundingBox();
+
+        const mat = new THREE.PointsMaterial({
+            vertexColors: !!snapshot.hasColors,
+            size: Number(snapshot.material && snapshot.material.size ? snapshot.material.size : 0.05),
+            sizeAttenuation: !(snapshot.material && snapshot.material.sizeAttenuation === false)
+        });
+
+        const points = new THREE.Points(geom, mat);
+        points.frustumCulled = false;
+        applyVectorSnapshot(points.position, snapshot.points && snapshot.points.position);
+        applyVectorSnapshot(points.rotation, snapshot.points && snapshot.points.rotation);
+        applyVectorSnapshot(points.scale, snapshot.points && snapshot.points.scale);
+
+        const pcdGroup = new THREE.Group();
+        pcdGroup.name = snapshot.sourceName || "本地点云文件";
+        pcdGroup.add(points);
+        applyVectorSnapshot(pcdGroup.position, snapshot.group && snapshot.group.position);
+        applyVectorSnapshot(pcdGroup.rotation, snapshot.group && snapshot.group.rotation);
+        applyVectorSnapshot(pcdGroup.scale, snapshot.group && snapshot.group.scale);
+
+        if (snapshot.geoMeta) {
+            pcdGroup.userData.geoMetadata = snapshot.geoMeta;
+            applyLoadedMapGeoMetadata(snapshot.geoMeta, snapshot.sourceName || "本地点云文件");
+        }
+
+        window.gprScene.add(pcdGroup);
+        window.currentPcdMesh = points;
+        window.currentPcdGroup = pcdGroup;
+        window.currentImportedInspectionMapGroup = pcdGroup;
+        window.gprHasInspectionMapLayerLoaded = true;
+        window.gprLoadedMapSource = "local";
+        window.latestImportedInspectionMapSnapshot = null;
+
+        if (fitCamera) {
+            const planLikeSpan = Math.max(DEFAULT_SCAN_PARAMS.length, DEFAULT_SCAN_PARAMS.width, 2.5);
+            const mapOriginCenter = pcdGroup.localToWorld(new THREE.Vector3(0, 0, 0));
+            const planLikeBox = new THREE.Box3(
+                new THREE.Vector3(mapOriginCenter.x - planLikeSpan / 2, mapOriginCenter.y - 0.25, mapOriginCenter.z - planLikeSpan / 2),
+                new THREE.Vector3(mapOriginCenter.x + planLikeSpan / 2, mapOriginCenter.y + 0.25, mapOriginCenter.z + planLikeSpan / 2)
+            );
+            updateGprCameraByBox(planLikeBox);
+        }
+
+        console.log("✅ 已从冻结快照恢复本地点云地图：", {
+            sourceName: snapshot.sourceName,
+            pointCount: snapshot.pointCount,
+            hasGeoMeta: !!snapshot.geoMeta
+        });
+        return true;
+    }
+
+    window.restoreFrozenLocalPcdMapToGprScene = restoreFrozenLocalPcdMapToGprScene;
 
     function updateGprCameraByBox(box) {
         if (!box || box.isEmpty() || !window.gprCamera) return;
@@ -1107,7 +1399,10 @@
         return faultGroup;
     }
 
-    function loadCurrentPathFaultMapToGpr() {
+    function loadCurrentPathFaultMapToGpr(options = {}) {
+        // 默认手动点击“加载当前点云地图”时自动调整视角；
+        // GPR 剖面渲染完成后重叠加地图时传入 { fitCamera: false }，避免相机被拉回整张点云地图，导致地下剖面/管道看起来消失、拖动变生硬。
+        const fitCamera = options.fitCamera !== false;
         const btn = $("btnLoadCurrentPointCloudMap");
         const oldText = btn ? btn.textContent : "";
 
@@ -1122,7 +1417,8 @@
                 throw new Error("路径查找及故障定点页面的三维地图尚未初始化，请先进入一次该页面。 ");
             }
 
-            const snapshot = window.exportCurrentPathFaultMapForGpr();
+            const rawSnapshot = window.exportCurrentPathFaultMapForGpr();
+            const snapshot = cloneInspectionMapSnapshotForGpr(rawSnapshot);
             const pointCount = snapshot?.pointCloud?.count || 0;
             const cableCount = Array.isArray(snapshot?.cablePath) ? snapshot.cablePath.length : 0;
             const faultCount = Array.isArray(snapshot?.faults) ? snapshot.faults.length : 0;
@@ -1182,10 +1478,32 @@
             window.currentPcdGroup = group;
             window.currentImportedInspectionMapGroup = group;
             window.gprHasInspectionMapLayerLoaded = true;
+            window.gprLoadedMapSource = "current";
+            window.gprFrozenLocalPcdSnapshot = null;
             window.latestImportedInspectionMapSnapshot = snapshot;
 
-            const box = new THREE.Box3().setFromObject(group);
-            updateGprCameraByBox(box);
+            // ✅ 当前点云地图单独加载完成后，不再使用整幅点云/电缆/破损点包围盒取景。
+            // 原来的 setFromObject(group) 会把整张地图范围作为控制范围，导致 radius / controlSpan 过大，
+            // 进而让拖拽和平移手感变得生硬。
+            // 这里改成本地点云加载后的同款逻辑：以当前地图自身坐标原点/中心原点为中心，
+            // 构造一个接近扫描区域大小的小 box，再调用 updateGprCameraByBox()。
+            if (fitCamera) {
+                const planLikeSpan = Math.max(DEFAULT_SCAN_PARAMS.length, DEFAULT_SCAN_PARAMS.width, 2.5);
+                const mapOriginCenter = group.localToWorld(new THREE.Vector3(0, 0, 0));
+                const planLikeBox = new THREE.Box3(
+                    new THREE.Vector3(mapOriginCenter.x - planLikeSpan / 2, mapOriginCenter.y - 0.25, mapOriginCenter.z - planLikeSpan / 2),
+                    new THREE.Vector3(mapOriginCenter.x + planLikeSpan / 2, mapOriginCenter.y + 0.25, mapOriginCenter.z + planLikeSpan / 2)
+                );
+                updateGprCameraByBox(planLikeBox);
+                console.log("✅ 当前点云地图已按地图中心原点构造小 box 触发相机控制：", {
+                    center: {
+                        x: Number(mapOriginCenter.x.toFixed(3)),
+                        y: Number(mapOriginCenter.y.toFixed(3)),
+                        z: Number(mapOriginCenter.z.toFixed(3))
+                    },
+                    span: planLikeSpan
+                });
+            }
 
             setStatus(`✅ 当前点云地图已加载：点云 ${pointCount} 点，电缆路径 ${cableCount} 点，破损点 ${faultCount} 个。`, "success");
 
@@ -1604,6 +1922,20 @@
                 yawDeg: Number((geoYawRad * 180 / Math.PI).toFixed(3)),
                 slamYawRad: Number(slamYaw.toFixed(6))
             },
+            // ✅ 用于三维重建页规划后微调：保留可重新生成扫描路径的原始参数。
+            edit: {
+                centerSlam: {
+                    x: Number(scanCenter.x.toFixed(6)),
+                    y: Number(scanCenter.y.toFixed(6)),
+                    z: Number((scanCenter.z ?? 0.10).toFixed(6))
+                },
+                slamYaw: Number(slamYaw.toFixed(8)),
+                length: Number(zigzagPlan.requestedLength.toFixed(4)),
+                width: Number(zigzagPlan.width.toFixed(4)),
+                angleDeg: Number(zigzagPlan.angleDeg.toFixed(4)),
+                source,
+                taskPrefix
+            },
             params: {
                 // length 为最终实际扫描矩形长度；requestedLength 为弹窗中用户输入的原始长度。
                 // 当最后一条 Z 字路线需要越过原始矩形边界才能画完整时，length 会自动延长。
@@ -1675,8 +2007,12 @@
         return sprite;
     }
 
-    function renderScanPlanOnGpr(plan) {
+    function renderScanPlanOnGpr(plan, options = {}) {
         if (!plan || !plan.preview) return;
+
+        // 默认首次规划时自动把视角对准扫描区域；
+        // 微调过程中传入 { fitCamera: false }，只刷新矩形/Z字路径，不改变用户当前视角。
+        const fitCamera = options.fitCamera !== false;
 
         // 保存最近一次由上位机规划的扫描路径。
         // 后续点击“开始处理”生成多个 GPR 剖面时，会优先用这条 Z 字路径来摆放剖面，
@@ -1714,7 +2050,7 @@
         window.gprScanPlanGroup = group;
 
         const box = new THREE.Box3().setFromObject(group);
-        if (box && !box.isEmpty()) {
+        if (fitCamera && box && !box.isEmpty()) {
             updateGprCameraByBox(box);
         }
     }
@@ -1745,6 +2081,303 @@
     }
 
 
+    // ==========================================
+    // ✅ 扫描路径规划后微调：先预览，不立即下发
+    // 支持对规划矩形区域进行旋转、长度拉伸、宽度拉伸；
+    // 用户点击“确认发送”后，才把最终生成的 GPS 航点发送给履带小车。
+    // ==========================================
+    let scanPlanAdjustState = null;
+
+    function radToDeg(rad) {
+        return Number(rad || 0) * 180 / Math.PI;
+    }
+
+    function degToRad(deg) {
+        return Number(deg || 0) * Math.PI / 180;
+    }
+
+    function getScanPlanAdjustPanel() {
+        const container = document.getElementById("threeContainer");
+        if (!container) return null;
+
+        let panel = document.getElementById("gprScanAdjustPanel");
+        if (!panel) {
+            panel = document.createElement("div");
+            panel.id = "gprScanAdjustPanel";
+            panel.className = "gpr-scan-adjust-panel";
+            panel.innerHTML = `
+                <div class="scan-adjust-header">
+                    <span>🛠️ 扫描区域微调</span>
+                    <button type="button" class="scan-adjust-close" data-scan-adjust-action="cancel" title="取消本次规划">×</button>
+                </div>
+                <div class="scan-adjust-desc">路径尚未发送，微调后点击确认发送。</div>
+                <div class="scan-adjust-metrics compact">
+                    <span>L=<b data-scan-adjust-field="length">--</b>m</span>
+                    <span>W=<b data-scan-adjust-field="width">--</b>m</span>
+                    <span>角度=<b data-scan-adjust-field="yaw">--</b>°</span>
+                    <span>中心=(<b data-scan-adjust-field="centerX">--</b>, <b data-scan-adjust-field="centerY">--</b>)</span>
+                    <span style="display:none;">航点=<b data-scan-adjust-field="count">--</b></span>
+                </div>
+                <div class="scan-adjust-section">
+                    <div class="scan-adjust-label">沿扫描方向平移</div>
+                    <div class="scan-adjust-buttons compact">
+                        <button type="button" data-scan-adjust-action="translate" data-local-x="-0.1" data-local-y="0">后退0.1m</button>
+                        <button type="button" data-scan-adjust-action="translate" data-local-x="0.1" data-local-y="0">前进0.1m</button>
+                    </div>
+                </div>
+                <div class="scan-adjust-section">
+                    <div class="scan-adjust-label">横向平移</div>
+                    <div class="scan-adjust-buttons compact">
+                        <button type="button" data-scan-adjust-action="translate" data-local-x="0" data-local-y="0.1">左移0.1m</button>
+                        <button type="button" data-scan-adjust-action="translate" data-local-x="0" data-local-y="-0.1">右移0.1m</button>
+                    </div>
+                </div>
+                <div class="scan-adjust-section">
+                    <div class="scan-adjust-label">旋转微调</div>
+                    <div class="scan-adjust-buttons compact">
+                        <button type="button" data-scan-adjust-action="rotate" data-value="-1">左转1°</button>
+                        <button type="button" data-scan-adjust-action="rotate" data-value="1">右转1°</button>
+                    </div>
+                </div>
+                <div class="scan-adjust-section">
+                    <div class="scan-adjust-label">长度拉伸</div>
+                    <div class="scan-adjust-buttons compact">
+                        <button type="button" data-scan-adjust-action="length" data-value="-0.1">缩短0.1m</button>
+                        <button type="button" data-scan-adjust-action="length" data-value="0.1">加长0.1m</button>
+                    </div>
+                </div>
+                <div class="scan-adjust-section">
+                    <div class="scan-adjust-label">宽度拉伸</div>
+                    <div class="scan-adjust-buttons compact">
+                        <button type="button" data-scan-adjust-action="width" data-value="-0.1">变窄0.1m</button>
+                        <button type="button" data-scan-adjust-action="width" data-value="0.1">加宽0.1m</button>
+                    </div>
+                </div>
+                <div class="scan-adjust-footer">
+                    <button type="button" class="scan-adjust-secondary" data-scan-adjust-action="reset">恢复初始</button>
+                    <button type="button" class="scan-adjust-secondary" data-scan-adjust-action="cancel">取消</button>
+                    <button type="button" class="scan-adjust-primary" data-scan-adjust-action="confirm">确认发送</button>
+                </div>
+            `;
+            container.appendChild(panel);
+
+            panel.addEventListener("click", function (event) {
+                const btn = event.target.closest("[data-scan-adjust-action]");
+                if (!btn) return;
+                event.preventDefault();
+                event.stopPropagation();
+
+                const action = btn.dataset.scanAdjustAction;
+                const value = Number(btn.dataset.value || 0);
+
+                if (action === "rotate") {
+                    adjustCurrentScanPlan({ rotateDeg: value });
+                } else if (action === "translate") {
+                    adjustCurrentScanPlan({
+                        localXDelta: Number(btn.dataset.localX || 0),
+                        localYDelta: Number(btn.dataset.localY || 0)
+                    });
+                } else if (action === "length") {
+                    adjustCurrentScanPlan({ lengthDelta: value });
+                } else if (action === "width") {
+                    adjustCurrentScanPlan({ widthDelta: value });
+                } else if (action === "reset") {
+                    resetCurrentScanPlanAdjustment();
+                } else if (action === "confirm") {
+                    confirmCurrentScanPlanAdjustment();
+                } else if (action === "cancel") {
+                    cancelCurrentScanPlanAdjustment();
+                }
+            });
+        } else if (panel.parentElement !== container) {
+            container.appendChild(panel);
+        }
+
+        return panel;
+    }
+
+    function normalizeScanPlanEdit(plan) {
+        const edit = plan && plan.edit ? plan.edit : {};
+        const centerSlam = edit.centerSlam || plan?.center || {};
+        const source = edit.source || plan?.source || "manual_area";
+        const taskPrefix = edit.taskPrefix || (source === "manual_area" ? "manual_scan" : "scan");
+        return {
+            centerSlam: {
+                x: Number(centerSlam.x),
+                y: Number(centerSlam.y),
+                z: Number(centerSlam.z ?? 0.10)
+            },
+            slamYaw: normalizeRad(Number(edit.slamYaw ?? plan?.center?.slamYawRad ?? 0)),
+            length: clampNumber(edit.length ?? plan?.params?.requestedLength ?? plan?.params?.length, 0.2, 50, DEFAULT_SCAN_PARAMS.length),
+            width: clampNumber(edit.width ?? plan?.params?.width, 0.2, 20, DEFAULT_SCAN_PARAMS.width),
+            angleDeg: clampNumber(edit.angleDeg ?? plan?.params?.angleDeg, 5, 85, DEFAULT_SCAN_PARAMS.angleDeg),
+            source,
+            taskPrefix,
+            taskId: plan?.taskId || (taskPrefix + "_" + Date.now())
+        };
+    }
+
+    function buildPlanFromAdjustState(state) {
+        if (!state) return null;
+        const plan = buildUpperComputerScanPlan(state.centerSlam, {
+            length: state.length,
+            width: state.width,
+            angleDeg: state.angleDeg
+        }, {
+            slamYaw: state.slamYaw,
+            source: state.source,
+            taskPrefix: state.taskPrefix
+        });
+
+        // 微调过程中保持同一个 taskId，避免每点一次按钮就生成新任务号。
+        plan.taskId = state.taskId;
+        if (plan.edit) {
+            plan.edit.taskId = state.taskId;
+        }
+        return plan;
+    }
+
+    function updateScanPlanAdjustPanel(plan) {
+        const panel = getScanPlanAdjustPanel();
+        if (!panel || !scanPlanAdjustState || !plan) return;
+
+        const lengthEl = panel.querySelector('[data-scan-adjust-field="length"]');
+        const widthEl = panel.querySelector('[data-scan-adjust-field="width"]');
+        const yawEl = panel.querySelector('[data-scan-adjust-field="yaw"]');
+        const countEl = panel.querySelector('[data-scan-adjust-field="count"]');
+        const centerXEl = panel.querySelector('[data-scan-adjust-field="centerX"]');
+        const centerYEl = panel.querySelector('[data-scan-adjust-field="centerY"]');
+
+        if (lengthEl) lengthEl.textContent = Number(scanPlanAdjustState.length).toFixed(2);
+        if (widthEl) widthEl.textContent = Number(scanPlanAdjustState.width).toFixed(2);
+        if (yawEl) yawEl.textContent = radToDeg(scanPlanAdjustState.slamYaw).toFixed(1);
+        if (countEl) countEl.textContent = String(plan.waypoints ? plan.waypoints.length : 0);
+        if (centerXEl) centerXEl.textContent = Number(scanPlanAdjustState.centerSlam.x).toFixed(2);
+        if (centerYEl) centerYEl.textContent = Number(scanPlanAdjustState.centerSlam.y).toFixed(2);
+    }
+
+    function refreshAdjustedScanPlanPreview() {
+        if (!scanPlanAdjustState) return null;
+        const plan = buildPlanFromAdjustState(scanPlanAdjustState);
+        // 微调按钮会频繁重绘扫描预览，这里不再自动调整相机，避免视角跳变。
+        renderScanPlanOnGpr(plan, { fitCamera: false });
+        updateScanPlanAdjustPanel(plan);
+        setStatus(
+            `🛠️ 扫描区域待确认：中心=(${scanPlanAdjustState.centerSlam.x.toFixed(2)}, ${scanPlanAdjustState.centerSlam.y.toFixed(2)})，L=${scanPlanAdjustState.length.toFixed(2)}m，W=${scanPlanAdjustState.width.toFixed(2)}m，角度=${radToDeg(scanPlanAdjustState.slamYaw).toFixed(1)}°。确认后才会发送给履带小车。`,
+            "warning"
+        );
+        return plan;
+    }
+
+    function adjustCurrentScanPlan(delta = {}) {
+        if (!scanPlanAdjustState) return;
+
+        if (Number.isFinite(Number(delta.rotateDeg))) {
+            scanPlanAdjustState.slamYaw = normalizeRad(scanPlanAdjustState.slamYaw + degToRad(delta.rotateDeg));
+        }
+        if (Number.isFinite(Number(delta.localXDelta)) || Number.isFinite(Number(delta.localYDelta))) {
+            const localXDelta = Number.isFinite(Number(delta.localXDelta)) ? Number(delta.localXDelta) : 0;
+            const localYDelta = Number.isFinite(Number(delta.localYDelta)) ? Number(delta.localYDelta) : 0;
+            const cos = Math.cos(scanPlanAdjustState.slamYaw);
+            const sin = Math.sin(scanPlanAdjustState.slamYaw);
+
+            // 与 localScanPointToSlam() 保持一致：localX 为扫描前进方向，localY 为矩形横向。
+            scanPlanAdjustState.centerSlam.x += localXDelta * cos - localYDelta * sin;
+            scanPlanAdjustState.centerSlam.y += localXDelta * sin + localYDelta * cos;
+        }
+        if (Number.isFinite(Number(delta.lengthDelta))) {
+            scanPlanAdjustState.length = clampNumber(scanPlanAdjustState.length + Number(delta.lengthDelta), 0.2, 50, scanPlanAdjustState.length);
+        }
+        if (Number.isFinite(Number(delta.widthDelta))) {
+            scanPlanAdjustState.width = clampNumber(scanPlanAdjustState.width + Number(delta.widthDelta), 0.2, 20, scanPlanAdjustState.width);
+        }
+
+        refreshAdjustedScanPlanPreview();
+    }
+
+    function resetCurrentScanPlanAdjustment() {
+        if (!scanPlanAdjustState || !scanPlanAdjustState.initial) return;
+        const initial = scanPlanAdjustState.initial;
+        scanPlanAdjustState.centerSlam = {
+            x: initial.centerSlam.x,
+            y: initial.centerSlam.y,
+            z: initial.centerSlam.z
+        };
+        scanPlanAdjustState.slamYaw = initial.slamYaw;
+        scanPlanAdjustState.length = initial.length;
+        scanPlanAdjustState.width = initial.width;
+        refreshAdjustedScanPlanPreview();
+    }
+
+    function hideScanPlanAdjustPanel() {
+        const panel = document.getElementById("gprScanAdjustPanel");
+        if (panel) panel.style.display = "none";
+    }
+
+    function confirmCurrentScanPlanAdjustment() {
+        if (!scanPlanAdjustState) return;
+        const finalPlan = buildPlanFromAdjustState(scanPlanAdjustState);
+        // 确认发送时也保持当前视角，只更新最终预览层。
+        renderScanPlanOnGpr(finalPlan, { fitCamera: false });
+
+        const resolver = scanPlanAdjustState.resolve;
+        scanPlanAdjustState = null;
+        hideScanPlanAdjustPanel();
+
+        if (typeof resolver === "function") resolver(finalPlan);
+    }
+
+    function cancelCurrentScanPlanAdjustment() {
+        if (!scanPlanAdjustState) return;
+        const resolver = scanPlanAdjustState.resolve;
+        scanPlanAdjustState = null;
+        hideScanPlanAdjustPanel();
+        clearGprScanPlanOverlay();
+        setStatus("已取消扫描路径规划，未向履带小车发送航点。", "warning");
+        if (typeof resolver === "function") resolver(null);
+    }
+
+    function enterScanPlanAdjustmentMode(plan, options = {}) {
+        if (!plan) return Promise.resolve(null);
+
+        if (scanPlanAdjustState && typeof scanPlanAdjustState.resolve === "function") {
+            scanPlanAdjustState.resolve(null);
+        }
+
+        const edit = normalizeScanPlanEdit(plan);
+        if (!Number.isFinite(edit.centerSlam.x) || !Number.isFinite(edit.centerSlam.y)) {
+            return Promise.reject(new Error("扫描路径缺少可微调的中心点坐标。"));
+        }
+
+        scanPlanAdjustState = {
+            ...edit,
+            initial: {
+                centerSlam: {
+                    x: edit.centerSlam.x,
+                    y: edit.centerSlam.y,
+                    z: edit.centerSlam.z
+                },
+                slamYaw: edit.slamYaw,
+                length: edit.length,
+                width: edit.width
+            },
+            resolve: null,
+            options
+        };
+
+        ensureStandaloneGprSceneForMap();
+        const panel = getScanPlanAdjustPanel();
+        if (panel) panel.style.display = "block";
+        const previewPlan = refreshAdjustedScanPlanPreview() || plan;
+
+        return new Promise(resolve => {
+            if (!scanPlanAdjustState) {
+                resolve(previewPlan);
+                return;
+            }
+            scanPlanAdjustState.resolve = resolve;
+        });
+    }
 
 
     // ==========================================
@@ -2048,20 +2681,26 @@
 
             const plan = await pickManualScanAreaPlan(params);
 
-            if (btnManualScan) btnManualScan.innerText = "⏳ 绘制路径...";
+            if (btnManualScan) btnManualScan.innerText = "🛠️ 等待微调...";
             clearManualScanPickOverlay();
             renderScanPlanOnGpr(plan);
 
+            const finalPlan = await enterScanPlanAdjustmentMode(plan, { source: "manual_area" });
+            if (!finalPlan) {
+                if (btnManualScan) btnManualScan.innerText = "已取消";
+                return;
+            }
+
             if (btnManualScan) btnManualScan.innerText = "⏳ 发送路径...";
-            await sendScanPlanToCrawler(plan);
+            await sendScanPlanToCrawler(finalPlan);
 
-            const extendTip = plan.params.autoExtended
-                ? `，末段自动延长 ${plan.params.extensionLength}m，实际L=${plan.params.length}m`
+            const extendTip = finalPlan.params.autoExtended
+                ? `，末段自动延长 ${finalPlan.params.extensionLength}m，实际L=${finalPlan.params.length}m`
                 : "";
-            setStatus(`✅ 已手动指定扫描区域并下发履带小车路径：设置L=${plan.params.requestedLength}m${extendTip}，W=${plan.params.width}m，夹角=${plan.params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
-            console.log("🧭 手动指定扫描区域路径已下发：", plan);
+            setStatus(`✅ 已确认微调并下发履带小车路径：设置L=${finalPlan.params.requestedLength}m${extendTip}，W=${finalPlan.params.width}m，夹角=${finalPlan.params.angleDeg}°，航点${finalPlan.waypoints.length}个。`, "success");
+            console.log("🧭 手动指定扫描区域路径已微调并下发：", finalPlan);
 
-            if (btnManualScan) btnManualScan.innerText = `✅ 已发送${plan.waypoints.length}个航点`;
+            if (btnManualScan) btnManualScan.innerText = `✅ 已发送${finalPlan.waypoints.length}个航点`;
         } catch (err) {
             if (err && String(err.message || "").includes("已取消")) {
                 setStatus("已取消手动指定扫描区域。", "");
@@ -2424,11 +3063,25 @@
         return normalized + "/" + GPR_ANNOTATION_FILE_NAME;
     }
 
+    function getGprSegmentStableName(seg, idx) {
+        const fallback = "segment_" + (Number.isFinite(Number(idx)) ? Number(idx) : 0);
+        if (!seg || typeof seg !== "object") return fallback;
+        return String(
+            seg.fileName ||
+            seg.name ||
+            seg.sourceFileName ||
+            seg.originalFileName ||
+            seg.path ||
+            seg.filePath ||
+            fallback
+        );
+    }
+
     function getGprSegmentSignature(result) {
         const segments = result && Array.isArray(result.segments) ? result.segments : [];
         return {
             segmentCount: segments.length,
-            segmentNames: segments.map((seg, idx) => String(seg.fileName || seg.name || ("segment_" + idx)))
+            segmentNames: segments.map((seg, idx) => getGprSegmentStableName(seg, idx))
         };
     }
 
@@ -2576,6 +3229,77 @@
         return Number.isFinite(n) ? n.toFixed(3) : "0.000";
     }
 
+    function roundGprIdentityNumber(value, digits = 1) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n.toFixed(digits) : "0.0";
+    }
+
+    function sanitizeGprPipeKeyPart(value) {
+        const raw = String(value ?? "").trim();
+        if (!raw) return "none";
+        return raw
+            .replace(/\\+/g, "/")
+            .split("/")
+            .pop()
+            .replace(/[^a-zA-Z0-9_\-.一-龥]/g, "_")
+            .slice(0, 80) || "none";
+    }
+
+    function makeGprSegmentIdentityToken(segmentName, segIndex) {
+        const idx = Number.isFinite(Number(segIndex)) ? Number(segIndex) : 0;
+        const safeName = sanitizeGprPipeKeyPart(segmentName || ("segment_" + idx));
+        const hash = simpleHashForStorage(String(segmentName || safeName));
+        return `seg${idx}_${safeName}_${hash}`;
+    }
+
+    function normalizeGprBlobSource(source, linkMode) {
+        const raw = String(source || "").trim();
+        if (raw === "forcedPipe" || raw === "forced") return "forced";
+        if (raw === "manual") return "manual";
+        if (raw === "auto") return "auto";
+        if (linkMode === "forced") return "forced";
+        return raw || "auto";
+    }
+
+    function makeGprAnnotationIdentityFromBlob(blob, seg, segIndex) {
+        const segmentName = getGprSegmentStableName(seg, segIndex);
+        const segmentToken = makeGprSegmentIdentityToken(segmentName, segIndex);
+        const source = normalizeGprBlobSource(blob && blob.source, blob && blob.linkMode);
+        const row = roundGprIdentityNumber(blob && blob.row, 1);
+        const col = roundGprIdentityNumber(blob && blob.col, 1);
+        const radius = roundGprIdentityNumber(blob && blob.radius, 1);
+
+        let localId = "";
+        if (source === "auto") {
+            localId = sanitizeGprPipeKeyPart(blob && blob.autoKey ? blob.autoKey : `${row}_${col}_${radius}`);
+        } else if (source === "manual") {
+            const manualIndex = Number.isFinite(Number(blob && blob.manualIndex)) ? Number(blob.manualIndex) : -1;
+            // 手动红圈以下次保存的二维剖面 row/col/radius 为主，manualIndex 只作为同一剖面多点时的辅助区分。
+            localId = `m${manualIndex}_${row}_${col}_${radius}`;
+        } else if (source === "forced") {
+            const groupId = sanitizeGprPipeKeyPart(blob && (blob.pipeGroupId || blob.groupId) ? (blob.pipeGroupId || blob.groupId) : "forced_group");
+            const pipeOrder = Number.isFinite(Number(blob && blob.pipeOrder)) ? Number(blob.pipeOrder) : 0;
+            const forcedIndex = Number.isFinite(Number(blob && blob.forcedIndex)) ? Number(blob.forcedIndex) : -1;
+            localId = `${groupId}_o${pipeOrder}_f${forcedIndex}_${row}_${col}_${radius}`;
+        } else {
+            localId = `${sanitizeGprPipeKeyPart(source)}_${row}_${col}_${radius}`;
+        }
+
+        const annotationStableKey = `${segmentToken}:${source}:${localId}`;
+        return {
+            segmentName,
+            segmentToken,
+            blobSource: source,
+            annotationStableKey,
+            annotationLocalId: localId,
+            annotationRow: row,
+            annotationCol: col,
+            annotationRadius: radius
+        };
+    }
+
+    // 旧版兼容：历史版本使用三维世界坐标 hash 保存材质。新版本不再把它作为主 key，
+    // 但仍保留为 legacyColorKey，方便同一布局下读取旧标注文件时继续显示。
     function makeGprPipeColorKeyFromPoints(points, meta = {}) {
         const cleanPoints = (Array.isArray(points) ? points : [])
             .map(p => p && p.clone ? p : new THREE.Vector3(Number(p.x), Number(p.y), Number(p.z)))
@@ -2584,27 +3308,77 @@
         const pointPart = cleanPoints
             .map(p => `${roundGprPipeCoord(p.x)},${roundGprPipeCoord(p.y)},${roundGprPipeCoord(p.z)}`)
             .join("|");
-        const source = String(meta.source || "pipe");
-        const groupId = String(meta.pipeGroupId || meta.groupId || "");
-        return `${source}:${groupId}:${simpleHashForStorage(pointPart)}`;
+        const source = sanitizeGprPipeKeyPart(meta.source || "pipe");
+        const groupId = sanitizeGprPipeKeyPart(meta.pipeGroupId || meta.groupId || "");
+        return `legacy:${source}:${groupId}:${simpleHashForStorage(pointPart)}`;
     }
 
-    function makeGprPipeColorKeyFromCenters(centers, meta = {}) {
+    function makeGprPipeLegacyColorKeyFromCenters(centers, meta = {}) {
         const points = (Array.isArray(centers) ? centers : [])
             .map(item => item && item.center ? item.center : item)
             .filter(Boolean);
         return makeGprPipeColorKeyFromPoints(points, meta);
     }
 
-    function getGprPipeAssignmentByKey(pipeColorKey) {
-        const key = String(pipeColorKey || "");
-        return key ? gprPipeColorAssignments.get(key) || null : null;
+    function makeGprPipeColorKeyFromCenters(centers, meta = {}) {
+        const arr = (Array.isArray(centers) ? centers : []).filter(Boolean);
+        const stableParts = arr
+            .map(item => item && item.annotationStableKey ? String(item.annotationStableKey) : "")
+            .filter(Boolean);
+
+        const source = sanitizeGprPipeKeyPart(meta.source || (arr[0] && arr[0].blobSource) || "pipe");
+        const groupId = sanitizeGprPipeKeyPart(meta.pipeGroupId || meta.groupId || (arr[0] && arr[0].pipeGroupId) || "");
+
+        if (stableParts.length >= 2) {
+            // 稳定 key 只依赖原始 GPR 剖面身份 + 二维圆圈身份，不依赖本次三维场景坐标。
+            const identityPart = stableParts.join("|");
+            return `gpr-pipe-v2:${source}:${groupId}:${arr.length}:${simpleHashForStorage(identityPart)}`;
+        }
+
+        return makeGprPipeLegacyColorKeyFromCenters(arr, meta);
     }
 
-    function resolveGprPipeColorHexByKey(pipeColorKey, fallbackColorHex = GPR_PIPE_DEFAULT_COLOR_HEX) {
-        const assignment = getGprPipeAssignmentByKey(pipeColorKey);
+    function normalizeGprPipeKeyList(keys) {
+        const out = [];
+        (Array.isArray(keys) ? keys : [keys]).forEach(key => {
+            const text = String(key || "").trim();
+            if (text && !out.includes(text)) out.push(text);
+        });
+        return out;
+    }
+
+    function getGprPipeAssignmentByKey(pipeColorKey, fallbackKeys = []) {
+        const keys = normalizeGprPipeKeyList([pipeColorKey].concat(fallbackKeys || []));
+        for (const key of keys) {
+            const assignment = gprPipeColorAssignments.get(key);
+            if (assignment) return assignment;
+        }
+        return null;
+    }
+
+    function resolveGprPipeColorHexByKey(pipeColorKey, fallbackColorHex = GPR_PIPE_DEFAULT_COLOR_HEX, fallbackKeys = []) {
+        const assignment = getGprPipeAssignmentByKey(pipeColorKey, fallbackKeys);
         if (assignment) return normalizeGprPipeColorHex(assignment.colorHex, fallbackColorHex);
         return normalizeGprPipeColorHex(fallbackColorHex);
+    }
+
+    function getGprPipeColorKeysForObject(obj) {
+        if (!obj || !obj.userData) return [];
+        const meta = obj.userData.gprPipeMeta || {};
+        return normalizeGprPipeKeyList([
+            obj.userData.gprPipeColorKey,
+            meta.colorKey,
+            meta.pipeColorKey,
+            obj.userData.gprPipeLegacyColorKey,
+            meta.legacyColorKey,
+            meta.coordColorKey,
+            meta.oldColorKey
+        ]);
+    }
+
+    function getGprPipeAssignmentForObject(obj) {
+        const keys = getGprPipeColorKeysForObject(obj);
+        return getGprPipeAssignmentByKey(keys[0], keys.slice(1));
     }
 
     function applyGprPipeColorToObject(obj, colorHex) {
@@ -2625,19 +3399,26 @@
     function applyGprPipeSavedColorIfAny(mesh) {
         if (!mesh || !mesh.userData) return;
         const meta = mesh.userData.gprPipeMeta || {};
-        const pipeColorKey = mesh.userData.gprPipeColorKey || meta.colorKey || meta.pipeColorKey;
-        const renderColorHex = resolveGprPipeColorHexByKey(pipeColorKey, meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
+        const keys = getGprPipeColorKeysForObject(mesh);
+        const pipeColorKey = keys[0] || "";
+        const renderColorHex = resolveGprPipeColorHexByKey(
+            pipeColorKey,
+            meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX,
+            keys.slice(1)
+        );
         applyGprPipeColorToObject(mesh, renderColorHex);
     }
 
     function applyGprPipeColorAssignmentToScene(pipeColorKey) {
         const key = String(pipeColorKey || "");
         if (!key || !window.gprPipePickObjects) return;
-        const assignment = getGprPipeAssignmentByKey(key);
 
         window.gprPipePickObjects.forEach(obj => {
-            if (!obj || !obj.userData || obj.userData.gprPipeColorKey !== key) return;
+            if (!obj || !obj.userData) return;
+            const keys = getGprPipeColorKeysForObject(obj);
+            if (!keys.includes(key)) return;
             const meta = obj.userData.gprPipeMeta || {};
+            const assignment = getGprPipeAssignmentByKey(keys[0], keys.slice(1));
             const colorHex = assignment
                 ? assignment.colorHex
                 : (meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
@@ -2753,8 +3534,7 @@
 
     function refreshGprPipeMaterialButtonActiveState(popup, obj) {
         if (!popup) return;
-        const key = obj && obj.userData ? (obj.userData.gprPipeColorKey || obj.userData.gprPipeMeta?.colorKey) : "";
-        const assignment = getGprPipeAssignmentByKey(key);
+        const assignment = getGprPipeAssignmentForObject(obj);
         const activeType = assignment ? normalizeGprPipeMaterialType(assignment.materialType) : "";
 
         popup.querySelectorAll("[data-gpr-pipe-material]").forEach(btn => {
@@ -2777,8 +3557,7 @@
         ensureGprPipeColorControls(popup);
         if (!popup) return;
 
-        const key = obj && obj.userData ? (obj.userData.gprPipeColorKey || obj.userData.gprPipeMeta?.colorKey) : "";
-        const assignment = getGprPipeAssignmentByKey(key);
+        const assignment = getGprPipeAssignmentForObject(obj);
         const meta = obj && obj.userData ? (obj.userData.gprPipeMeta || {}) : {};
         const fallbackColorHex = normalizeGprPipeColorHex(meta.colorHex || GPR_PIPE_DEFAULT_COLOR_HEX);
         const activeColorHex = assignment ? normalizeGprPipeColorHex(assignment.colorHex) : fallbackColorHex;
@@ -2807,12 +3586,15 @@
             return;
         }
 
-        const key = selectedGprPipeObject.userData.gprPipeColorKey || selectedGprPipeObject.userData.gprPipeMeta?.colorKey;
+        const keys = getGprPipeColorKeysForObject(selectedGprPipeObject);
+        const key = keys[0];
         if (!key) {
             alert("当前管道缺少可保存的颜色标识，请重新处理GPR数据后再试。 ");
             return;
         }
 
+        // 只把新版本稳定 key 作为正式保存键；旧版坐标 hash 作为兼容别名时，删除旧记录避免同一管道出现两份材质配置。
+        keys.slice(1).forEach(aliasKey => gprPipeColorAssignments.delete(String(aliasKey)));
         gprPipeColorAssignments.set(String(key), {
             pipeColorKey: String(key),
             materialType: material.type,
@@ -2832,10 +3614,11 @@
 
     function resetSelectedGprPipeMaterialColor() {
         if (!selectedGprPipeObject || !selectedGprPipeObject.userData) return;
-        const key = selectedGprPipeObject.userData.gprPipeColorKey || selectedGprPipeObject.userData.gprPipeMeta?.colorKey;
+        const keys = getGprPipeColorKeysForObject(selectedGprPipeObject);
+        const key = keys[0];
         if (!key) return;
 
-        gprPipeColorAssignments.delete(String(key));
+        keys.forEach(aliasKey => gprPipeColorAssignments.delete(String(aliasKey)));
         applyGprPipeColorAssignmentToScene(key);
         updateGprPipeColorControls(selectedGprPipeObject);
         saveGprAnnotationCalibration("pipe-material-color-reset");
@@ -2871,7 +3654,7 @@
         currentGprAnnotationStorageKey = getGprFolderAnnotationKey(folderPath);
 
         return {
-            version: 4,
+            version: 5,
             savedAt: new Date().toISOString(),
             reason,
             folderPath,
@@ -4095,7 +4878,7 @@
             // 造成“规划后突然变丝滑”的假象。
             window.currentImportedInspectionMapGroup = pcdGroup;
             window.gprHasInspectionMapLayerLoaded = true;
-            window.latestImportedInspectionMapSnapshot = null;
+            freezeLocalPcdMapForGpr(points, pcdGroup, sourceName, hasValidGeoMeta ? geoMeta : null);
 
             // ✅ 本地点云加载完成后，不再取整幅点云包围盒中心。
             // 直接以“当前点云地图自身坐标原点/中心原点”为中心构造一个小 box，
@@ -5146,37 +5929,46 @@
         if (!usePlannedLayout) return;
 
         try {
-            // ✅ GPR 渲染会重建 threeContainer 和 WebGL 场景。
-            // 这里不能再次直接调用 exportCurrentPathFaultMapForGpr()，
-            // 否则会重新读取“此刻路径查找页面的最新点云”，导致三维重建页地图自动更新。
-            // 正确做法：优先使用用户点击“加载当前点云地图”时保存下来的冻结快照。
+            // GPR 处理会重建 threeContainer 和 WebGL 场景，因此这里需要把点云地图、电缆路径、
+            // 破损点重新叠加到新场景中。
+            // 注意：处理完成后不再重新绘制规划矩形和 Z 字形折线，避免它们遮挡已生成的地下剖面。
             const frozenSnapshot = window.latestImportedInspectionMapSnapshot || null;
+            const mapSource = window.gprLoadedMapSource || "";
 
-            if (frozenSnapshot && typeof loadCurrentPathFaultMapToGpr === "function") {
+            if (mapSource === "local") {
+                // 用户加载的是电脑本地 PCD 文件：GPR 场景重建后必须恢复这份冻结的本地点云，
+                // 不能回退调用 loadCurrentPathFaultMapToGpr()，否则会重新读取路径页实时点云，
+                // 导致地图变成履带小车扫描作业后的最新地图。
+                restoreFrozenLocalPcdMapToGprScene({ fitCamera: false });
+            } else if (frozenSnapshot && typeof loadCurrentPathFaultMapToGpr === "function") {
                 const realExporter = window.exportCurrentPathFaultMapForGpr;
 
                 try {
-                    // 临时让 loadCurrentPathFaultMapToGpr() 读取冻结快照，
-                    // 而不是读取路径查找页面的实时点云。
+                    // 优先使用用户点击“加载当前点云地图”时保存的冻结快照，
+                    // 避免 GPR 处理完成后重新读取路径页的实时点云。
                     window.exportCurrentPathFaultMapForGpr = function () {
                         return frozenSnapshot;
                     };
-
-                    loadCurrentPathFaultMapToGpr();
+                    loadCurrentPathFaultMapToGpr({ fitCamera: false });
                 } finally {
                     window.exportCurrentPathFaultMapForGpr = realExporter;
                 }
-            } else if (typeof loadCurrentPathFaultMapToGpr === "function") {
-                // 如果用户之前没有手动加载过地图，则保留原来的兜底逻辑：
-                // 自动加载当前路径页地图。
-                loadCurrentPathFaultMapToGpr();
+            } else if (mapSource === "current" && typeof loadCurrentPathFaultMapToGpr === "function") {
+                // 兼容旧流程：如果来源明确是“当前地图”但没有冻结快照，才允许兜底重新加载当前地图。
+                loadCurrentPathFaultMapToGpr({ fitCamera: false });
             }
 
-            if (window.currentGprScanPlan && typeof renderScanPlanOnGpr === "function") {
-                renderScanPlanOnGpr(window.currentGprScanPlan);
+            // ✅ 核心修改：GPR 剖面渲染完成后隐藏规划矩形区域和 Z 字形折线。
+            // 这里只清除显示层，不清空 window.currentGprScanPlan，
+            // 因为后续剖面按规划路径融合仍需要使用这份扫描路径数据。
+            if (typeof clearGprScanPlanOverlay === "function") {
+                clearGprScanPlanOverlay();
             }
         } catch (e) {
-            console.warn("⚠️ GPR 剖面已按规划路径生成，但重新叠加点云地图/规划线失败：", e);
+            console.warn("⚠️ GPR 剖面已按规划路径生成，但重新叠加点云地图失败：", e);
+            if (typeof clearGprScanPlanOverlay === "function") {
+                clearGprScanPlanOverlay();
+            }
         }
     }
 
@@ -5435,13 +6227,15 @@
 
         if (cleanPoints.length < 2) return mesh;
 
-        const pipeColorKey = String(meta.colorKey || meta.pipeColorKey || makeGprPipeColorKeyFromPoints(cleanPoints, meta));
-        const mergedMeta = { ...(meta || {}), colorKey: pipeColorKey };
+        const legacyColorKey = String(meta.legacyColorKey || meta.coordColorKey || makeGprPipeColorKeyFromPoints(cleanPoints, meta));
+        const pipeColorKey = String(meta.colorKey || meta.pipeColorKey || meta.stableColorKey || legacyColorKey);
+        const mergedMeta = { ...(meta || {}), colorKey: pipeColorKey, legacyColorKey };
 
         mesh.userData = mesh.userData || {};
         mesh.userData.isGprUndergroundPipe = true;
         mesh.userData.gprCenterlinePoints = cleanPoints;
         mesh.userData.gprPipeColorKey = pipeColorKey;
+        mesh.userData.gprPipeLegacyColorKey = legacyColorKey;
         mesh.userData.gprPipeMeta = mergedMeta;
         mesh.name = meta.name || mesh.name || "地下管道可点击对象";
         applyGprPipeSavedColorIfAny(mesh);
@@ -5681,6 +6475,9 @@
         window.currentPcdMesh = null;
         window.currentPcdGroup = null;
         window.currentImportedInspectionMapGroup = null;
+        // GPR 处理会重建 WebGL 场景，旧的规划线对象已经不属于当前 scene。
+        // 先清空引用，避免后续隐藏规划线时误处理旧场景对象。
+        window.gprScanPlanGroup = null;
         // 注意：不要在这里清空 gprHasInspectionMapLayerLoaded。
         // 如果本次处理前已经加载过当前点云地图，下面会在新场景中自动重新加载并融合显示。
         window.gprCamera = null;
@@ -5851,6 +6648,9 @@
                     annoGroup.add(ring);
 
                     // 记录圆心和半径 + 在坐标轴上的投影
+                    // 注意：材质保存/恢复使用的是二维剖面标注身份，而不是 worldX/worldY/worldZ。
+                    // 这样即使下次三维场景按点云地图 Z 字路径融合摆放，管道材质 key 仍然稳定。
+                    const annotationIdentity = makeGprAnnotationIdentityFromBlob(blob, seg, segIndex);
                     const centerObj = {
                         id: globalCenterId++,
                         center: new THREE.Vector3(worldX, worldY, worldZ),
@@ -5858,6 +6658,21 @@
                         zCoord: depth,   // 对应 z 轴的坐标值 (m, down)
                         yCoord: worldZ,  // 对应 y 轴的坐标值 (m)
                         segIndex: segIndex,
+                        segmentName: annotationIdentity.segmentName,
+                        segmentToken: annotationIdentity.segmentToken,
+                        blobSource: annotationIdentity.blobSource,
+                        annotationStableKey: annotationIdentity.annotationStableKey,
+                        annotationLocalId: annotationIdentity.annotationLocalId,
+                        annotationRow: annotationIdentity.annotationRow,
+                        annotationCol: annotationIdentity.annotationCol,
+                        annotationRadius: annotationIdentity.annotationRadius,
+                        source: blob.source || annotationIdentity.blobSource,
+                        autoKey: blob.autoKey || null,
+                        manualIndex: Number.isFinite(Number(blob.manualIndex)) ? Number(blob.manualIndex) : null,
+                        forcedIndex: Number.isFinite(Number(blob.forcedIndex)) ? Number(blob.forcedIndex) : null,
+                        rawRow: Number(blob.row),
+                        rawCol: Number(blob.col),
+                        rawRadius: Number(blob.radius),
                         linkMode: blob.linkMode || "normal",
                         pipeGroupId: blob.pipeGroupId || null,
                         pipeGroupNo: blob.pipeGroupNo || null,
@@ -6013,8 +6828,9 @@
                         && segSet.size === centers.length;
 
                     const autoPipeColorKey = makeGprPipeColorKeyFromCenters(centers, { source: "auto" });
+                    const autoLegacyColorKey = makeGprPipeLegacyColorKeyFromCenters(centers, { source: "auto" });
                     const autoDefaultColorHex = color.getHex();
-                    const autoRenderColorHex = resolveGprPipeColorHexByKey(autoPipeColorKey, autoDefaultColorHex);
+                    const autoRenderColorHex = resolveGprPipeColorHexByKey(autoPipeColorKey, autoDefaultColorHex, [autoLegacyColorKey]);
 
                     if (canUseSmoothTube) {
                         const avgRadius = centers.reduce((sum, item) => sum + item.radius, 0) / centers.length;
@@ -6027,7 +6843,7 @@
                             registerGprPipePickMesh(
                                 smoothTube,
                                 centers.map(item => item.center),
-                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey }
+                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey, legacyColorKey: autoLegacyColorKey }
                             );
                             pipelineGroup.add(smoothTube);
                         }
@@ -6044,7 +6860,7 @@
                             registerGprPipePickMesh(
                                 cylinder,
                                 [e.a.center, e.b.center],
-                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey }
+                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey, legacyColorKey: autoLegacyColorKey }
                             );
                             pipelineGroup.add(cylinder);
                         });
@@ -6109,7 +6925,11 @@
                         source: "forced",
                         pipeGroupId: pipeInfo.pipeGroupId || ""
                     });
-                    const forcedRenderColorHex = resolveGprPipeColorHexByKey(forcedPipeColorKey, pipeColorHex);
+                    const forcedLegacyColorKey = makeGprPipeLegacyColorKeyFromCenters(run, {
+                        source: "forced",
+                        pipeGroupId: pipeInfo.pipeGroupId || ""
+                    });
+                    const forcedRenderColorHex = resolveGprPipeColorHexByKey(forcedPipeColorKey, pipeColorHex, [forcedLegacyColorKey]);
                     let mesh = null;
 
                     if (PIPE_SMOOTH_CONFIG.enabled && run.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth) {
@@ -6141,7 +6961,7 @@
                             registerGprPipePickMesh(
                                 cylinder,
                                 [a.center, b.center],
-                                { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
+                                { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, legacyColorKey: forcedLegacyColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
                             );
                             onePipeGroup.add(cylinder);
                             forcedEdgeCount++;
@@ -6152,7 +6972,7 @@
                     registerGprPipePickMesh(
                         mesh,
                         run.map(item => item.center),
-                        { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
+                        { source: "forced", name: "手动倾斜管道", colorHex: pipeColorHex, colorKey: forcedPipeColorKey, legacyColorKey: forcedLegacyColorKey, pipeGroupId: pipeInfo.pipeGroupId || "" }
                     );
                     onePipeGroup.add(mesh);
                     forcedEdgeCount += Math.max(1, run.length - 1);
@@ -6226,9 +7046,13 @@
             // 👆==================== 🌟 修改结束 ====================👆
         }
 
-        // 3.4 画三维坐标轴（x(m), y(m), z(m,down)）
+        // 3.4 画三维坐标轴 / 地下环境长方体。
+        // 有点云地图扫描规划时，使用“扫描矩形有方向长方体”；没有规划时保留原来的全局轴对齐显示。
         if (maxDepth > 0) {
-            addAxes(scene, bounds, maxDepth);
+            const usedOrientedBox = usePlannedLayout && addOrientedAxesFromScanPlan(scene, bounds, maxDepth);
+            if (!usedOrientedBox) {
+                addAxes(scene, bounds, maxDepth);
+            }
         }
 
         // 4. 相机围绕“数据中心”绕圈观察
@@ -6417,6 +7241,7 @@
 
             // ✅ 新增：动态智能显隐（视角自适应）逻辑
             // 实时判断你的视角在哪里，自动把挡在眼前的网格藏起来，露出内部数据
+            // 注意：这里保持原代码的侧面网格视角隐藏逻辑，不按旋转盒体法线重新计算。
             if (window.boxFaces && window.boxCenter && camera) {
                 const camX = camera.position.x;
                 const camY = camera.position.y;
@@ -6654,9 +7479,223 @@
         return mesh;
     }
 
+    // 在按规划扫描路径融合 GPR 剖面时，地下环境长方体必须跟随扫描矩形的真实方向绘制。
+    // 原来的 addAxes() 使用 bounds.minX/maxX/minZ/maxZ 生成全局坐标轴对齐包围盒；
+    // 当“加载当前点云地图”后规划的扫描区域存在旋转角时，长方体会看起来相对点云地图斜放。
+    // 这里使用 currentGprScanPlan.preview.rectangleSlam 的四个角点直接生成“有方向”的长方体。
+    function addOrientedAxesFromScanPlan(scene, bounds, maxDepth) {
+        if (!scene || !isFinite(maxDepth) || maxDepth <= 0) return false;
+
+        const rectSlam = window.currentGprScanPlan?.preview?.rectangleSlam;
+        if (!Array.isArray(rectSlam) || rectSlam.length < 4) return false;
+
+        const topCorners = rectSlam.slice(0, 4).map(p => {
+            const v = slamPointToGprVector(p);
+            return new THREE.Vector3(v.x, 0, v.z);
+        });
+
+        const valid = topCorners.every(v => Number.isFinite(v.x) && Number.isFinite(v.z));
+        if (!valid) return false;
+
+        const bottomCorners = topCorners.map(v => new THREE.Vector3(v.x, -maxDepth, v.z));
+        const center = new THREE.Vector3();
+        topCorners.forEach(v => center.add(v));
+        center.multiplyScalar(0.25);
+        center.y = -maxDepth / 2;
+
+        const lengthA = topCorners[0].distanceTo(topCorners[1]);
+        const lengthB = topCorners[1].distanceTo(topCorners[2]);
+        const xLen = Math.max(lengthA, 0.01);
+        const zLen = Math.max(lengthB, 0.01);
+        const yLen = maxDepth;
+        const span = Math.max(xLen, zLen, yLen, 1.0);
+        const nTicks = 5;
+        const labelSize = span * 0.06;
+
+        const axisGroup = new THREE.Group();
+        axisGroup.name = "按扫描矩形方向生成的地下环境长方体";
+        scene.add(axisGroup);
+
+        window.gprAxesGroup = axisGroup;
+        window.gprBoxIsOriented = true;
+        window.gprOrientedBoxFaceItems = [];
+        if (window.isGridVisible === false) {
+            axisGroup.visible = false;
+        }
+
+        window.boxFaces = {
+            bottom: new THREE.Group(),
+            top: new THREE.Group(),
+            back: new THREE.Group(),
+            front: new THREE.Group(),
+            left: new THREE.Group(),
+            right: new THREE.Group()
+        };
+        Object.values(window.boxFaces).forEach(g => axisGroup.add(g));
+        window.boxFaces.top.visible = false;
+        window.boxCenter = center.clone();
+
+        function axisLine(start, end, colorHex = 0xffffff) {
+            const geom = new THREE.BufferGeometry().setFromPoints([start, end]);
+            const mat = new THREE.LineBasicMaterial({ color: colorHex });
+            return new THREE.Line(geom, mat);
+        }
+
+        function lerpPoint(a, b, t) {
+            return new THREE.Vector3().lerpVectors(a, b, t);
+        }
+
+        function addLineTo(group, a, b, colorHex = 0xffffff) {
+            group.add(axisLine(a, b, colorHex));
+        }
+
+        // 白色外框：顶面只保留边框，不创建顶面纹理，实现“开顶”。
+        for (let i = 0; i < 4; i++) {
+            const j = (i + 1) % 4;
+            addLineTo(axisGroup, topCorners[i], topCorners[j], 0xffffff);
+            addLineTo(axisGroup, bottomCorners[i], bottomCorners[j], 0xffffff);
+            addLineTo(axisGroup, topCorners[i], bottomCorners[i], 0xffffff);
+        }
+
+        // 底面青色网格。
+        for (let i = 1; i < nTicks; i++) {
+            const t = i / nTicks;
+            addLineTo(window.boxFaces.bottom, lerpPoint(bottomCorners[0], bottomCorners[1], t), lerpPoint(bottomCorners[3], bottomCorners[2], t), 0x00ffff);
+            addLineTo(window.boxFaces.bottom, lerpPoint(bottomCorners[0], bottomCorners[3], t), lerpPoint(bottomCorners[1], bottomCorners[2], t), 0x00ffff);
+        }
+
+        // 两个长侧面黄色网格：0-1 和 3-2。
+        for (let i = 1; i < nTicks; i++) {
+            const t = i / nTicks;
+            addLineTo(window.boxFaces.left, lerpPoint(topCorners[0], topCorners[1], t), lerpPoint(bottomCorners[0], bottomCorners[1], t), 0xffff00);
+            addLineTo(window.boxFaces.right, lerpPoint(topCorners[3], topCorners[2], t), lerpPoint(bottomCorners[3], bottomCorners[2], t), 0xffff00);
+
+            addLineTo(window.boxFaces.left, lerpPoint(topCorners[0], bottomCorners[0], t), lerpPoint(topCorners[1], bottomCorners[1], t), 0xffff00);
+            addLineTo(window.boxFaces.right, lerpPoint(topCorners[3], bottomCorners[3], t), lerpPoint(topCorners[2], bottomCorners[2], t), 0xffff00);
+        }
+
+        // 两个短侧面红色网格：1-2 和 0-3。
+        for (let i = 1; i < nTicks; i++) {
+            const t = i / nTicks;
+            addLineTo(window.boxFaces.front, lerpPoint(topCorners[1], topCorners[2], t), lerpPoint(bottomCorners[1], bottomCorners[2], t), 0xff0000);
+            addLineTo(window.boxFaces.back, lerpPoint(topCorners[0], topCorners[3], t), lerpPoint(bottomCorners[0], bottomCorners[3], t), 0xff0000);
+
+            addLineTo(window.boxFaces.front, lerpPoint(topCorners[1], bottomCorners[1], t), lerpPoint(topCorners[2], bottomCorners[2], t), 0xff0000);
+            addLineTo(window.boxFaces.back, lerpPoint(topCorners[0], bottomCorners[0], t), lerpPoint(topCorners[3], bottomCorners[3], t), 0xff0000);
+        }
+
+        // 土壤纹理面：使用自定义四边形，保证面跟随扫描矩形方向，而不是全局 X/Z 方向。
+        const textureLoader = new THREE.TextureLoader();
+        const soilTexture = textureLoader.load('/img/soil_diffuse2.jpg');
+        soilTexture.wrapS = THREE.RepeatWrapping;
+        soilTexture.wrapT = THREE.RepeatWrapping;
+
+        const soilMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            map: soilTexture,
+            transparent: true,
+            opacity: 0.65,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+
+        function createQuadFace(points, repeatU, repeatV) {
+            const geom = new THREE.BufferGeometry();
+            const verts = new Float32Array([
+                points[0].x, points[0].y, points[0].z,
+                points[1].x, points[1].y, points[1].z,
+                points[2].x, points[2].y, points[2].z,
+                points[0].x, points[0].y, points[0].z,
+                points[2].x, points[2].y, points[2].z,
+                points[3].x, points[3].y, points[3].z
+            ]);
+            const uvs = new Float32Array([
+                0, 0,
+                repeatU, 0,
+                repeatU, repeatV,
+                0, 0,
+                repeatU, repeatV,
+                0, repeatV
+            ]);
+            geom.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+            geom.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+            geom.computeVertexNormals();
+            return geom;
+        }
+
+        function addQuadFace(group, name, points, repeatU, repeatV) {
+            const mesh = new THREE.Mesh(createQuadFace(points, repeatU, repeatV), soilMaterial);
+            mesh.name = name;
+            group.add(mesh);
+
+            const faceCenter = new THREE.Vector3();
+            points.forEach(p => faceCenter.add(p));
+            faceCenter.multiplyScalar(0.25);
+
+            const normal = new THREE.Vector3()
+                .crossVectors(
+                    new THREE.Vector3().subVectors(points[1], points[0]),
+                    new THREE.Vector3().subVectors(points[2], points[1])
+                )
+                .normalize();
+            if (normal.dot(new THREE.Vector3().subVectors(faceCenter, center)) < 0) {
+                normal.multiplyScalar(-1);
+            }
+
+            window.gprOrientedBoxFaceItems.push({ name, group, normal, center: faceCenter });
+            return mesh;
+        }
+
+        const repeatPerMeter = 0.5;
+        addQuadFace(window.boxFaces.bottom, 'bottom', [bottomCorners[0], bottomCorners[1], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, zLen * repeatPerMeter);
+        addQuadFace(window.boxFaces.left, 'left', [topCorners[0], topCorners[1], bottomCorners[1], bottomCorners[0]], xLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace(window.boxFaces.right, 'right', [topCorners[3], topCorners[2], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace(window.boxFaces.front, 'front', [topCorners[1], topCorners[2], bottomCorners[2], bottomCorners[1]], zLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace(window.boxFaces.back, 'back', [topCorners[0], topCorners[3], bottomCorners[3], bottomCorners[0]], zLen * repeatPerMeter, yLen * repeatPerMeter);
+
+        function makeTextSprite(text) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 96;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.font = 'bold 26px Microsoft YaHei, Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = '#000000';
+            ctx.shadowBlur = 8;
+            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+            const texture = new THREE.CanvasTexture(canvas);
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+            sprite.scale.set(labelSize * 2.2, labelSize * 0.8, 1);
+            sprite.renderOrder = 60;
+            return sprite;
+        }
+
+        // 简化标签：只标注扫描长度方向、横向和深度方向，避免原有全局坐标刻度误导。
+        const xLabel = makeTextSprite('扫描长度方向');
+        xLabel.position.copy(lerpPoint(bottomCorners[0], bottomCorners[1], 0.5)).add(new THREE.Vector3(0, -labelSize * 0.5, 0));
+        axisGroup.add(xLabel);
+
+        const zLabel = makeTextSprite('扫描宽度方向');
+        zLabel.position.copy(lerpPoint(bottomCorners[1], bottomCorners[2], 0.5)).add(new THREE.Vector3(0, -labelSize * 0.5, 0));
+        axisGroup.add(zLabel);
+
+        const yLabel = makeTextSprite('深度');
+        yLabel.position.copy(lerpPoint(topCorners[0], bottomCorners[0], 0.5));
+        axisGroup.add(yLabel);
+
+        console.log('✅ 已按规划扫描矩形方向生成地下环境长方体，避免全局轴对齐包围盒导致的斜放问题。');
+        return true;
+    }
+
     // 在场景中添加一个三维包围盒和彩色网格（适配深色主题）
     function addAxes(scene, bounds, maxDepth) {
         if (!isFinite(maxDepth) || maxDepth <= 0) return;
+
+        window.gprBoxIsOriented = false;
+        window.gprOrientedBoxFaceItems = null;
 
         const axisGroup = new THREE.Group();
         scene.add(axisGroup);
@@ -11926,21 +12965,29 @@
                         taskPrefix: "scan"
                     });
 
-                    // 4. 在三维重建页点云地图中绘制矩形范围和 Z 字形路径虚线
+                    // 4. 在三维重建页点云地图中绘制矩形范围和 Z 字形路径虚线。
+                    //    此时只预览，不直接发送，先进入微调模式。
                     renderScanPlanOnGpr(plan);
+                    btnSendFault.innerText = "🛠️ 等待微调...";
+
+                    const finalPlan = await enterScanPlanAdjustmentMode(plan, { source: "fault" });
+                    if (!finalPlan) {
+                        btnSendFault.innerText = "已取消";
+                        return;
+                    }
 
                     btnSendFault.innerText = "⏳ 发送路径...";
 
-                    // 5. 发送完整航点给履带小车；小车不再自行规划扫描路径
-                    await sendScanPlanToCrawler(plan);
+                    // 5. 用户确认微调后，才发送完整航点给履带小车；小车不再自行规划扫描路径。
+                    await sendScanPlanToCrawler(finalPlan);
 
-                    console.log("📍 上位机规划扫描路径已下发：", plan);
-                    btnSendFault.innerText = `✅ 已发送${plan.waypoints.length}个航点`;
+                    console.log("📍 上位机规划扫描路径已微调并下发：", finalPlan);
+                    btnSendFault.innerText = `✅ 已发送${finalPlan.waypoints.length}个航点`;
 
-                    const extendTip = plan.params.autoExtended
-                        ? `，末段自动延长 ${plan.params.extensionLength}m，实际L=${plan.params.length}m`
+                    const extendTip = finalPlan.params.autoExtended
+                        ? `，末段自动延长 ${finalPlan.params.extensionLength}m，实际L=${finalPlan.params.length}m`
                         : "";
-                    setStatus(`✅ 已规划并下发履带小车扫描路径：设置L=${plan.params.requestedLength}m${extendTip}，W=${plan.params.width}m，夹角=${plan.params.angleDeg}°，航点${plan.waypoints.length}个。`, "success");
+                    setStatus(`✅ 已确认微调并下发履带小车扫描路径：设置L=${finalPlan.params.requestedLength}m${extendTip}，W=${finalPlan.params.width}m，夹角=${finalPlan.params.angleDeg}°，航点${finalPlan.waypoints.length}个。`, "success");
 
                 } catch (err) {
                     console.error("⚠️ 扫描路径规划或发送失败:", err);

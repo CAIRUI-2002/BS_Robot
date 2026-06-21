@@ -4217,3 +4217,255 @@ input[type="range"]::-webkit-slider-thumb {
     background: rgba(110, 80, 0, 0.45);
     box-shadow: 0 0 10px rgba(255, 214, 80, 0.45);
 }
+
+
+/* ==========================================
+   ✅ 三维重建页：履带小车扫描区域微调面板
+   ========================================== */
+.gpr-scan-adjust-panel {
+    position: absolute;
+    top: 42px;
+    right: 14px;
+    width: 315px;
+    z-index: 80;
+    display: none;
+    padding: 10px;
+    box-sizing: border-box;
+    background: rgba(3, 22, 42, 0.94);
+    border: 1px solid rgba(0, 229, 255, 0.75);
+    border-radius: 8px;
+    box-shadow: 0 0 18px rgba(0, 229, 255, 0.28), inset 0 0 12px rgba(0, 120, 255, 0.18);
+    color: #eaf6ff;
+    font-size: 12px;
+    pointer-events: auto;
+}
+
+.scan-adjust-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 14px;
+    font-weight: bold;
+    color: #ffffff;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(120, 200, 255, 0.25);
+}
+
+.scan-adjust-close {
+    width: 24px;
+    height: 24px;
+    line-height: 22px;
+    padding: 0;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 120, 120, 0.8);
+    background: rgba(120, 20, 20, 0.8);
+    color: #fff;
+    cursor: pointer;
+}
+
+.scan-adjust-desc {
+    margin: 8px 0;
+    color: #a8e0ff;
+    line-height: 1.45;
+}
+
+.scan-adjust-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 5px;
+    margin-bottom: 8px;
+    padding: 7px;
+    border: 1px solid rgba(120, 200, 255, 0.22);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.22);
+    font-family: Consolas, Monaco, monospace;
+}
+
+.scan-adjust-metrics b {
+    color: #00ffcc;
+    font-weight: bold;
+}
+
+.scan-adjust-section {
+    margin-top: 7px;
+}
+
+.scan-adjust-label {
+    margin-bottom: 4px;
+    color: #87c8ff;
+    font-weight: bold;
+}
+
+.scan-adjust-buttons {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 5px;
+}
+
+.scan-adjust-buttons button,
+.scan-adjust-footer button {
+    height: 28px;
+    border-radius: 4px;
+    border: 1px solid rgba(120, 200, 255, 0.6);
+    background: linear-gradient(180deg, rgba(12, 72, 115, 0.92), rgba(5, 35, 70, 0.92));
+    color: #eaf6ff;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.scan-adjust-buttons button:hover,
+.scan-adjust-footer button:hover {
+    filter: brightness(1.15);
+    border-color: #00e5ff;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.35);
+}
+
+.scan-adjust-footer {
+    display: grid;
+    grid-template-columns: 1fr 0.8fr 1fr;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(120, 200, 255, 0.22);
+}
+
+.scan-adjust-primary {
+    background: linear-gradient(180deg, rgba(0, 170, 120, 0.96), rgba(0, 90, 65, 0.96)) !important;
+    border-color: rgba(0, 255, 190, 0.8) !important;
+    color: #ffffff !important;
+    font-weight: bold;
+}
+
+.scan-adjust-secondary {
+    background: linear-gradient(180deg, rgba(74, 78, 94, 0.9), rgba(32, 38, 54, 0.92)) !important;
+}
+
+/* 让扫描区域微调面板以三维画布容器为定位基准 */
+.gpr-view-3d #threeContainer {
+    position: relative;
+}
+
+/* ==========================================
+   ✅ 修复：扫描区域微调面板避开右下角履带车控制区
+   说明：右下角 .crawler-control-stack 宽约 150px，right=22px；
+   微调面板右侧预留 190px，避免被“发送破损点坐标 / 履带车控制”遮挡。
+   ========================================== */
+.gpr-scan-adjust-panel {
+    top: 72px !important;
+    right: 190px !important;
+    width: 330px !important;
+    z-index: 260 !important;
+    max-height: calc(100% - 96px);
+    overflow-y: auto;
+}
+
+/* 控制区仍然可操作，但层级低于微调面板；两者已错位，正常不会互相覆盖。 */
+.crawler-control-stack {
+    z-index: 120;
+}
+
+/* 小屏兜底：当三维视图宽度不足时，微调面板改贴左侧，仍避开右下角控制区。 */
+@media screen and (max-width: 1100px) {
+    .gpr-scan-adjust-panel {
+        left: 14px !important;
+        right: auto !important;
+        top: 56px !important;
+        width: min(330px, calc(100% - 210px)) !important;
+        min-width: 280px;
+        max-height: calc(100% - 80px);
+    }
+}
+
+@media screen and (max-width: 760px) {
+    .gpr-scan-adjust-panel {
+        left: 10px !important;
+        right: 10px !important;
+        width: auto !important;
+        min-width: 0;
+        top: 56px !important;
+        max-height: calc(100% - 260px);
+    }
+}
+
+/* ==========================================
+   ✅ 调整：扫描区域微调面板固定到三维视图左上角，并支持新增平移按钮
+   ========================================== */
+.gpr-scan-adjust-panel {
+    top: 14px !important;
+    left: 14px !important;
+    right: auto !important;
+    width: 348px !important;
+    z-index: 300 !important;
+    max-height: calc(100% - 28px) !important;
+    overflow-y: auto !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-buttons button {
+    min-width: 0;
+    padding-left: 4px;
+    padding-right: 4px;
+    white-space: nowrap;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media screen and (max-width: 760px) {
+    .gpr-scan-adjust-panel {
+        left: 10px !important;
+        right: 10px !important;
+        top: 10px !important;
+        width: auto !important;
+        max-height: calc(100% - 20px) !important;
+    }
+}
+
+
+/* ==========================================
+   ✅ 简化：扫描区域微调面板只保留最小调整步长
+   ========================================== */
+.gpr-scan-adjust-panel {
+    width: 318px !important;
+    padding: 9px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-desc {
+    margin: 6px 0 !important;
+    line-height: 1.35 !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-metrics.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    padding: 6px !important;
+    margin-bottom: 6px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-metrics.compact span:nth-child(4) {
+    grid-column: 1 / -1;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-section {
+    margin-top: 5px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-label {
+    margin-bottom: 3px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-buttons,
+.gpr-scan-adjust-panel .scan-adjust-buttons.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-buttons button {
+    height: 28px !important;
+    font-size: 12px !important;
+}
+
+.gpr-scan-adjust-panel .scan-adjust-footer {
+    margin-top: 8px !important;
+    padding-top: 7px !important;
+}
