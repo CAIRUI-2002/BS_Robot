@@ -5913,16 +5913,186 @@
         };
     }
 
-    function getPlannedGprPathBottomPoints(maxDepth) {
+    function getPlannedGprPathBottomPoints(maxDepth, groundY = 0) {
         if (!hasUsableGprScanPlanForFusion()) return null;
 
         const zigzag = window.currentGprScanPlan.preview.zigzagSlam;
         if (!Array.isArray(zigzag) || zigzag.length < 2) return null;
 
+        const topY = Number.isFinite(Number(groundY)) ? Number(groundY) : 0;
+        const bottomY = topY - maxDepth;
+
         return zigzag.map(p => {
             const v = slamPointToGprVector(p);
-            return new THREE.Vector3(v.x, -maxDepth, v.z);
+            return new THREE.Vector3(v.x, bottomY, v.z);
         });
+    }
+
+    // ==========================================
+    // ✅ GPR 地下环境与点云地面高度对齐工具
+    // 说明：GPR 剖面以前默认以 Y=0 作为地面顶面；加载点云地图后，点云地面
+    // 往往并不正好等于 Y=0，所以地下长方体会“突出地面”。这里根据已冻结的
+    // 当前点云/本地点云快照，估计扫描区域附近的真实地面 Y，并作为 Depth=0 基准。
+    // ==========================================
+    function makeMatrixFromTransformSnapshot(transform, fallbackScale = { x: 1, y: 1, z: 1 }) {
+        const matrix = new THREE.Matrix4();
+        const pos = new THREE.Vector3(
+            Number(transform?.position?.x || 0),
+            Number(transform?.position?.y || 0),
+            Number(transform?.position?.z || 0)
+        );
+        const rot = new THREE.Euler(
+            Number(transform?.rotation?.x || 0),
+            Number(transform?.rotation?.y || 0),
+            Number(transform?.rotation?.z || 0),
+            "XYZ"
+        );
+        const quat = new THREE.Quaternion().setFromEuler(rot);
+        const scale = new THREE.Vector3(
+            Number(transform?.scale?.x ?? fallbackScale.x),
+            Number(transform?.scale?.y ?? fallbackScale.y),
+            Number(transform?.scale?.z ?? fallbackScale.z)
+        );
+        matrix.compose(pos, quat, scale);
+        return matrix;
+    }
+
+    function getGprScanFootprintXZBoxForGroundY(margin = 0.75) {
+        const xs = [];
+        const zs = [];
+
+        const rect = window.currentGprScanPlan?.preview?.rectangleSlam;
+        if (Array.isArray(rect) && rect.length >= 4) {
+            rect.slice(0, 4).forEach(p => {
+                const v = slamPointToGprVector(p);
+                if (Number.isFinite(v.x) && Number.isFinite(v.z)) {
+                    xs.push(v.x);
+                    zs.push(v.z);
+                }
+            });
+        }
+
+        const zigzag = window.currentGprScanPlan?.preview?.zigzagSlam;
+        if (!xs.length && Array.isArray(zigzag) && zigzag.length >= 2) {
+            zigzag.forEach(p => {
+                const v = slamPointToGprVector(p);
+                if (Number.isFinite(v.x) && Number.isFinite(v.z)) {
+                    xs.push(v.x);
+                    zs.push(v.z);
+                }
+            });
+        }
+
+        if (!xs.length || !zs.length) return null;
+        return {
+            minX: Math.min(...xs) - margin,
+            maxX: Math.max(...xs) + margin,
+            minZ: Math.min(...zs) - margin,
+            maxZ: Math.max(...zs) + margin
+        };
+    }
+
+    function estimateDominantGroundYFromValues(values) {
+        const arr = (Array.isArray(values) ? values : [])
+            .map(Number)
+            .filter(v => Number.isFinite(v) && Math.abs(v) < 1000);
+        if (!arr.length) return null;
+
+        // 点数很少时用中位数；点数足够时用高度直方图众数，避免树、墙、设备等高处点把地面抬高。
+        arr.sort((a, b) => a - b);
+        if (arr.length < 30) {
+            return arr[Math.floor(arr.length / 2)];
+        }
+
+        const binSize = 0.05; // 5cm，高于点云噪声但能区分地面与竖向结构
+        const bins = new Map();
+        arr.forEach(y => {
+            const key = Math.round(y / binSize);
+            bins.set(key, (bins.get(key) || 0) + 1);
+        });
+
+        let bestKey = null;
+        let bestCount = -1;
+        bins.forEach((count, key) => {
+            if (count > bestCount) {
+                bestCount = count;
+                bestKey = key;
+            }
+        });
+
+        if (bestKey === null) return arr[Math.floor(arr.length / 2)];
+        const center = bestKey * binSize;
+        const near = arr.filter(y => Math.abs(y - center) <= binSize * 1.5);
+        const picked = near.length >= 5 ? near : arr;
+        picked.sort((a, b) => a - b);
+        return picked[Math.floor(picked.length / 2)];
+    }
+
+    function collectGroundYValuesFromSnapshotPositions(positions, footprintBox = null, matrix = null) {
+        const ysNear = [];
+        const ysAll = [];
+        if (!positions || !positions.length) return { ysNear, ysAll };
+
+        const stride = Math.max(3, Math.ceil((positions.length / 3) / 60000) * 3);
+        const tmp = new THREE.Vector3();
+        for (let i = 0; i < positions.length; i += stride) {
+            tmp.set(Number(positions[i]), Number(positions[i + 1]), Number(positions[i + 2]));
+            if (!Number.isFinite(tmp.x) || !Number.isFinite(tmp.y) || !Number.isFinite(tmp.z)) continue;
+            if (matrix) tmp.applyMatrix4(matrix);
+            if (Math.abs(tmp.x) >= 9000 || Math.abs(tmp.y) >= 9000 || Math.abs(tmp.z) >= 9000) continue;
+
+            ysAll.push(tmp.y);
+            if (!footprintBox || (
+                tmp.x >= footprintBox.minX && tmp.x <= footprintBox.maxX &&
+                tmp.z >= footprintBox.minZ && tmp.z <= footprintBox.maxZ
+            )) {
+                ysNear.push(tmp.y);
+            }
+        }
+        return { ysNear, ysAll };
+    }
+
+    function estimateGprGroundYFromLoadedPointCloud() {
+        if (typeof THREE === "undefined") return 0;
+
+        const footprintBox = getGprScanFootprintXZBoxForGroundY(0.75);
+        let nearValues = [];
+        let allValues = [];
+
+        // 本地点云快照：需要把 points/group 的冻结变换一起应用，得到真实显示位置。
+        const localSnapshot = window.gprFrozenLocalPcdSnapshot;
+        if (window.gprLoadedMapSource === "local" && localSnapshot?.positions?.length) {
+            const pointMatrix = makeMatrixFromTransformSnapshot(localSnapshot.points, { x: 1, y: 1, z: 1 });
+            const groupMatrix = makeMatrixFromTransformSnapshot(localSnapshot.group, { x: 1, y: 1, z: 1 });
+            const matrix = new THREE.Matrix4().multiplyMatrices(groupMatrix, pointMatrix);
+            const collected = collectGroundYValuesFromSnapshotPositions(localSnapshot.positions, footprintBox, matrix);
+            nearValues = nearValues.concat(collected.ysNear);
+            allValues = allValues.concat(collected.ysAll);
+        }
+
+        // 当前路径页点云快照：导出时已经转换成 GPR 页世界坐标，直接取 positions 即可。
+        const currentSnapshot = window.latestImportedInspectionMapSnapshot;
+        const currentPositions = currentSnapshot?.pointCloud?.positions;
+        if (currentPositions && currentPositions.length) {
+            const collected = collectGroundYValuesFromSnapshotPositions(currentPositions, footprintBox, null);
+            nearValues = nearValues.concat(collected.ysNear);
+            allValues = allValues.concat(collected.ysAll);
+        }
+
+        // 优先用扫描区域附近点云；附近点太少时再退回整幅点云。
+        let groundY = estimateDominantGroundYFromValues(nearValues.length >= 30 ? nearValues : allValues);
+
+        // 如果没有点云快照，则使用已知的黄色电缆路径高度作为兜底；仍没有则保持原来的 Y=0。
+        if (!Number.isFinite(groundY)) {
+            const cable = currentSnapshot?.cablePath;
+            if (Array.isArray(cable) && cable.length) {
+                const cableYs = cable.map(p => Number(p.z ?? 0.08)).filter(Number.isFinite);
+                groundY = estimateDominantGroundYFromValues(cableYs);
+            }
+        }
+
+        if (!Number.isFinite(groundY)) groundY = 0;
+        return Number(groundY);
     }
 
     function reloadInspectionMapAndScanPlanAfterGprRender(usePlannedLayout) {
@@ -6310,7 +6480,12 @@
         const centerline = obj.userData.gprCenterlinePoints || [];
         const closest = findClosestPointOnPolyline(intersection.point, centerline);
         const slam = gprWorldPointToSlam(closest);
-        const depth = Math.max(0, -closest.y);
+        // GPR 剖面/管道现在会按点云地面高度 groundY 对齐，
+        // 因此深度不能再简单使用 -Y，而要以当前地下环境顶面作为 0m 基准。
+        const groundY = Number.isFinite(Number(window.gprGroundYForDepthReference))
+            ? Number(window.gprGroundYForDepthReference)
+            : 0;
+        const depth = Math.max(0, groundY - closest.y);
 
         let gpsText = "GPS未标定";
         if (typeof window.slamToGps === "function") {
@@ -6555,6 +6730,13 @@
         };
         let maxDepth = 0.0;  // 真实深度（正值，单位 m）
 
+        // ✅ 使用点云地图估计扫描区域附近真实地面高度，作为 GPR 深度 0m 基准。
+        // 这样地下长方体顶面、GPR剖面顶边、管道和深度弹窗都会跟随点云地面，
+        // 避免固定 Y=0 导致地下长方体突出地面点云。
+        const gprGroundY = estimateGprGroundYFromLoadedPointCloud();
+        window.gprGroundYForDepthReference = gprGroundY;
+        console.log("✅ GPR地下环境地面高度基准 groundY =", Number(gprGroundY.toFixed(4)));
+
         // 3.1 逐段构建 Z 字平面
         segments.forEach((seg, segIndex) => {
             const mat = useMigrated ? seg.migratedData : seg.rawData;
@@ -6568,7 +6750,7 @@
                 if (d > maxDepth) maxDepth = d;
             }
 
-            const mesh = buildSegmentMesh(mat, geo, vMin, vMax, bounds);
+            const mesh = buildSegmentMesh(mat, geo, vMin, vMax, bounds, gprGroundY);
             // ✅ 修改：将切片网格添加到我们的专属分组中
             window.gprSlicesGroup.add(mesh);
 
@@ -6629,7 +6811,7 @@
 
                     const worldX = startX + uVal * cosPhi;
                     const worldZ = startY + uVal * sinPhi; // 注意：这里在 addAxes 里被解释为 y(m)
-                    const worldY = -depth;                 // 深度向下为负（worldY）
+                    const worldY = gprGroundY - depth;     // 以点云地面 groundY 为 Depth=0，深度向下为负
 
                     // --- B. 半径动态计算 ---
                     const pixelRadius = blob.radius + CONFIG.radiusPadding;
@@ -7010,7 +7192,7 @@
         }
 
         // 3.3 路径折线（放在底部）
-        const plannedPathPoints = getPlannedGprPathBottomPoints(maxDepth);
+        const plannedPathPoints = getPlannedGprPathBottomPoints(maxDepth, gprGroundY);
         const bottomPathPoints = [];
 
         if (plannedPathPoints && plannedPathPoints.length >= 2) {
@@ -7022,7 +7204,7 @@
             for (let i = 0; i < n; i++) {
                 const x = result.pathX[i];  // x 方向（m）
                 const z = result.pathY[i];  // 横向（m）
-                const y = -maxDepth;        // 底部（最大深度处）
+                const y = gprGroundY - maxDepth; // 底部（最大深度处）
                 bottomPathPoints.push(new THREE.Vector3(x, y, z));
             }
         }
@@ -7049,9 +7231,9 @@
         // 3.4 画三维坐标轴 / 地下环境长方体。
         // 有点云地图扫描规划时，使用“扫描矩形有方向长方体”；没有规划时保留原来的全局轴对齐显示。
         if (maxDepth > 0) {
-            const usedOrientedBox = usePlannedLayout && addOrientedAxesFromScanPlan(scene, bounds, maxDepth);
+            const usedOrientedBox = usePlannedLayout && addOrientedAxesFromScanPlan(scene, bounds, maxDepth, gprGroundY);
             if (!usedOrientedBox) {
-                addAxes(scene, bounds, maxDepth);
+                addAxes(scene, bounds, maxDepth, gprGroundY);
             }
         }
 
@@ -7239,9 +7421,9 @@
             // 👇 2. 核心拦截：如果当前用户切换到了“机器人导航”或“履带车”等其他面板，直接退出，跳过极其耗费 GPU 的场景渲染
             if (window.currentActivePanel !== 'gpr') return;
 
-            // ✅ 新增：动态智能显隐（视角自适应）逻辑
-            // 实时判断你的视角在哪里，自动把挡在眼前的网格藏起来，露出内部数据
-            // 注意：这里保持原代码的侧面网格视角隐藏逻辑，不按旋转盒体法线重新计算。
+            // ✅ 动态智能显隐（视角自适应）逻辑
+            // 保持原代码的侧面网格视角隐藏逻辑：
+            // 仅根据相机在全局 X/Y/Z 方向相对 boxCenter 的位置切换各侧面网格显隐。
             if (window.boxFaces && window.boxCenter && camera) {
                 const camX = camera.position.x;
                 const camY = camera.position.y;
@@ -7372,7 +7554,7 @@
     }
 
     // 为单个剖面构建一个三维网格平面，并根据几何参数放到正确位置
-    function buildSegmentMesh(matrix, geometry, vMin, vMax, bounds) {
+    function buildSegmentMesh(matrix, geometry, vMin, vMax, bounds, groundY = 0) {
         const rows = matrix.length;
         const cols = matrix[0].length;
 
@@ -7398,7 +7580,7 @@
         let idxC = 0;
         for (let r = 0; r < rows; r++) {
             const depth = zAxis[r];      // >=0
-            const worldY = -depth;       // 深度向下为负
+            const worldY = groundY - depth; // 以点云地面 groundY 为 Depth=0，深度向下为负
 
             for (let c = 0; c < cols; c++) {
                 const u = uAxis[c];
@@ -7483,42 +7665,40 @@
     // 原来的 addAxes() 使用 bounds.minX/maxX/minZ/maxZ 生成全局坐标轴对齐包围盒；
     // 当“加载当前点云地图”后规划的扫描区域存在旋转角时，长方体会看起来相对点云地图斜放。
     // 这里使用 currentGprScanPlan.preview.rectangleSlam 的四个角点直接生成“有方向”的长方体。
-    function addOrientedAxesFromScanPlan(scene, bounds, maxDepth) {
+    function addOrientedAxesFromScanPlan(scene, bounds, maxDepth, groundY = 0) {
         if (!scene || !isFinite(maxDepth) || maxDepth <= 0) return false;
+        const topY = Number.isFinite(Number(groundY)) ? Number(groundY) : 0;
+        const bottomY = topY - maxDepth;
 
         const rectSlam = window.currentGprScanPlan?.preview?.rectangleSlam;
         if (!Array.isArray(rectSlam) || rectSlam.length < 4) return false;
 
         const topCorners = rectSlam.slice(0, 4).map(p => {
             const v = slamPointToGprVector(p);
-            return new THREE.Vector3(v.x, 0, v.z);
+            return new THREE.Vector3(v.x, topY, v.z);
         });
 
         const valid = topCorners.every(v => Number.isFinite(v.x) && Number.isFinite(v.z));
         if (!valid) return false;
 
-        const bottomCorners = topCorners.map(v => new THREE.Vector3(v.x, -maxDepth, v.z));
+        const bottomCorners = topCorners.map(v => new THREE.Vector3(v.x, bottomY, v.z));
         const center = new THREE.Vector3();
         topCorners.forEach(v => center.add(v));
         center.multiplyScalar(0.25);
-        center.y = -maxDepth / 2;
+        center.y = topY - maxDepth / 2;
 
         const lengthA = topCorners[0].distanceTo(topCorners[1]);
         const lengthB = topCorners[1].distanceTo(topCorners[2]);
         const xLen = Math.max(lengthA, 0.01);
         const zLen = Math.max(lengthB, 0.01);
         const yLen = maxDepth;
-        const span = Math.max(xLen, zLen, yLen, 1.0);
         const nTicks = 5;
-        const labelSize = span * 0.06;
 
         const axisGroup = new THREE.Group();
         axisGroup.name = "按扫描矩形方向生成的地下环境长方体";
         scene.add(axisGroup);
 
         window.gprAxesGroup = axisGroup;
-        window.gprBoxIsOriented = true;
-        window.gprOrientedBoxFaceItems = [];
         if (window.isGridVisible === false) {
             axisGroup.visible = false;
         }
@@ -7585,6 +7765,8 @@
         }
 
         // 土壤纹理面：使用自定义四边形，保证面跟随扫描矩形方向，而不是全局 X/Z 方向。
+        // 注意：土壤贴图面直接挂到 axisGroup，不挂到 window.boxFaces.xxx；
+        // 这样保留原来的“只隐藏侧面网格线”的视角隐藏逻辑，不会把土壤贴图面一起隐藏。
         const textureLoader = new THREE.TextureLoader();
         const soilTexture = textureLoader.load('/img/soil_diffuse2.jpg');
         soilTexture.wrapS = THREE.RepeatWrapping;
@@ -7623,79 +7805,147 @@
             return geom;
         }
 
-        function addQuadFace(group, name, points, repeatU, repeatV) {
+        function addQuadFace(name, points, repeatU, repeatV) {
             const mesh = new THREE.Mesh(createQuadFace(points, repeatU, repeatV), soilMaterial);
             mesh.name = name;
-            group.add(mesh);
-
-            const faceCenter = new THREE.Vector3();
-            points.forEach(p => faceCenter.add(p));
-            faceCenter.multiplyScalar(0.25);
-
-            const normal = new THREE.Vector3()
-                .crossVectors(
-                    new THREE.Vector3().subVectors(points[1], points[0]),
-                    new THREE.Vector3().subVectors(points[2], points[1])
-                )
-                .normalize();
-            if (normal.dot(new THREE.Vector3().subVectors(faceCenter, center)) < 0) {
-                normal.multiplyScalar(-1);
-            }
-
-            window.gprOrientedBoxFaceItems.push({ name, group, normal, center: faceCenter });
+            axisGroup.add(mesh);
             return mesh;
         }
 
         const repeatPerMeter = 0.5;
-        addQuadFace(window.boxFaces.bottom, 'bottom', [bottomCorners[0], bottomCorners[1], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, zLen * repeatPerMeter);
-        addQuadFace(window.boxFaces.left, 'left', [topCorners[0], topCorners[1], bottomCorners[1], bottomCorners[0]], xLen * repeatPerMeter, yLen * repeatPerMeter);
-        addQuadFace(window.boxFaces.right, 'right', [topCorners[3], topCorners[2], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, yLen * repeatPerMeter);
-        addQuadFace(window.boxFaces.front, 'front', [topCorners[1], topCorners[2], bottomCorners[2], bottomCorners[1]], zLen * repeatPerMeter, yLen * repeatPerMeter);
-        addQuadFace(window.boxFaces.back, 'back', [topCorners[0], topCorners[3], bottomCorners[3], bottomCorners[0]], zLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace('bottom', [bottomCorners[0], bottomCorners[1], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, zLen * repeatPerMeter);
+        addQuadFace('left', [topCorners[0], topCorners[1], bottomCorners[1], bottomCorners[0]], xLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace('right', [topCorners[3], topCorners[2], bottomCorners[2], bottomCorners[3]], xLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace('front', [topCorners[1], topCorners[2], bottomCorners[2], bottomCorners[1]], zLen * repeatPerMeter, yLen * repeatPerMeter);
+        addQuadFace('back', [topCorners[0], topCorners[3], bottomCorners[3], bottomCorners[0]], zLen * repeatPerMeter, yLen * repeatPerMeter);
 
-        function makeTextSprite(text) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 256;
-            canvas.height = 96;
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.font = 'bold 26px Microsoft YaHei, Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillStyle = '#ffffff';
-            ctx.shadowColor = '#000000';
-            ctx.shadowBlur = 8;
-            ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-            const texture = new THREE.CanvasTexture(canvas);
-            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-            sprite.scale.set(labelSize * 2.2, labelSize * 0.8, 1);
-            sprite.renderOrder = 60;
-            return sprite;
+        // ================= 3. 按单独加载 GPR 数据时的局部坐标效果绘制刻度 =================
+        // 说明：有点云地图并使用规划路径融合时，长方体会按扫描矩形方向旋转。
+        // 坐标轴不再显示全局 bounds 坐标值，改为和“单独加载 GPR 数据”时一致：
+        // 1) Distance(m) 从 0 开始，沿长方体长边显示 0 ~ 扫描长度；
+        // 2) 横向刻度从 0 开始，沿长方体短边显示 0 ~ 扫描宽度；
+        // 3) Depth(m) 从顶面 0 开始向下显示 0 ~ maxDepth；
+        // 4) 坐标轴基准点取“底面短边上与 Z 字形路径起点竖直对齐的点”。
+        const axisNTicks = 5;
+        const downDir = new THREE.Vector3(0, -1, 0);
+
+        const zigzagSlam = window.currentGprScanPlan?.preview?.zigzagSlam;
+        let zigzagStartTop = topCorners[0].clone();
+        if (Array.isArray(zigzagSlam) && zigzagSlam.length > 0) {
+            const startVec = slamPointToGprVector(zigzagSlam[0]);
+            if (Number.isFinite(startVec.x) && Number.isFinite(startVec.z)) {
+                zigzagStartTop = new THREE.Vector3(startVec.x, topY, startVec.z);
+            }
         }
 
-        // 简化标签：只标注扫描长度方向、横向和深度方向，避免原有全局坐标刻度误导。
-        const xLabel = makeTextSprite('扫描长度方向');
-        xLabel.position.copy(lerpPoint(bottomCorners[0], bottomCorners[1], 0.5)).add(new THREE.Vector3(0, -labelSize * 0.5, 0));
+        let originIndex = 0;
+        let bestStartDist = Infinity;
+        topCorners.forEach((corner, idx) => {
+            const dist = corner.distanceTo(zigzagStartTop);
+            if (dist < bestStartDist) {
+                bestStartDist = dist;
+                originIndex = idx;
+            }
+        });
+
+        const nextIndex = idx => (idx + 1) % 4;
+        const prevIndex = idx => (idx + 3) % 4;
+        const originFrontBottomLeft = bottomCorners[originIndex].clone();
+        const originTopLeft = topCorners[originIndex].clone();
+        const originNeighbors = [prevIndex(originIndex), nextIndex(originIndex)];
+
+        // 从起点相邻的两条边里选择更长的一条作为 Distance(m) 方向。
+        const n0 = originNeighbors[0];
+        const n1 = originNeighbors[1];
+        const d0 = bottomCorners[n0].distanceTo(originFrontBottomLeft);
+        const d1 = bottomCorners[n1].distanceTo(originFrontBottomLeft);
+        const xEndIndex = d0 >= d1 ? n0 : n1;
+        const zEndFromOriginIndex = d0 >= d1 ? n1 : n0;
+
+        const xEndBottom = bottomCorners[xEndIndex].clone();
+        const zEndFromOriginBottom = bottomCorners[zEndFromOriginIndex].clone();
+        const xDir = new THREE.Vector3().subVectors(xEndBottom, originFrontBottomLeft).normalize();
+        const zDir = new THREE.Vector3().subVectors(zEndFromOriginBottom, originFrontBottomLeft).normalize();
+        const xAxisLen = Math.max(originFrontBottomLeft.distanceTo(xEndBottom), 0.01);
+        const zAxisLen = Math.max(originFrontBottomLeft.distanceTo(zEndFromOriginBottom), 0.01);
+
+        const axisSpan = Math.max(xAxisLen, zAxisLen, yLen) || 1.0;
+        const axisTickSize = axisSpan * 0.022;
+        const axisLabelSize = axisSpan * 0.06;
+
+        // X轴刻度 (Distance)：从与 Z 字形路径起点竖直对齐的底面点开始，按局部距离 0 ~ 扫描长度显示。
+        for (let i = 0; i <= axisNTicks; i++) {
+            const ratio = i / axisNTicks;
+            const pos = originFrontBottomLeft.clone().add(xDir.clone().multiplyScalar(xAxisLen * ratio));
+            axisGroup.add(axisLine(pos, pos.clone().add(downDir.clone().multiplyScalar(axisTickSize))));
+
+            const val = xAxisLen * ratio;
+            const label = makeTextSprite(val.toFixed(2), "#ffffff");
+            label.scale.set(axisLabelSize, axisLabelSize, 1);
+            label.position.copy(pos).add(downDir.clone().multiplyScalar(axisTickSize * 1.35));
+            if (i === axisNTicks) {
+                label.position.add(xDir.clone().multiplyScalar(-axisTickSize * 1.3));
+            }
+            axisGroup.add(label);
+        }
+
+        const xLabel = makeTextSprite("Distance(m)", "#ffffff");
+        xLabel.scale.set(axisLabelSize * 1.5, axisLabelSize * 1.5, 1);
+        xLabel.position.copy(originFrontBottomLeft)
+            .add(xDir.clone().multiplyScalar(xAxisLen / 2))
+            .add(downDir.clone().multiplyScalar(axisTickSize * 3.5));
         axisGroup.add(xLabel);
 
-        const zLabel = makeTextSprite('扫描宽度方向');
-        zLabel.position.copy(lerpPoint(bottomCorners[1], bottomCorners[2], 0.5)).add(new THREE.Vector3(0, -labelSize * 0.5, 0));
-        axisGroup.add(zLabel);
+        // Y轴刻度 (Depth)：顶面为 0，向下到 maxDepth。
+        for (let i = 0; i <= axisNTicks; i++) {
+            const d = yLen * i / axisNTicks;
+            const pos = originTopLeft.clone().add(downDir.clone().multiplyScalar(d));
+            axisGroup.add(axisLine(pos, pos.clone().add(xDir.clone().multiplyScalar(-axisTickSize))));
 
-        const yLabel = makeTextSprite('深度');
-        yLabel.position.copy(lerpPoint(topCorners[0], bottomCorners[0], 0.5));
+            const label = makeTextSprite(d.toFixed(1), "#ffffff");
+            label.scale.set(axisLabelSize, axisLabelSize, 1);
+            label.position.copy(pos).add(xDir.clone().multiplyScalar(-axisTickSize * 1.35));
+            axisGroup.add(label);
+        }
+
+        const yLabel = makeTextSprite("Depth(m)", "#ffffff");
+        yLabel.scale.set(axisLabelSize * 1.5, axisLabelSize * 1.5, 1);
+        yLabel.position.copy(originTopLeft)
+            .add(xDir.clone().multiplyScalar(-axisTickSize * 4))
+            .add(downDir.clone().multiplyScalar(yLen / 2));
         axisGroup.add(yLabel);
 
-        console.log('✅ 已按规划扫描矩形方向生成地下环境长方体，避免全局轴对齐包围盒导致的斜放问题。');
+        // 横向短边刻度：保持原始视觉习惯，放在 Distance 轴末端的短边上；数值按局部宽度 0 ~ 扫描宽度显示，不再显示负值。
+        const zStartBottom = xEndBottom.clone();
+        const zEndBottom = xEndBottom.clone().add(zDir.clone().multiplyScalar(zAxisLen));
+        for (let i = 0; i <= axisNTicks; i++) {
+            const ratio = i / axisNTicks;
+            const pos = zStartBottom.clone().add(zDir.clone().multiplyScalar(zAxisLen * ratio));
+            axisGroup.add(axisLine(pos, pos.clone().add(downDir.clone().multiplyScalar(axisTickSize))));
+
+            const val = zAxisLen * ratio;
+            const label = makeTextSprite(val.toFixed(2), "#ffffff");
+            label.scale.set(axisLabelSize, axisLabelSize, 1);
+            label.position.copy(pos)
+                .add(xDir.clone().multiplyScalar(axisTickSize * 0.65))
+                .add(downDir.clone().multiplyScalar(axisTickSize * 1.25));
+            if (i === 0) {
+                label.position
+                    .add(xDir.clone().multiplyScalar(axisTickSize * 0.4))
+                    .add(zDir.clone().multiplyScalar(axisTickSize * 0.5));
+            }
+            axisGroup.add(label);
+        }
+
+        console.log('✅ 已按单独加载GPR数据的局部坐标效果生成地下环境坐标轴：Distance/横向刻度从0开始，Depth从顶面0开始。');
         return true;
     }
 
     // 在场景中添加一个三维包围盒和彩色网格（适配深色主题）
-    function addAxes(scene, bounds, maxDepth) {
+    function addAxes(scene, bounds, maxDepth, groundY = 0) {
         if (!isFinite(maxDepth) || maxDepth <= 0) return;
-
-        window.gprBoxIsOriented = false;
-        window.gprOrientedBoxFaceItems = null;
+        const topY = Number.isFinite(Number(groundY)) ? Number(groundY) : 0;
+        const bottomY = topY - maxDepth;
 
         const axisGroup = new THREE.Group();
         scene.add(axisGroup);
@@ -7726,7 +7976,7 @@
 
         // ================= 1. 画出外围的整体长方体线框 (白色) =================
         const cx = (bounds.maxX + bounds.minX) / 2;
-        const cy = -maxDepth / 2;
+        const cy = topY - maxDepth / 2;
         const cz = (bounds.maxZ + bounds.minZ) / 2;
         const boxGeom = new THREE.BoxGeometry(xLen, yLen, zLen);
         const edges = new THREE.EdgesGeometry(boxGeom);
@@ -7754,42 +8004,42 @@
         // 记录长方体的几何中心，用于后续判断相机视角
         window.boxCenter = new THREE.Vector3(
             (bounds.minX + bounds.maxX) / 2,
-            -maxDepth / 2,
+            topY - maxDepth / 2,
             (bounds.minZ + bounds.maxZ) / 2
         );
 
         // 底面 (y = -maxDepth) & 顶面 (y = 0) 网格 (青色 Cyan)
         for (let i = 1; i < nTicks; i++) {
             let tX = (xLen / nTicks) * i;
-            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.minZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.maxZ), 0x00ffff));
+            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX + tX, bottomY, bounds.minZ), new THREE.Vector3(bounds.minX + tX, bottomY, bounds.maxZ), 0x00ffff));
         }
         for (let i = 1; i < nTicks; i++) {
             let tZ = (zLen / nTicks) * i;
-            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0x00ffff));
+            window.boxFaces.bottom.add(axisLine(new THREE.Vector3(bounds.minX, bottomY, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, bottomY, bounds.minZ + tZ), 0x00ffff));
         }
 
         // 后面 (z = bounds.minZ) & 前面 (z = bounds.maxZ) 网格 (红色 Red)
         for (let i = 1; i < nTicks; i++) {
             let tY = (yLen / nTicks) * i;
-            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.minZ), new THREE.Vector3(bounds.maxX, -tY, bounds.minZ), 0xff0000));
-            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.maxZ), new THREE.Vector3(bounds.maxX, -tY, bounds.maxZ), 0xff0000));
+            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX, topY - tY, bounds.minZ), new THREE.Vector3(bounds.maxX, topY - tY, bounds.minZ), 0xff0000));
+            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX, topY - tY, bounds.maxZ), new THREE.Vector3(bounds.maxX, topY - tY, bounds.maxZ), 0xff0000));
         }
         for (let i = 1; i < nTicks; i++) {
             let tX = (xLen / nTicks) * i;
-            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.minZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.minZ), 0xff0000));
-            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX + tX, 0, bounds.maxZ), new THREE.Vector3(bounds.minX + tX, -maxDepth, bounds.maxZ), 0xff0000));
+            window.boxFaces.back.add(axisLine(new THREE.Vector3(bounds.minX + tX, topY, bounds.minZ), new THREE.Vector3(bounds.minX + tX, bottomY, bounds.minZ), 0xff0000));
+            window.boxFaces.front.add(axisLine(new THREE.Vector3(bounds.minX + tX, topY, bounds.maxZ), new THREE.Vector3(bounds.minX + tX, bottomY, bounds.maxZ), 0xff0000));
         }
 
         // 左侧面 (x = bounds.minX) & 右侧面 (x = bounds.maxX) 网格 (黄色 Yellow)
         for (let i = 1; i < nTicks; i++) {
             let tY = (yLen / nTicks) * i;
-            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, -tY, bounds.minZ), new THREE.Vector3(bounds.minX, -tY, bounds.maxZ), 0xffff00));
-            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, -tY, bounds.minZ), new THREE.Vector3(bounds.maxX, -tY, bounds.maxZ), 0xffff00));
+            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, topY - tY, bounds.minZ), new THREE.Vector3(bounds.minX, topY - tY, bounds.maxZ), 0xffff00));
+            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, topY - tY, bounds.minZ), new THREE.Vector3(bounds.maxX, topY - tY, bounds.maxZ), 0xffff00));
         }
         for (let i = 1; i < nTicks; i++) {
             let tZ = (zLen / nTicks) * i;
-            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.minX, -maxDepth, bounds.minZ + tZ), 0xffff00));
-            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, 0, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, -maxDepth, bounds.minZ + tZ), 0xffff00));
+            window.boxFaces.left.add(axisLine(new THREE.Vector3(bounds.minX, topY, bounds.minZ + tZ), new THREE.Vector3(bounds.minX, bottomY, bounds.minZ + tZ), 0xffff00));
+            window.boxFaces.right.add(axisLine(new THREE.Vector3(bounds.maxX, topY, bounds.minZ + tZ), new THREE.Vector3(bounds.maxX, bottomY, bounds.minZ + tZ), 0xffff00));
         }
         // ================= 升级：为 6 个面添加真实的土壤纹理贴图 (无光照渲染版) =================
         const textureLoader = new THREE.TextureLoader();
@@ -7830,7 +8080,7 @@
         // 4. 创建长方体的 5 个面（不渲染顶面）
         // 顶面不创建纹理面，保持地下场景“开顶”显示，避免遮挡内部管道与剖面。
         const bottomFace = new THREE.Mesh(planeY, soilMaterial);
-        bottomFace.position.set(cx, -maxDepth, cz);
+        bottomFace.position.set(cx, bottomY, cz);
         bottomFace.rotation.x = Math.PI / 2;
         axisGroup.add(bottomFace);
 
@@ -7856,8 +8106,8 @@
 
         // ================= 3. 添加坐标轴刻度与文字 (白色) =================
         // 选择前端左下角为原点基准
-        const originFrontBottomLeft = new THREE.Vector3(bounds.minX, -maxDepth, bounds.maxZ);
-        const originTopLeft = new THREE.Vector3(bounds.minX, 0, bounds.maxZ);
+        const originFrontBottomLeft = new THREE.Vector3(bounds.minX, bottomY, bounds.maxZ);
+        const originTopLeft = new THREE.Vector3(bounds.minX, topY, bounds.maxZ);
 
         // X轴刻度 (Distance)
         for (let i = 0; i <= nTicks; i++) {
