@@ -168,8 +168,10 @@
                         <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
 
                         <input type="file" id="pcdLocalFileInput" accept=".pcd,.json" multiple style="display: none;" />
-                        <button id="btnLoadLocalPcd" class="action-btn-small btn-pcd" title="同时选择电脑本地的 .pcd 点云文件和同名 .geo.json 经纬度元数据文件">本地地图</button>
-                        <button id="btnClearGprPointCloudMap" class="action-btn-small btn-clear-pcd" title="清除三维重建页面中已加载的点云地图、电缆路径和破损点显示">清除地图</button>
+                        <button id="btnLoadLocalPcd" class="action-btn-small btn-pcd"
+                            title="同时选择电脑本地的 .pcd 点云文件和同名 .geo.json 经纬度元数据文件">本地地图</button>
+                        <button id="btnClearGprPointCloudMap" class="action-btn-small btn-clear-pcd"
+                            title="清除三维重建页面中已加载的点云地图、电缆路径和破损点显示">清除地图</button>
                         <span id="gprStatus" class="gpr-status"></span>
                     </div>
 
@@ -181,9 +183,11 @@
                         <div class="gpr-view gpr-view-2d" id="mig2dView">
                             <div class="gpr-view-header">
                                 <h3>偏移后二维剖面</h3>
-                                <button id="btnManualMigAnnotation" class="action-btn-small manual-anno-btn">手动标注</button>
-                                <button id="btnForcedPipeAnnotation" class="action-btn-small manual-pipe-btn">倾斜管道</button>
-                                <button id="btnClearGprAnnotationCalibration" class="action-btn-small calibration-clear-btn"
+                                <button id="btnManualMigAnnotation" class="action-btn-small manual-anno-btn">标注</button>
+                                <button id="btnForcedPipeAnnotation"
+                                    class="action-btn-small manual-pipe-btn">分类</button>
+                                <button id="btnClearGprAnnotationCalibration"
+                                    class="action-btn-small calibration-clear-btn"
                                     title="清除当前GPR数据文件夹中的 gpr_annotation_calibration.json 校准文件，恢复自动识别结果">清除校准</button>
                             </div>
                             <canvas id="mig2dCanvas"></canvas>
@@ -197,16 +201,26 @@
                                     onclick="document.getElementById('gprPipeInfoPopup').style.display='none'">×</div>
                                 <div class="gpr-pipe-popup-title-row">
                                     <div id="gprPipePopupTitle" class="gpr-pipe-popup-title">🟡 地下管道测点信息</div>
-                                    <button type="button" id="gprPipeColorToggleBtn" class="pipe-color-toggle-btn">▼</button>
+                                    <button type="button" id="gprPipeColorToggleBtn"
+                                        class="pipe-color-toggle-btn">▼</button>
                                 </div>
-                                <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps" class="hl-text">--</span></div>
-                                <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth" class="hl-text">--</span></div>
+                                <div class="gpr-pipe-popup-item"><strong>经纬度：</strong><span id="gprPipePopupGps"
+                                        class="hl-text">--</span></div>
+                                <div class="gpr-pipe-popup-item"><strong>深度：</strong><span id="gprPipePopupDepth"
+                                        class="hl-text">--</span></div>
                                 <div id="gprPipeColorSection" class="gpr-pipe-color-section">
                                     <div class="gpr-pipe-color-actions collapsed">
-                                        <button type="button" data-gpr-pipe-material="cable" class="pipe-color-btn pipe-color-cable"><span class="pipe-color-dot"></span>地下电缆</button>
-                                        <button type="button" data-gpr-pipe-material="pvc" class="pipe-color-btn pipe-color-pvc"><span class="pipe-color-dot"></span>PVC管</button>
-                                        <button type="button" data-gpr-pipe-material="metal" class="pipe-color-btn pipe-color-metal"><span class="pipe-color-dot"></span>金属管道</button>
-                                        <button type="button" data-gpr-pipe-material-reset="1" class="pipe-color-btn pipe-color-reset">恢复默认</button>
+                                        <button type="button" data-gpr-pipe-material="cable"
+                                            class="pipe-color-btn pipe-color-cable"><span
+                                                class="pipe-color-dot"></span>地下电缆</button>
+                                        <button type="button" data-gpr-pipe-material="pvc"
+                                            class="pipe-color-btn pipe-color-pvc"><span
+                                                class="pipe-color-dot"></span>PVC管</button>
+                                        <button type="button" data-gpr-pipe-material="metal"
+                                            class="pipe-color-btn pipe-color-metal"><span
+                                                class="pipe-color-dot"></span>金属管道</button>
+                                        <button type="button" data-gpr-pipe-material-reset="1"
+                                            class="pipe-color-btn pipe-color-reset">恢复默认</button>
                                     </div>
                                 </div>
                             </div>
@@ -226,7 +240,8 @@
                                         📍 发送破损点坐标
                                     </button>
 
-                                    <button id="btnManualScanArea" class="action-btn-small crawler-action-btn manual-scan-btn"
+                                    <button id="btnManualScanArea"
+                                        class="action-btn-small crawler-action-btn manual-scan-btn"
                                         title="在三维视图中指定扫描中心和扫描方向，不依赖电缆破损点">
                                         🧭 指定扫描区域
                                     </button>
@@ -340,7 +355,8 @@
                                     <button id="btnManualDrawCable" class="header-btn-mini">
                                         📍 手动绘制电缆
                                     </button>
-                                    <button id="btnSavePcd" class="header-btn-mini" title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
+                                    <button id="btnSavePcd" class="header-btn-mini"
+                                        title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
                                         💾 保存点云+GPS
                                     </button>
 

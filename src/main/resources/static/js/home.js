@@ -12494,8 +12494,8 @@
                 if (gpsTextEl) {
                     // 如果是固定解，状态文字标绿；如果是不稳定解，状态文字标橙
                     const statusClass = isGoodSignal ? 'status-fixed' : 'status-float';
-                    // 保留 8 位小数，精度最高
-                    gpsTextEl.innerHTML = `${rawLat.toFixed(8)}°, ${rawLon.toFixed(8)}° [<span class="${statusClass}">${status}</span>]`;
+                    // 左下角实时经纬度只显示 6 位小数；内部 GPS 数据仍保留原始精度，不影响标定和航点计算。
+                    gpsTextEl.innerHTML = `${rawLat.toFixed(6)}°, ${rawLon.toFixed(6)}° [<span class="${statusClass}">${status}</span>]`;
                 }
                 // 👆==========================================👆
 
