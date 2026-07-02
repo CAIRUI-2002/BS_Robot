@@ -104,6 +104,9 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private int lastSignalDirection = 0;
     private float lastAutoYawCmd = 0.0f;
     private float lastAutoVyCmd = 0.0f;
+    // ✅ 新增：S 型正弦波启动相位偏移。
+    // signal=1 向右找线时从右转半周启动；signal=2 向左找线时从左转半周启动。
+    private float autoSweepPhaseOffsetRad = 0.0f;
     private boolean autoCornerStrafeMode = false;
     private long lastAutoModeSwitchTime = 0L;
     private int lastSignalForPrediction = -1;
@@ -296,8 +299,26 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             this.lastAngleControlTime = 0L;
             this.lastAngleErrorDeg = 0.0f;
 
+            // ✅ 修改：只对 signal=1 做启动相位修正，signal=2 保持原始 0 相位。
+            // 现场现象：机器狗在电缆右侧、signal=2 向左找线时，原始 0 相位左摆幅度更合适；
+            // 因此不再给 signal=2 加 +π/2，避免左摆持续时间变短、幅度变小。
+            if (now - this.lastSignalTime <= PIPELINE_TIMEOUT_MS) {
+                if (this.pipelineSignal == 1) {
+                    // signal=1：机器狗在电缆左侧，需要向右找线。
+                    // 给一个适中的负相位，避免启动时先向左摆；不直接进入右摆峰值，现场更柔和。
+                    this.autoSweepPhaseOffsetRad = (float) (-Math.PI / 3.0);
+                } else {
+                    // signal=2 或 signal=0：保持原始 0 相位。
+                    // signal=2 时沿用原代码的左摆启动过程；signal=0 时正常从中心摆动开始。
+                    this.autoSweepPhaseOffsetRad = 0.0f;
+                }
+            } else {
+                // 如果启动时管线仪数据已经超时，不强行指定初始摆动方向。
+                this.autoSweepPhaseOffsetRad = 0.0f;
+            }
+
             updateCommand(0, 0, 0, 0, 3); 
-            System.out.println("🚀 自动巡线已启动：仅 S 型前进扫描（左右横移已禁用）");
+            System.out.println("🚀 自动巡线已启动：仅 S 型前进扫描（左右横移已禁用，相位已跟随当前 signal）");
         } else {
             // 关闭时，速度归零
             this.vx = 0;
@@ -550,7 +571,9 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                 } else {
                     float baseSweepYaw = S_BASE_YAW + sweepStrength;
                     double phase = ((now - autoTrackStartTime) % S_SWEEP_PERIOD_MS) / (double) S_SWEEP_PERIOD_MS;
-                    float sWaveYaw = (float) Math.sin(phase * Math.PI * 2.0) * baseSweepYaw;
+                    float sWaveYaw = (float) Math.sin(
+                            phase * Math.PI * 2.0 + this.autoSweepPhaseOffsetRad
+                    ) * baseSweepYaw;
 
                     float signalBias = 0.0f;
                     if (activeDirection == 1) {

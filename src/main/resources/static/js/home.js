@@ -33,7 +33,7 @@
     // 对应 Python 代码中的核心参数
     const AUC_CONFIG = {
         SAMPLING_RATE: 10000,   // 采样率
-        PULSE_THRESHOLD: 800,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
+        PULSE_THRESHOLD: 1200,   // 粗筛：主脉冲识别阈值 (绝对值 > 500)
         DISTANCE_MIN: 1000,     // 粗筛：最小脉冲间隔 (防止重复触发)
 
         // --- 核心判定参数 ---
@@ -1654,9 +1654,9 @@
     // 说明：履带小车只接收规划好的 GPS 航点，不再自行生成扫描路径。
     // ==========================================
     const DEFAULT_SCAN_PARAMS = {
-        length: 2.2,
-        width: 1.2,
-        angleDeg: 30.0
+        length: 8,
+        width: 3.5,
+        angleDeg: 23.0
     };
 
     function normalizeRad(rad) {
