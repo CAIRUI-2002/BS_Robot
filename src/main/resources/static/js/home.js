@@ -5504,34 +5504,42 @@
             stompClient.subscribe('/topic/robot_status', function (message) {
                 try {
                     const statusData = JSON.parse(message.body);
+                    const readNumber = (value) => {
+                        const n = Number(value);
+                        return Number.isFinite(n) ? n : null;
+                    };
 
                     // 👇 新增：解析并更新预计剩余续航里程 (如果有该字段) 👇
-                    if (statusData.remainMile !== undefined) {
+                    const remainMile = readNumber(statusData.remainMile);
+                    if (remainMile !== null) {
                         const elRemainMile = document.getElementById('remainMileValue');
                         if (elRemainMile) {
                             // 保留 2 位小数显示，加上单位
-                            elRemainMile.textContent = statusData.remainMile.toFixed(2) + ' km';
+                            elRemainMile.textContent = remainMile.toFixed(2) + ' km';
                         }
                     }
 
                     // 1. 更新左侧电池显示 (低于20%触发红色高亮预警)
+                    const batteryLeft = readNumber(statusData.batteryLeft);
                     const elBatLeft = document.getElementById('batteryLeftValue');
-                    if (elBatLeft) {
-                        elBatLeft.textContent = statusData.batteryLeft.toFixed(0) + ' %';
-                        elBatLeft.style.color = statusData.batteryLeft < 20 ? '#ff4444' : '#00ff00';
+                    if (elBatLeft && batteryLeft !== null) {
+                        elBatLeft.textContent = batteryLeft.toFixed(0) + ' %';
+                        elBatLeft.style.color = batteryLeft < 20 ? '#ff4444' : '#00ff00';
                     }
 
                     // 2. 更新右侧电池显示
+                    const batteryRight = readNumber(statusData.batteryRight);
                     const elBatRight = document.getElementById('batteryRightValue');
-                    if (elBatRight) {
-                        elBatRight.textContent = statusData.batteryRight.toFixed(0) + ' %';
-                        elBatRight.style.color = statusData.batteryRight < 20 ? '#ff4444' : '#00ff00';
+                    if (elBatRight && batteryRight !== null) {
+                        elBatRight.textContent = batteryRight.toFixed(0) + ' %';
+                        elBatRight.style.color = batteryRight < 20 ? '#ff4444' : '#00ff00';
                     }
 
                     // 3. 更新前侧照明灯状态徽章
                     const elLightFront = document.getElementById('lightFrontBadge');
-                    if (elLightFront) {
-                        if (statusData.lightFront === 1) {
+                    const lightFront = readNumber(statusData.lightFront);
+                    if (elLightFront && statusData.lightFront !== undefined) {
+                        if (lightFront === 1) {
                             elLightFront.textContent = '开启';
                             elLightFront.className = 'status-badge online';
                         } else {
@@ -5542,8 +5550,9 @@
 
                     // 4. 更新后侧照明灯状态徽章
                     const elLightBack = document.getElementById('lightBackBadge');
-                    if (elLightBack) {
-                        if (statusData.lightBack === 1) {
+                    const lightBack = readNumber(statusData.lightBack);
+                    if (elLightBack && statusData.lightBack !== undefined) {
+                        if (lightBack === 1) {
                             elLightBack.textContent = '开启';
                             elLightBack.className = 'status-badge online';
                         } else {
