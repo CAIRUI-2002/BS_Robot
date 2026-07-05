@@ -59,13 +59,6 @@
             </div>
         </header>
 
-        <div id="inspectResultDropdown" class="inspect-result-dropdown hidden">
-            <div class="inspect-result-title">📋 近五次巡检结果</div>
-            <div id="inspectHistoryList" class="inspect-history-list">
-                <div class="inspect-empty">暂无保存记录</div>
-            </div>
-        </div>
-
         <div class="layout">
             <aside class="left-panel">
 
@@ -487,6 +480,33 @@
                             </div>
                         </div>
                     </div>
+
+                </div>
+
+                <div id="inspectResultPanel" class="inspect-result-panel hidden">
+                    <div class="inspect-result-toolbar">
+                        <div class="inspect-result-heading">巡检结果</div>
+                        <button id="btnRefreshInspectionResults" class="inspect-refresh-btn" type="button">刷新</button>
+                    </div>
+
+                    <div class="inspect-result-table-wrap">
+                        <table class="inspect-result-table">
+                            <thead>
+                                <tr>
+                                    <th>巡检结果名称</th>
+                                    <th>保存时间</th>
+                                    <th>巡检长度</th>
+                                    <th>破损点数</th>
+                                </tr>
+                            </thead>
+                            <tbody id="inspectResultTableBody">
+                                <tr>
+                                    <td colspan="4" class="inspect-result-empty">暂无保存记录</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
 
             </main>
         </div>

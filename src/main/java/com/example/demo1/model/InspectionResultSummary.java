@@ -8,5 +8,6 @@ public class InspectionResultSummary {
     private String name;
     private String savedAt;
     private int pathPointCount;
+    private Double pathLengthMeters;
     private int faultCount;
 }

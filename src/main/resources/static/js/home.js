@@ -5041,6 +5041,9 @@
                 const btnInspect = $("btnInspectResult");
                 if (btnInspect) btnInspect.classList.add("active");
                 if (inspectResultPanel) { inspectResultPanel.classList.remove("hidden"); inspectResultPanel.style.display = 'flex'; }
+                if (window.renderInspectionHistoryList) {
+                    window.renderInspectionHistoryList();
+                }
             } else if (target === 'arm') {
                 // 侧边栏独立切换到机械臂面板
                 if (armPanel) { armPanel.classList.remove("hidden"); armPanel.style.display = 'flex'; }
@@ -5068,9 +5071,7 @@
                 e.preventDefault();
                 e.stopPropagation();
 
-                if (window.toggleInspectionHistoryDropdown) {
-                    window.toggleInspectionHistoryDropdown();
-                }
+                switchMainPanel('inspectResult');
             });
         }
 
@@ -10586,9 +10587,6 @@
                     window.lastFaultCablePos = null;
                 }
 
-                const dropdown = document.getElementById("inspectResultDropdown");
-                if (dropdown) dropdown.classList.add("hidden");
-
                 setStatus("✅ 已加载历史巡检结果：" + (record.name || ""), "success");
 
             } catch (err) {
@@ -10598,10 +10596,14 @@
         }
 
         window.renderInspectionHistoryList = async function () {
-            const listEl = document.getElementById("inspectHistoryList");
-            if (!listEl) return;
+            const tbody = document.getElementById("inspectResultTableBody");
+            if (!tbody) return;
 
-            listEl.innerHTML = `<div class="inspect-empty">正在读取巡检历史...</div>`;
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="inspect-result-empty">正在读取巡检历史...</td>
+                </tr>
+            `;
 
             try {
                 const res = await fetch(INSPECTION_API.listResults);
@@ -10613,48 +10615,71 @@
                 const history = await res.json();
 
                 if (!Array.isArray(history) || history.length === 0) {
-                    listEl.innerHTML = `<div class="inspect-empty">暂无保存记录</div>`;
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="4" class="inspect-result-empty">暂无保存记录</td>
+                        </tr>
+                    `;
                     return;
                 }
 
-                listEl.innerHTML = "";
+                tbody.innerHTML = "";
 
                 history.slice(0, 5).forEach((item, index) => {
-                    const btn = document.createElement("button");
-                    btn.className = "inspect-history-item";
-                    btn.type = "button";
-
                     const timeText = item.savedAt
                         ? new Date(item.savedAt).toLocaleString()
                         : "--";
 
                     const faultCount = item.faultCount ?? 0;
                     const pathCount = item.pathPointCount ?? 0;
+                    const pathLength = Number(item.pathLengthMeters);
+                    const pathLengthText = Number.isFinite(pathLength)
+                        ? "约 " + pathLength.toFixed(pathLength >= 10 ? 1 : 2) + " m"
+                        : "--";
 
-                    btn.innerHTML = `
-                <div class="inspect-history-name">${index + 1}. ${item.name || "巡检结果"}</div>
-                <div class="inspect-history-meta">
-                    保存时间：${timeText}｜路径点：${pathCount}｜破损点：${faultCount}
-                </div>
-            `;
+                    const tr = document.createElement("tr");
+                    tr.className = "inspect-result-row";
+                    tr.tabIndex = 0;
+                    tr.title = "点击加载该巡检结果";
 
-                    btn.onclick = () => loadInspectionResultFromServer(item.id);
+                    const nameTd = document.createElement("td");
+                    nameTd.className = "inspect-result-name";
+                    nameTd.textContent = item.name || ("巡检结果 " + (index + 1));
 
-                    listEl.appendChild(btn);
+                    const timeTd = document.createElement("td");
+                    timeTd.textContent = timeText;
+
+                    const pathTd = document.createElement("td");
+                    pathTd.textContent = pathLengthText;
+                    pathTd.title = "由保存的电缆路径坐标估算；原始路径点数：" + pathCount;
+
+                    const faultTd = document.createElement("td");
+                    faultTd.textContent = String(faultCount);
+
+                    tr.appendChild(nameTd);
+                    tr.appendChild(timeTd);
+                    tr.appendChild(pathTd);
+                    tr.appendChild(faultTd);
+
+                    tr.onclick = () => loadInspectionResultFromServer(item.id);
+                    tr.onkeydown = (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            loadInspectionResultFromServer(item.id);
+                        }
+                    };
+
+                    tbody.appendChild(tr);
                 });
 
             } catch (err) {
                 console.error("读取巡检历史失败：", err);
-                listEl.innerHTML = `<div class="inspect-empty">读取失败，请检查后端接口</div>`;
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="inspect-result-empty error">读取失败，请检查后端接口</td>
+                    </tr>
+                `;
             }
-        };
-
-        window.toggleInspectionHistoryDropdown = function () {
-            const dropdown = document.getElementById("inspectResultDropdown");
-            if (!dropdown) return;
-
-            window.renderInspectionHistoryList();
-            dropdown.classList.toggle("hidden");
         };
 
         const btnSaveInspectionResult = document.getElementById("btnSaveInspectionResult");
@@ -10662,15 +10687,10 @@
             btnSaveInspectionResult.onclick = saveCurrentInspectionResultToServer;
         }
 
-        document.addEventListener("click", function (e) {
-            const dropdown = document.getElementById("inspectResultDropdown");
-            const btn = document.getElementById("btnInspectResult");
-
-            if (!dropdown || dropdown.classList.contains("hidden")) return;
-            if (dropdown.contains(e.target) || btn?.contains(e.target)) return;
-
-            dropdown.classList.add("hidden");
-        });
+        const btnRefreshInspectionResults = document.getElementById("btnRefreshInspectionResults");
+        if (btnRefreshInspectionResults) {
+            btnRefreshInspectionResults.onclick = () => window.renderInspectionHistoryList();
+        }
 
         // E. 网格与交互
         const gridHelper = new THREE.GridHelper(50, 50, 0x888888, 0x444444);

@@ -91,6 +91,7 @@ public InspectionResultService(JdbcTemplate jdbcTemplate) {
                 List<FaultPoint> faults = parseFaults(faultsJson);
 
                 item.setPathPointCount(cablePath.size());
+                item.setPathLengthMeters(calculatePathLengthMeters(cablePath));
                 item.setFaultCount(faults.size());
 
                 list.add(item);
@@ -151,5 +152,30 @@ public InspectionResultService(JdbcTemplate jdbcTemplate) {
         } catch (Exception e) {
             return new ArrayList<>();
         }
+    }
+
+    private Double calculatePathLengthMeters(List<CablePoint> cablePath) {
+        if (cablePath == null || cablePath.size() < 2) {
+            return 0.0;
+        }
+
+        double length = 0.0;
+        CablePoint prev = null;
+
+        for (CablePoint current : cablePath) {
+            if (current == null || current.getX() == null || current.getY() == null) {
+                continue;
+            }
+
+            if (prev != null) {
+                double dx = current.getX() - prev.getX();
+                double dy = current.getY() - prev.getY();
+                length += Math.hypot(dx, dy);
+            }
+
+            prev = current;
+        }
+
+        return length;
     }
 }
