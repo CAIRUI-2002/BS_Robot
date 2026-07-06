@@ -316,7 +316,7 @@
 
                 <div id="pathFaultPanel" class="path-fault-panel hidden">
                     <div class="pf-col pf-side">
-                        <div class="pf-header">信号强度监测 (声波/电磁波)</div>
+                        <div class="pf-header">信号强度监测 (电磁波/声波)</div>
 
                         <div class="pf-body" id="signalDataArea">
                             <canvas id="signalCanvas"></canvas>
@@ -350,7 +350,7 @@
                                     </button>
                                     <button id="btnSavePcd" class="header-btn-mini"
                                         title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
-                                        💾 保存点云+GPS
+                                        💾 保存点云
                                     </button>
 
                                     <div class="dropdown-group">
@@ -517,17 +517,17 @@
                     <span class="btn-icon"></span> 机器狗站立
                 </button>
 
-                <button id="btnDogControl" class="tech-mode-btn">
-                    <span class="btn-icon"></span> 常规模式
-                </button>
-
                 <button id="btnAutoTrack" class="tech-mode-btn">
                     <span class="btn-icon">📡</span> 启动自动巡线
                 </button>
 
+                <button id="btnFindFaultOverlay" class="tech-mode-btn">
+                    <span class="btn-icon">🔍</span> 寻找破损点
+                </button>
+
                 <button id="btnShowArmModal" class="tech-mode-btn"
                     style="background: linear-gradient(180deg, rgba(16, 60, 110, 0.85) 0%, rgba(6, 28, 55, 0.95) 100%);">
-                    <span class="btn-icon">🦾</span> 机械臂控制面板
+                    <span class="btn-icon"></span> 机械臂控制面板
                 </button>
             </div>
 
@@ -765,9 +765,9 @@
 
                             <div class="arm-quick-actions">
                                 <button onclick="moveArmToFrontPress()"
-                                    class="test-sequence-btn capture-btn-left full-w">🎯 向前按点</button>
+                                    class="test-sequence-btn capture-btn-left full-w">🎯 前伸</button>
                                 <button onclick="moveArmToBackPress()" class="test-sequence-btn capture-btn full-w">🎯
-                                    向后按点</button>
+                                    后伸</button>
                                 <button onclick="moveArmToZero()" class="test-sequence-btn full-w">🔄
                                     归零</button>
                             </div>

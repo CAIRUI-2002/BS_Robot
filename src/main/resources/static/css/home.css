@@ -1311,13 +1311,18 @@ screen and (max-height: 800px) {
 
 /* 比例分配核心代码 */
 .pf-side {
-    flex: 1;
-    /* 左右两侧各占 1 份 */
+    flex: 0.7;
+    /* 默认侧栏占 0.7 份；左侧信号栏会单独压缩到 0.7 份 */
 }
 
 .pf-center {
-    flex: 2;
-    /* 中间占 2 份 */
+    flex: 1.7;
+    /* 中间地图区占 1.7 份 */
+}
+
+.path-fault-panel>.pf-side:first-child {
+    flex: 0.6;
+    /* 左侧信号监测区占 0.6 份 */
 }
 
 /* 内部标题样式 */
@@ -2196,9 +2201,10 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 /* ==========================================
-   🟡 针对“启动自动巡线”按钮的专属金色定制
+   🟡 自动巡线与寻找破损点按钮的专属金色定制
    ========================================== */
-#btnAutoTrack {
+#btnAutoTrack,
+#btnFindFaultOverlay {
     /* 采用高贵稳重的暗金渐变 */
     background: linear-gradient(180deg, rgba(130, 95, 20, 0.85) 0%, rgba(50, 35, 5, 0.95) 100%);
 
@@ -2215,8 +2221,9 @@ input[type="range"]::-webkit-slider-thumb {
         inset 0 2px 4px rgba(255, 255, 255, 0.25);
 }
 
-/* 自动巡线悬浮态 */
-#btnAutoTrack:hover {
+/* 自动巡线/寻找破损点悬浮态 */
+#btnAutoTrack:hover,
+#btnFindFaultOverlay:hover {
     color: #ffffff;
     background: linear-gradient(180deg, rgba(180, 135, 30, 0.95) 0%, rgba(80, 55, 10, 0.95) 100%);
     border-top-color: #ffffff;
@@ -2227,8 +2234,9 @@ input[type="range"]::-webkit-slider-thumb {
         inset 0 2px 5px rgba(255, 255, 255, 0.5);
 }
 
-/* 自动巡线按下态 */
-#btnAutoTrack:active {
+/* 自动巡线/寻找破损点按下态 */
+#btnAutoTrack:active,
+#btnFindFaultOverlay:active {
     background: linear-gradient(180deg, rgba(30, 20, 5, 0.95) 0%, rgba(80, 55, 10, 0.95) 100%);
     box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.9);
     border-top-color: #886000;

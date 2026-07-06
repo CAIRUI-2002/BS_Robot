@@ -4966,45 +4966,7 @@
         // ✅ 初始化偏移后二维剖面的手动红圈标注按钮和鼠标事件
         initManualMigAnnotationFeature();
 
-        const btnDogStand = $("btnDogStand");  // 机器狗站立
-        const btnDogWalk = $("btnDogControl"); // 运动控制
-
-        // ✅ G. 站立/趴下 切换按钮 (保持 Mode 1 和 Mode 4)
-        if (btnDogStand) {
-            let isDogStanding = false;
-
-            btnDogStand.addEventListener('click', function () {
-                if (!isDogStanding) {
-                    // === 站立 ===
-                    console.log("🚀 指令: 机器狗站立 (Mode 1)");
-                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.STAND, true);
-
-                    this.textContent = "机器狗趴下";
-                    this.classList.add("active");
-                    setStatus("发送指令：站立模式", "success");
-                    isDogStanding = true;
-                } else {
-                    // === 趴下 ===
-                    console.log("🚀 指令: 机器狗趴下 (Mode 4)");
-                    sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
-
-                    this.textContent = "机器狗站立";
-                    this.classList.remove("active");
-                    setStatus("发送指令：趴下模式", "warning");
-                    isDogStanding = false;
-                }
-            });
-        }
-
-        // ✅ H. 运动控制按钮 (回退到 Mode 3)
-        if (btnDogWalk) {
-            btnDogWalk.addEventListener('click', function () {
-                console.log("点击: 进入常规运动模式 (Mode 3)");
-                // 发送 Mode 3
-                sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.WALK, true);
-                setStatus("发送指令：常规运动模式", "success");
-            });
-        }
+        const btnDogStand = $("btnDogStand");  // 机器狗站立/趴下
 
         // --- B. 初始化 WebSocket 连接 (机器狗) ---
         connectWebSocket();
@@ -5214,6 +5176,7 @@
             }
         });
         // ✅ G. 绑定新增的模式切换按钮 (防重复终极版)
+        let dogStandWalkTimer = null;
         if (btnDogStand) {
             // 使用 dataset 在 DOM 元素上存储状态，防止变量污染
             // 0 = 趴下, 1 = 站立
@@ -5237,15 +5200,21 @@
 
                 if (!isStanding) {
                     // === 当前是趴下 -> 切换为站立 ===
-                    console.log("🚀 [执行] 切换到: 站立 (Mode 1)");
+                    console.log("🚀 [执行] 切换到: 站立 (Mode 1)，随后自动进入常规模式 (Mode 3)");
 
-                    // 发送指令
+                    // 先站立，再给底层一点状态切换时间后进入常规足式模式。
                     sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.STAND, true);
+                    if (dogStandWalkTimer) clearTimeout(dogStandWalkTimer);
+                    dogStandWalkTimer = setTimeout(() => {
+                        if (this.dataset.status !== "1") return;
+                        sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.WALK, true);
+                        setStatus("已站立并进入常规模式", "success");
+                    }, 800);
 
                     // 更新 UI
                     this.textContent = "机器狗趴下";
                     this.classList.add("active");
-                    setStatus("发送指令：站立模式", "success");
+                    setStatus("发送指令：站立，准备进入常规模式", "success");
 
                     // 更新状态
                     this.dataset.status = "1";
@@ -5255,6 +5224,10 @@
                     console.log("🚀 [执行] 切换到: 趴下 (Mode 4)");
 
                     // 发送指令
+                    if (dogStandWalkTimer) {
+                        clearTimeout(dogStandWalkTimer);
+                        dogStandWalkTimer = null;
+                    }
                     sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.LIE_DOWN, true);
 
                     // 更新 UI
@@ -5266,15 +5239,6 @@
                     this.dataset.status = "0";
                 }
             };
-        }
-
-        if (btnDogWalk) {
-            btnDogWalk.addEventListener('click', function () {
-                console.log("点击: 运动控制模式");
-                // 发送控制指令：Mode = 6
-                sendMoveCommand(0.0, 0.0, 0.0, 0.0, 3.0, true); // 3.0 对应后端的 "常规模式"
-                setStatus("发送指令：运动控制模式", "success");
-            });
         }
         // ==========================================
         // ✅ 新增：定时获取机械臂实时角度
@@ -11258,9 +11222,7 @@
                     }
                     const btn2 = document.getElementById("btnFindFaultOverlay");
                     if (btn2) {
-                        btn2.innerText = "🔍 寻找破损点";
-                        btn2.style.color = "#ffaa00";
-                        btn2.style.border = "1px solid #ffaa00";
+                        btn2.innerHTML = '<span class="btn-icon">🔍</span> 寻找破损点';
                     }
                 }
             } else {
@@ -12312,31 +12274,11 @@
                 }
             };
             // ========================================================
-            // ✅✅✅ 新增：注入“寻找破损点”悬浮按钮逻辑
+            // ✅ 绑定底部“寻找破损点”按钮逻辑
             // ========================================================
-            const btnFault = document.createElement('button');
-            btnFault.innerText = "🔍 寻找破损点";
-            btnFault.id = "btnFindFaultOverlay";
-            btnFault.style.position = "absolute";
-            btnFault.style.top = "240px"; // 放在跟踪电缆按钮下方
-            btnFault.style.right = "10px";
-            btnFault.style.zIndex = "999";
-            btnFault.style.padding = "8px 12px";
-            btnFault.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
-            btnFault.style.border = "1px solid #ffaa00"; // 橙黄色主题
-            btnFault.style.color = "#ffaa00";
-            btnFault.style.borderRadius = "4px";
-            btnFault.style.cursor = "pointer";
-            btnFault.style.fontSize = "14px";
-            btnFault.style.fontWeight = "bold";
-            btnFault.style.transition = "all 0.3s";
-
-            btnFault.onmouseover = () => { btnFault.style.backgroundColor = "rgba(255, 170, 0, 0.2)"; };
-            btnFault.onmouseout = () => { btnFault.style.backgroundColor = "rgba(0, 0, 0, 0.6)"; };
-
-            container.appendChild(btnFault);
-
-            btnFault.onclick = function () {
+            const btnFault = document.getElementById("btnFindFaultOverlay");
+            if (btnFault) {
+                btnFault.onclick = function () {
                 // 如果已经在寻找（或去起点的路上），点击则停止
                 if (isNavigating && isFaultFindingMode) {
                     console.log("🛑 用户点击停止寻找破损点");
@@ -12360,9 +12302,7 @@
                 maxFaultIdx = -1;
                 bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
                 isFaultFindingMode = true;
-                btnFault.innerText = "⏹ 停止寻找";
-                btnFault.style.color = "#ff4444";
-                btnFault.style.border = "1px solid #ff4444";
+                btnFault.innerHTML = '<span class="btn-icon">⏹</span> 停止寻找';
 
                 // === 核心算法：以机器狗当前朝向决定寻找破损点的搜索方向 ===
                 // 说明：savedCablePath 的绘制顺序可能是 A->B，但现场可以从 B 点朝 A 点开始。
@@ -12470,6 +12410,7 @@
                 navPath = offsetPath.slice(closestIdx);
                 startNav();
             };
+            }
         })();
 
         // --- 6. WebSocket ---
