@@ -44,10 +44,10 @@ body {
     /* 默认宽度 */
     flex-shrink: 0;
     /* 防止被挤压 */
-    /* 其余保持不变 */
-    height: calc(100vh - 110px);
+    height: calc(100vh - 78px);
     margin-left: 10px;
-    padding-bottom: 10px;
+    padding-bottom: 0;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -73,6 +73,7 @@ body {
 .panel-op {
     flex: 3;
     /* 在 left-panel 中分得更高的空间 */
+    min-height: 0;
 }
 
 /* 信息栏：占高度略少一点（1 份） */
@@ -606,18 +607,60 @@ body {
     border-color: #ffffff !important;
 }
 
-#gprStatus.gpr-status {
-    margin-left: 10px;
-    font-size: 13px;
-    color: #a8e0ff;
+.global-operation-log {
+    flex: 0 0 60px;
+    box-sizing: border-box;
+    padding: 5px 8px;
+    border: 1px solid rgba(120, 200, 255, 0.38);
+    background: rgba(3, 32, 60, 0.72);
+    box-shadow: 0 0 6px rgba(0, 180, 255, 0.18);
+    overflow: hidden;
+    cursor: default;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
 }
 
-#gprStatus.gpr-status.error {
+.global-operation-log-title {
+    margin-bottom: 2px;
+    color: #77caff;
+    font-size: 10px;
+    line-height: 1.2;
+    font-weight: 600;
+}
+
+.global-operation-log-text {
+    max-height: 38px;
+    overflow-y: auto;
+    padding-right: 4px;
+    color: #a8e0ff;
+    font-size: 11px;
+    line-height: 1.35;
+    word-break: break-word;
+    white-space: normal;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 229, 255, 0.55) transparent;
+}
+
+.global-operation-log-text::-webkit-scrollbar {
+    width: 4px;
+}
+
+.global-operation-log-text::-webkit-scrollbar-thumb {
+    border-radius: 4px;
+    background: rgba(0, 229, 255, 0.45);
+}
+
+.global-operation-log-text.error {
     color: #ff8080;
 }
 
-#gprStatus.gpr-status.success {
+.global-operation-log-text.success {
     color: #8bff8b;
+}
+
+.global-operation-log-text.warning {
+    color: #ffd45a;
 }
 
 .gpr-controls input[type="text"],
@@ -706,6 +749,7 @@ screen and (max-height: 800px) {
     /* 2. 缩小左侧控制面板总宽 */
     .left-panel {
         width: 230px;
+        height: calc(100vh - 70px);
         /* 从原先的 280px 缩窄，为右侧主视图让出可视区域 */
     }
 
@@ -3921,6 +3965,21 @@ input[type="range"]::-webkit-slider-thumb {
 .scan-param-row input:focus {
     border-color: #00e5ff;
     box-shadow: 0 0 8px rgba(0, 229, 255, 0.45);
+}
+
+.fault-wait-param-content {
+    width: 390px;
+}
+
+.fault-wait-current {
+    margin-top: 8px;
+    color: #a8e0ff;
+    font-size: 13px;
+}
+
+.fault-wait-current span {
+    color: #ffd700;
+    font-weight: bold;
 }
 
 .scan-param-actions {

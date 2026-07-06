@@ -243,17 +243,35 @@
 
     function $(id) { return document.getElementById(id); }
 
+    function isTrajectoryGeoCalibrationActive() {
+        return Array.isArray(window.geoCalibSamples) &&
+            window.geoCalibSamples.length > 0 &&
+            !window.isGpsCalibrated &&
+            !window.geoTransform;
+    }
+
+    function isTrajectoryGeoCalibrationStatus(message) {
+        return message.includes("轨迹标定") || message.includes("GPS/SLAM轨迹标定");
+    }
+
     function setStatus(text, type) {
-        const statusSpan = $("gprStatus");
-        // 如果在 GPR 面板没找到状态栏，尝试找机械臂面板的状态栏(如果有的话)
-        // 这里主要更新 GPR 面板的状态
-        if (!statusSpan) {
-            console.log(`[系统状态] ${text}`); // 备用日志
+        const statusText = $("operationStatusText");
+        const message = text == null ? "" : String(text);
+        if (!message.trim()) return;
+
+        if (isTrajectoryGeoCalibrationActive() && !isTrajectoryGeoCalibrationStatus(message)) {
             return;
         }
-        statusSpan.textContent = text || "";
-        statusSpan.classList.remove("error", "success");
-        if (type) statusSpan.classList.add(type);
+
+        if (!statusText) {
+            console.log(`[系统状态] ${message}`);
+            return;
+        }
+
+        statusText.textContent = message;
+        statusText.title = message;
+        statusText.classList.remove("error", "success", "warning");
+        if (type) statusText.classList.add(type);
     }
 
     // ==========================================
@@ -1658,6 +1676,9 @@
         width: 3.5,
         angleDeg: 23.0
     };
+    const FAULT_SEARCH_WAIT_STORAGE_KEY = "faultSearchWaitSeconds";
+    const DEFAULT_FAULT_SEARCH_WAIT_SECONDS = 30;
+    let faultSearchWaitSeconds = DEFAULT_FAULT_SEARCH_WAIT_SECONDS;
 
     function normalizeRad(rad) {
         while (rad > Math.PI) rad -= 2 * Math.PI;
@@ -1670,6 +1691,92 @@
         if (!Number.isFinite(n)) return fallback;
         return Math.max(min, Math.min(max, n));
     }
+
+    function normalizeFaultSearchWaitSeconds(value) {
+        if (value === null || value === undefined || value === "") {
+            return DEFAULT_FAULT_SEARCH_WAIT_SECONDS;
+        }
+        return Math.round(clampNumber(value, 1, 120, DEFAULT_FAULT_SEARCH_WAIT_SECONDS));
+    }
+
+    function loadFaultSearchWaitSeconds() {
+        try {
+            const saved = localStorage.getItem(FAULT_SEARCH_WAIT_STORAGE_KEY);
+            return normalizeFaultSearchWaitSeconds(saved);
+        } catch (e) {
+            return DEFAULT_FAULT_SEARCH_WAIT_SECONDS;
+        }
+    }
+
+    function saveFaultSearchWaitSeconds(value) {
+        faultSearchWaitSeconds = normalizeFaultSearchWaitSeconds(value);
+        try {
+            localStorage.setItem(FAULT_SEARCH_WAIT_STORAGE_KEY, String(faultSearchWaitSeconds));
+        } catch (e) {
+            console.warn("保存寻找破损点等待间隔失败:", e);
+        }
+        syncFaultWaitSettingsUi();
+        return faultSearchWaitSeconds;
+    }
+
+    function getFaultSearchWaitMs() {
+        return normalizeFaultSearchWaitSeconds(faultSearchWaitSeconds) * 1000;
+    }
+
+    function getFaultSearchWaitLabel() {
+        return normalizeFaultSearchWaitSeconds(faultSearchWaitSeconds) + " 秒";
+    }
+
+    function syncFaultWaitSettingsUi() {
+        const input = document.getElementById("faultWaitSecondsInput");
+        const text = document.getElementById("faultWaitCurrentText");
+        const value = normalizeFaultSearchWaitSeconds(faultSearchWaitSeconds);
+        if (input) input.value = String(value);
+        if (text) text.textContent = value + " 秒";
+    }
+
+    function openFaultWaitParamModal() {
+        const modal = document.getElementById("faultWaitParamModal");
+        const input = document.getElementById("faultWaitSecondsInput");
+        const btnOk = document.getElementById("btnFaultWaitParamConfirm");
+        const btnCancel = document.getElementById("btnFaultWaitParamCancel");
+        const btnClose = document.getElementById("btnFaultWaitParamClose");
+
+        if (!modal || !input || !btnOk) {
+            const value = prompt("自动寻找破损点等待间隔（秒）", String(faultSearchWaitSeconds));
+            if (value !== null) {
+                const saved = saveFaultSearchWaitSeconds(value);
+                setStatus("自动寻找破损点等待间隔已设置为 " + saved + " 秒", "success");
+            }
+            return;
+        }
+
+        syncFaultWaitSettingsUi();
+
+        function close() {
+            modal.style.display = "none";
+            btnOk.onclick = null;
+            if (btnCancel) btnCancel.onclick = null;
+            if (btnClose) btnClose.onclick = null;
+            modal.onclick = null;
+        }
+
+        btnOk.onclick = function () {
+            const saved = saveFaultSearchWaitSeconds(input.value);
+            setStatus("自动寻找破损点等待间隔已设置为 " + saved + " 秒", "success");
+            close();
+        };
+        if (btnCancel) btnCancel.onclick = close;
+        if (btnClose) btnClose.onclick = close;
+        modal.onclick = function (e) {
+            if (e.target === modal) close();
+        };
+
+        modal.style.display = "flex";
+        setTimeout(() => input.focus(), 30);
+    }
+
+    faultSearchWaitSeconds = loadFaultSearchWaitSeconds();
 
     function openScanParamModal(defaults = DEFAULT_SCAN_PARAMS, options = {}) {
         const modal = document.getElementById("scanParamModal");
@@ -4731,6 +4838,13 @@
         if (elAuc) {
             elAuc.textContent = AUC_CONFIG.AUC_THRESHOLD;            // 整数
         }
+
+        syncFaultWaitSettingsUi();
+        const btnFaultWaitSettings = $("btnFaultWaitSettings");
+        if (btnFaultWaitSettings) {
+            btnFaultWaitSettings.onclick = openFaultWaitParamModal;
+        }
+
         // --- A. 获取 DOM ---
         const btn3D = $("btn3DReconstruct");
         const btnRobotNav = $("btnRobotNav");
@@ -5737,7 +5851,7 @@
                 switch (mode) {
                     case 1.0: text = "站立 (锁定)"; break;
                     case 3.0: text = "运动 (常规)"; break;
-                    case 4.0: text = "趴下 (休眠)"; break;
+                    case 4.0: text = "趴下"; break;
                     case 6.0: text = "轮式/特殊"; break;
                     default: text = "未知模式";
                 }
@@ -9231,7 +9345,15 @@
             console.error("❌ 无法调用 sendMoveCommand，请检查代码作用域");
         }
 
-        // --- B. 重置“自动巡线”状态 (逻辑急停) ---
+        // --- B. 停止“寻找破损点”模式 (逻辑急停) ---
+        if (typeof window.stopFaultFindingMode === 'function') {
+            const stoppedFaultFinding = window.stopFaultFindingMode("emergency");
+            if (stoppedFaultFinding) {
+                setStatus("急停：已停止寻找破损点模式", "warning");
+            }
+        }
+
+        // --- C. 重置“自动巡线”状态 (逻辑急停) ---
         const btnAutoTrack = document.getElementById('btnAutoTrack');
 
         if (btnAutoTrack) {
@@ -11196,6 +11318,7 @@
 
             // ✅✅✅ 修正：电缆跟踪与寻找破损模式停止逻辑
             if (isCableTrackingMode || isFaultFindingMode) {
+                const wasFaultFindingMode = isFaultFindingMode;
                 if (cableTrackingState === 'TO_START' && isSuccess) {
                     console.log("✅ 已到达起始切入点，开始沿线运行...");
                     cableTrackingState = 'FOLLOWING';
@@ -11212,6 +11335,7 @@
                     isCableTrackingMode = false;
                     isFaultFindingMode = false;
                     cableTrackingState = 'IDLE';
+                    if (wasFaultFindingMode) resetFaultFindingRuntimeState();
 
                     // 恢复两个按钮 UI
                     const btn1 = document.getElementById("btnTrackCableOverlay");
@@ -11230,6 +11354,28 @@
                 if (isSuccess) calculateAvgError();
             }
         }
+
+        function resetFaultFindingRuntimeState() {
+            bsState = 'INACTIVE';
+            bsGoodDist = 0;
+            bsBadDist = 0;
+            bsTargetDist = 0;
+            bsWaitEndTime = 0;
+            lastFaultRobotDist = -1;
+            offsetPathDists = [];
+            maxFaultIdx = -1;
+            bsFootprints = [];
+            window.g_faultTriggeredInBS = false;
+        }
+
+        window.stopFaultFindingMode = function (reason = "manual") {
+            if (!isFaultFindingMode) return false;
+            console.log(reason === "emergency"
+                ? "🛑 急停停止寻找破损点模式"
+                : "🛑 停止寻找破损点模式");
+            stopNav(false);
+            return true;
+        };
 
         // ✅ 核心控制：纯追踪 (Pure Pursuit) + 二分法拦截
         function controlLoop() {
@@ -11266,18 +11412,18 @@
                         }
 
                         if (currentDist >= bsTargetDist) {
-                            // 到达最新的 2m 节点，立即停车并开始 20 秒倒计时
+                            // 到达最新节点，立即停车并开始等待倒计时
                             bsState = 'STEP_WAIT';
-                            bsWaitEndTime = Date.now() + 30000; // 等待 20 秒
+                            bsWaitEndTime = Date.now() + getFaultSearchWaitMs();
                             window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
                             sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
-                            console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 20 秒检测信号...`);
+                            console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 ${getFaultSearchWaitLabel()} 检测信号...`);
                             return; // 拦截结束，不执行下面的纯追踪
                         }
                         // 还没走到 2m，这里不 return，放行去执行下方的常规纯追踪 (前进)
                     }
 
-                    // 3. 停车等待 20 秒阶段 (STEP_WAIT)
+                    // 3. 停车等待阶段 (STEP_WAIT)
                     else if (bsState === 'STEP_WAIT') {
                         sendMoveCommand(0, 0, 0, 0.0, 0.0, false); // 发送心跳包，保持原地停车
 
@@ -11291,9 +11437,9 @@
                             return;
                         }
 
-                        // B. 20 秒满，未检测到信号：触发二分法
+                        // B. 等待时间满，未检测到信号：触发二分法
                         if (Date.now() >= bsWaitEndTime) {
-                            console.log(`🛑 [二分定位触发] 20 秒无信号！进入二分法寻找 (搜索区间: ${bsGoodDist.toFixed(2)}m ~ ${currentDist.toFixed(2)}m)`);
+                            console.log(`🛑 [二分定位触发] ${getFaultSearchWaitLabel()}无信号！进入二分法寻找 (搜索区间: ${bsGoodDist.toFixed(2)}m ~ ${currentDist.toFixed(2)}m)`);
                             bsBadDist = currentDist; // 更新无信号边界
                             bsState = 'MOVING';      // 直接跳转到二分法移动阶段
                             bsTargetDist = (bsGoodDist + bsBadDist) / 2.0; // 目标锁定为中点 (比如倒退 1m)
@@ -11301,7 +11447,7 @@
                             return;
                         }
 
-                        // C. 还在 20 秒内，继续等待
+                        // C. 还在等待时间内，继续等待
                         return;
                     }
 
@@ -11405,7 +11551,7 @@
                 return;
             }
 
-            // 阶段 2: 到达某个测试点后，等待 20秒 评估是否有信号
+            // 阶段 2: 到达某个测试点后，按页面参数等待并评估是否有信号
             if (bsState === 'EVAL_WAIT') {
                 // ✅ 修复 1：补充停车心跳包，防止单次指令丢失或物理惯性导致的持续滑行（倒退过头）
                 if (typeof sendMoveCommand === 'function') {
@@ -11424,7 +11570,7 @@
                     console.log(`✅ [二分定位] ⚡ 提前在 ${currentDist.toFixed(2)}m 处检测到信号！立刻中断等待，更新有信号边界。`);
                     bsGoodDist = currentDist; // 更新有信号边界
                 } else {
-                    console.log(`❌ [二分定位] ⏳ 等待 20 秒满，在 ${currentDist.toFixed(2)}m 处无信号！更新无信号边界。`);
+                    console.log(`❌ [二分定位] ⏳ 等待 ${getFaultSearchWaitLabel()} 满，在 ${currentDist.toFixed(2)}m 处无信号！更新无信号边界。`);
                     bsBadDist = currentDist;  // 更新无信号边界
                 }
 
@@ -11463,13 +11609,13 @@
                 if (Math.abs(distError) < 0.1 || isOvershot) {
                     sendMoveCommand(0, 0, 0, 0.0, 0.0, true); // 停车
                     bsState = 'EVAL_WAIT';
-                    bsWaitEndTime = Date.now() + 30000; // 等待 20秒
+                    bsWaitEndTime = Date.now() + getFaultSearchWaitMs();
 
                     window.bsInitialMoveDir = undefined; // 重置方向锁
                     // ✅ 修复 2：到达目标点时，强制清空移动过程中可能积攒的“脏信号”
                     window.g_faultTriggeredInBS = false;
 
-                    console.log("⏱️ [二分定位] 到达(或穿透)目标点，原地等待 20 秒检测信号...");
+                    console.log(`⏱️ [二分定位] 到达(或穿透)目标点，原地等待 ${getFaultSearchWaitLabel()} 检测信号...`);
                     return;
                 }
 

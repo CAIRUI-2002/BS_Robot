@@ -140,6 +140,10 @@
                     </div>
                 </section>
 
+                <div class="global-operation-log" id="globalOperationLog">
+                    <div class="global-operation-log-title">操作日志</div>
+                    <div class="global-operation-log-text" id="operationStatusText" title="等待操作...">等待操作...</div>
+                </div>
 
             </aside>
 
@@ -165,7 +169,6 @@
                             title="同时选择电脑本地的 .pcd 点云文件和同名 .geo.json 经纬度元数据文件">本地地图</button>
                         <button id="btnClearGprPointCloudMap" class="action-btn-small btn-clear-pcd"
                             title="清除三维重建页面中已加载的点云地图、电缆路径和破损点显示">清除地图</button>
-                        <span id="gprStatus" class="gpr-status"></span>
                     </div>
 
                     <div class="gpr-views hide-2d">
@@ -351,6 +354,10 @@
                                     <button id="btnSavePcd" class="header-btn-mini"
                                         title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
                                         💾 保存点云
+                                    </button>
+                                    <button id="btnFaultWaitSettings" class="header-btn-mini"
+                                        title="设置自动寻找破损点每次停车检测的等待间隔">
+                                        ⚙ 参数设置
                                     </button>
 
                                     <div class="dropdown-group">
@@ -782,6 +789,34 @@
         </div>
     </div>
 
+
+    <div id="faultWaitParamModal" class="cyber-modal-overlay scan-param-overlay" style="display: none;">
+        <div class="cyber-modal-content scan-param-content fault-wait-param-content pointer-auto">
+            <div class="cyber-modal-header">
+                <span>⚙ 自动寻找破损点参数设置</span>
+                <button id="btnFaultWaitParamClose" class="close-btn">×</button>
+            </div>
+            <div class="cyber-modal-body scan-param-body">
+                <div class="scan-param-desc">
+                    设置机器狗在自动寻找破损点过程中，每次停车检测信号的等待间隔。
+                </div>
+
+                <label class="scan-param-row">
+                    <span>等待间隔（秒）</span>
+                    <input id="faultWaitSecondsInput" type="number" min="1" max="120" step="1" value="30" />
+                </label>
+
+                <div class="fault-wait-current">
+                    当前设置：<span id="faultWaitCurrentText">30 秒</span>
+                </div>
+
+                <div class="scan-param-actions">
+                    <button id="btnFaultWaitParamCancel" class="scan-param-btn secondary">取消</button>
+                    <button id="btnFaultWaitParamConfirm" class="scan-param-btn primary">保存设置</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- 履带小车扫描范围参数设置弹窗：点击“发送破损点坐标”后弹出 -->
     <div id="scanParamModal" class="cyber-modal-overlay scan-param-overlay" style="display: none;">
