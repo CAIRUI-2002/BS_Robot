@@ -243,6 +243,9 @@
 
     function $(id) { return document.getElementById(id); }
 
+    const OPERATION_STATUS_HISTORY_LIMIT = 3;
+    let operationStatusHistory = [];
+
     function isTrajectoryGeoCalibrationActive() {
         return Array.isArray(window.geoCalibSamples) &&
             window.geoCalibSamples.length > 0 &&
@@ -254,24 +257,59 @@
         return message.includes("轨迹标定") || message.includes("GPS/SLAM轨迹标定");
     }
 
-    function setStatus(text, type) {
+    function normalizeStatusType(type) {
+        const statusType = String(type || "");
+        return ["error", "success", "warning"].includes(statusType) ? statusType : "";
+    }
+
+    function renderOperationStatusEntries(entries) {
         const statusText = $("operationStatusText");
+        const list = Array.isArray(entries) ? entries.filter(item => item && item.message) : [];
+
+        if (!statusText) {
+            list.forEach(item => console.log(`[系统状态] ${item.message}`));
+            return;
+        }
+
+        statusText.innerHTML = "";
+        statusText.classList.remove("error", "success", "warning");
+        statusText.title = list.length ? list.map(item => item.message).join("\n") : "等待操作...";
+
+        if (list.length === 0) {
+            statusText.textContent = "等待操作...";
+            return;
+        }
+
+        list.forEach(item => {
+            const line = document.createElement("div");
+            line.className = "global-operation-log-line";
+            if (item.type) line.classList.add(item.type);
+            line.textContent = item.message;
+            statusText.appendChild(line);
+        });
+        statusText.scrollTop = 0;
+    }
+
+    function setStatus(text, type) {
         const message = text == null ? "" : String(text);
         if (!message.trim()) return;
 
-        if (isTrajectoryGeoCalibrationActive() && !isTrajectoryGeoCalibrationStatus(message)) {
+        const statusType = normalizeStatusType(type);
+        const isCalibrationActive = isTrajectoryGeoCalibrationActive();
+        const isCalibrationStatus = isTrajectoryGeoCalibrationStatus(message);
+
+        if (isCalibrationActive && !isCalibrationStatus) {
             return;
         }
 
-        if (!statusText) {
-            console.log(`[系统状态] ${message}`);
+        if (isCalibrationActive) {
+            renderOperationStatusEntries([{ message, type: statusType }]);
             return;
         }
 
-        statusText.textContent = message;
-        statusText.title = message;
-        statusText.classList.remove("error", "success", "warning");
-        if (type) statusText.classList.add(type);
+        operationStatusHistory.unshift({ message, type: statusType });
+        operationStatusHistory = operationStatusHistory.slice(0, OPERATION_STATUS_HISTORY_LIMIT);
+        renderOperationStatusEntries(operationStatusHistory);
     }
 
     // ==========================================
@@ -5322,13 +5360,12 @@
                     dogStandWalkTimer = setTimeout(() => {
                         if (this.dataset.status !== "1") return;
                         sendMoveCommand(0.0, 0.0, 0.0, 0.0, MODES.WALK, true);
-                        setStatus("已站立并进入常规模式", "success");
                     }, 800);
 
                     // 更新 UI
                     this.textContent = "机器狗趴下";
                     this.classList.add("active");
-                    setStatus("发送指令：站立，准备进入常规模式", "success");
+                    setStatus("发送指令：站立", "success");
 
                     // 更新状态
                     this.dataset.status = "1";
@@ -5347,7 +5384,7 @@
                     // 更新 UI
                     this.textContent = "机器狗站立";
                     this.classList.remove("active");
-                    setStatus("发送指令：趴下模式", "warning");
+                    setStatus("发送指令：趴下", "success");
 
                     // 更新状态
                     this.dataset.status = "0";
