@@ -9613,6 +9613,8 @@
         let bsBadDist = 0;        // 无信号的距离 (P_bad)
         let bsTargetDist = 0;     // 当前机器狗需要前往的目标距离
         let bsWaitEndTime = 0;    // 5秒等待结束的时间戳
+        const BS_MAX_ITERATIONS = 3; // 进入二分法后最多评估 3 次
+        let bsIterationCount = 0;    // 已完成的二分法评估次数
         let lastFaultRobotDist = -1; // 上一次正常测到信号时，机器狗在偏移路径上的行驶距离
         let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
         let bsFootprints = [];       // ✅ 新增：用于记录机器狗前进时的真实历史脚印
@@ -11398,6 +11400,7 @@
             bsBadDist = 0;
             bsTargetDist = 0;
             bsWaitEndTime = 0;
+            bsIterationCount = 0;
             lastFaultRobotDist = -1;
             offsetPathDists = [];
             maxFaultIdx = -1;
@@ -11479,6 +11482,7 @@
                             console.log(`🛑 [二分定位触发] ${getFaultSearchWaitLabel()}无信号！进入二分法寻找 (搜索区间: ${bsGoodDist.toFixed(2)}m ~ ${currentDist.toFixed(2)}m)`);
                             bsBadDist = currentDist; // 更新无信号边界
                             bsState = 'MOVING';      // 直接跳转到二分法移动阶段
+                            bsIterationCount = 0;
                             bsTargetDist = (bsGoodDist + bsBadDist) / 2.0; // 目标锁定为中点 (比如倒退 1m)
                             window.g_faultTriggeredInBS = false;
                             return;
@@ -11611,11 +11615,13 @@
                     bsBadDist = currentDist;  // 更新无信号边界
                 }
 
-                // 检查误差是否满足退出条件 (小于 0.2m)
-                if (Math.abs(bsBadDist - bsGoodDist) <= 0.2) {
-                    console.log(`🎯 [二分定位] 定位完成！误差已 <= 0.2m。最终真实破损点位于: ${bsGoodDist.toFixed(2)}m`);
+                bsIterationCount += 1;
+                console.log(`🎯 [二分定位] 已完成第 ${bsIterationCount}/${BS_MAX_ITERATIONS} 次二分评估，当前区间: ${Math.min(bsGoodDist, bsBadDist).toFixed(2)}m ~ ${Math.max(bsGoodDist, bsBadDist).toFixed(2)}m`);
+
+                if (bsIterationCount >= BS_MAX_ITERATIONS) {
+                    console.log(`🎯 [二分定位] 已完成 ${BS_MAX_ITERATIONS} 次二分法寻找，最终参考破损点位于: ${bsGoodDist.toFixed(2)}m`);
                     bsState = 'DONE';
-                    setStatus("🎯 破损点精准定位完成！", "success");
+                    setStatus(`🎯 破损点定位完成：已完成 ${BS_MAX_ITERATIONS} 次二分法寻找`, "success");
                     stopNav(true);
                     return;
                 }
@@ -12480,6 +12486,7 @@
                 }
 
                 bsState = 'INACTIVE';
+                bsIterationCount = 0;
                 lastFaultRobotDist = -1;
                 offsetPathDists = [];
                 maxFaultIdx = -1;
