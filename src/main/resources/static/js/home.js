@@ -12838,28 +12838,81 @@
         // --- 6. WebSocket ---
         const ROBOT_IP = "10.21.31.104";
         const wsUrl = "ws://" + ROBOT_IP + ":9090";
-        console.log("正在尝试连接 WebSocket:", wsUrl);
-
-        const ws = new WebSocket(wsUrl);
         let hasLoggedSlamSuccess = false;
         let isFirstFrame = true;
+        let slamWs = null;
+        let slamReconnectTimer = null;
 
         // 👇 1. 新增：记录点云渲染时间戳，用于节流
         let lastPointCloudRenderTime = 0;
 
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                // ✅ 加上对 'pose_data' 的支持
-                if (data.type === 'slam_data' || data.type === 'pose_data') {
-                    if (!hasLoggedSlamSuccess) {
-                        console.log("%c🚀 位置数据传输成功！...", "color: #00e5ff; font-weight: bold;");
-                        hasLoggedSlamSuccess = true;
-                    }
-                    updateVis(data);
+        function scheduleSlamReconnect() {
+            if (slamReconnectTimer !== null) return;
+
+            console.warn("⚠️ 点云 WebSocket 已断开，2 秒后自动重连...");
+            slamReconnectTimer = window.setTimeout(() => {
+                slamReconnectTimer = null;
+                connectSlamWebSocket();
+            }, 2000);
+        }
+
+        function connectSlamWebSocket() {
+            if (slamWs && (
+                slamWs.readyState === WebSocket.OPEN ||
+                slamWs.readyState === WebSocket.CONNECTING
+            )) {
+                return;
+            }
+
+            console.log("正在尝试连接点云 WebSocket:", wsUrl);
+            const socket = new WebSocket(wsUrl);
+            slamWs = socket;
+
+            socket.onopen = () => {
+                if (slamWs !== socket) return;
+
+                if (slamReconnectTimer !== null) {
+                    window.clearTimeout(slamReconnectTimer);
+                    slamReconnectTimer = null;
                 }
-            } catch (e) { }
-        };
+                console.log("✅ 点云 WebSocket 已连接:", wsUrl);
+            };
+
+            socket.onmessage = (event) => {
+                if (slamWs !== socket) return;
+
+                try {
+                    const data = JSON.parse(event.data);
+                    // ✅ 加上对 'pose_data' 的支持
+                    if (data.type === 'slam_data' || data.type === 'pose_data') {
+                        if (!hasLoggedSlamSuccess) {
+                            console.log("%c🚀 位置数据传输成功！...", "color: #00e5ff; font-weight: bold;");
+                            hasLoggedSlamSuccess = true;
+                        }
+                        updateVis(data);
+                    }
+                } catch (e) {
+                    console.error("点云 WebSocket 消息解析失败:", e);
+                }
+            };
+
+            socket.onerror = (event) => {
+                if (slamWs !== socket) return;
+
+                console.warn("点云 WebSocket 连接异常:", event);
+                socket.close();
+            };
+
+            socket.onclose = () => {
+                if (slamWs !== socket) return;
+
+                slamWs = null;
+                hasLoggedSlamSuccess = false;
+                scheduleSlamReconnect();
+            };
+        }
+
+        connectSlamWebSocket();
 
         function updateVis(data) {
             const pose = data.robot;
