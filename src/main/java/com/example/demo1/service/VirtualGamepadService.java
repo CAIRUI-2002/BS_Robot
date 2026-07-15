@@ -42,14 +42,17 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     // 运动参数 (手动模式使用 - 由前端 /app/move 实时更新)
-    private float vx = 0;   // 前后
-    private float vy = 0;   // 左右
-    private float vz = 0;   // ✅ 新增：高度方向速度
-    private float vyaw = 0; // 转向
-    private int currentMode = 0;
+    private volatile float vx = 0;   // 前后
+    private volatile float vy = 0;   // 左右
+    private volatile float vz = 0;   // ✅ 新增：高度方向速度
+    private volatile float vyaw = 0; // 转向
+    private volatile int currentMode = 0;
+    private volatile long lastManualCommandTime = System.currentTimeMillis();
+    private volatile boolean manualCommandTimedOut = false;
+    private static final long MANUAL_COMMAND_TIMEOUT_MS = 350L;
 
     // ✅ 新增：自动巡线相关参数
-    private boolean isAutoTracking = false; // 是否开启自动巡线
+    private volatile boolean isAutoTracking = false; // 是否开启自动巡线
     private int pipelineSignal = 0;         // 管线仪信号: 0=中, 1=向右找线, 2=向左找线
     private long lastSignalTime = 0;        // 上次收到信号的时间 (用于超时安全保护)
 
@@ -333,10 +336,12 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * 更新控制指令 (手动/模式切换)
      */
     public void updateCommand(float v, float y, float w, float z, int mode) {
-    this.vx = v;
-    this.vy = y;
-    this.vyaw = w;
-    this.vz = z; // ✅ 更新高度速度
+        this.vx = v;
+        this.vy = y;
+        this.vyaw = w;
+        this.vz = z; // ✅ 更新高度速度
+        this.lastManualCommandTime = System.currentTimeMillis();
+        this.manualCommandTimedOut = false;
 
         // 防止重复发送相同的模式切换指令
         if (mode == currentMode && mode != 0) return;
@@ -446,6 +451,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         float finalVx = 0;
         float finalVy = 0;
         float finalYaw = 0;
+        boolean manualCommandExpired = false;
 
         if (isAutoTracking) {
             // --- A. S 型自动巡线：持续前进，通过平滑偏航摆动扫线 ---
@@ -608,10 +614,26 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             }
         } else {
             // --- B. 手动遥控逻辑 ---
-            // 直接使用前端传来的值 (前端滑条已直接改变了 this.vx / this.vy)
-            finalVx = this.vx;
-            finalVy = this.vy;
-            finalYaw = this.vyaw;
+            // 浏览器控制循环失联时不能无限重复最后一条转向指令。
+            manualCommandExpired = System.currentTimeMillis() - this.lastManualCommandTime > MANUAL_COMMAND_TIMEOUT_MS;
+            if (manualCommandExpired) {
+                finalVx = 0.0f;
+                finalVy = 0.0f;
+                finalYaw = 0.0f;
+                boolean hadActiveCommand = Math.abs(this.vx) > 0.0001f ||
+                        Math.abs(this.vy) > 0.0001f ||
+                        Math.abs(this.vyaw) > 0.0001f ||
+                        Math.abs(this.vz) > 0.0001f;
+                if (hadActiveCommand && !this.manualCommandTimedOut) {
+                    this.manualCommandTimedOut = true;
+                    System.out.println("⚠️ 运动指令超过 " + MANUAL_COMMAND_TIMEOUT_MS + "ms 未刷新，已由看门狗自动停车");
+                }
+            } else {
+                // 直接使用前端传来的值 (前端滑条已直接改变了 this.vx / this.vy)
+                finalVx = this.vx;
+                finalVy = this.vy;
+                finalYaw = this.vyaw;
+            }
         }
 
         // ==========================================
@@ -621,7 +643,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         float scaleX = 1.5f;
         float scaleY = 2.0f;
         float scaleYaw = 0.8f;
-        float finalVz = this.vz; // ✅ 获取当前高度速度
+        float finalVz = manualCommandExpired ? 0.0f : this.vz;
 
         // 构建 Items JSON
         String items = String.format(

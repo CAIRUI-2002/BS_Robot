@@ -9682,6 +9682,29 @@
         let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
         let bsFootprints = [];       // ✅ 新增：用于记录机器狗前进时的真实历史脚印
 
+        // 二分倒车闭环控制参数：使用 SLAM yaw 做反馈，不再用固定角速度开环转向。
+        const BS_REVERSE_CONTROL = Object.freeze({
+            lookaheadM: 0.4,
+            minReferenceDistanceM: 0.08,
+            maxHeadingChangeRad: 25 * Math.PI / 180,
+            maxFootprintPathDiffRad: 35 * Math.PI / 180,
+            alignEnterRad: 18 * Math.PI / 180,
+            alignExitRad: 7 * Math.PI / 180,
+            yawDeadbandRad: 2 * Math.PI / 180,
+            yawKp: 0.85,
+            yawKd: 0.06,
+            maxYawCommand: 0.35,
+            maxYawAcceleration: 1.0,
+            reverseSpeed: -0.12,
+            poseTimeoutMs: 400
+        });
+        let bsReverseStartYaw = null;
+        let bsReverseAligning = false;
+        let bsLastYawError = 0;
+        let bsLastYawCommand = 0;
+        let bsLastYawControlTime = 0;
+        let bsLastPoseStaleWarningTime = 0;
+
         // 1. 新增状态变量
         let isManualDrawingCable = false;
 
@@ -9748,6 +9771,148 @@
                 }
             }
             return { x: path[path.length - 1].x, y: path[path.length - 1].y };
+        }
+
+        function resetBinaryMotionController() {
+            window.bsInitialMoveDir = undefined;
+            bsReverseStartYaw = null;
+            bsReverseAligning = false;
+            bsLastYawError = 0;
+            bsLastYawCommand = 0;
+            bsLastYawControlTime = 0;
+        }
+
+        function initializeBinaryMotionController(moveDirection) {
+            resetBinaryMotionController();
+            window.bsInitialMoveDir = moveDirection;
+            if (moveDirection < 0 && Number.isFinite(Number(currentRobotPose.yaw))) {
+                bsReverseStartYaw = normalizeAngleRad(Number(currentRobotPose.yaw));
+            }
+        }
+
+        function isBinaryPoseFresh(now = Date.now()) {
+            return Number.isFinite(Number(currentRobotPose.x)) &&
+                Number.isFinite(Number(currentRobotPose.y)) &&
+                Number.isFinite(Number(currentRobotPose.yaw)) &&
+                Number.isFinite(Number(currentRobotPose.updatedAt)) &&
+                now - Number(currentRobotPose.updatedAt) <= BS_REVERSE_CONTROL.poseTimeoutMs;
+        }
+
+        function clampYawAround(yaw, centerYaw, maxDelta) {
+            const delta = normalizeAngleRad(yaw - centerYaw);
+            const limitedDelta = Math.max(-maxDelta, Math.min(maxDelta, delta));
+            return normalizeAngleRad(centerYaw + limitedDelta);
+        }
+
+        function getPathYawAtDist(targetDist, path) {
+            if (!Array.isArray(path) || path.length < 2 || offsetPathDists.length !== path.length) {
+                return null;
+            }
+
+            let baseIdx = 0;
+            while (baseIdx < offsetPathDists.length - 2 && offsetPathDists[baseIdx + 1] < targetDist) {
+                baseIdx++;
+            }
+
+            for (let radius = 0; radius < path.length; radius++) {
+                const candidates = radius === 0
+                    ? [baseIdx]
+                    : [baseIdx - radius, baseIdx + radius];
+                for (const idx of candidates) {
+                    if (idx < 0 || idx >= path.length - 1) continue;
+                    const dx = path[idx + 1].x - path[idx].x;
+                    const dy = path[idx + 1].y - path[idx].y;
+                    if (Math.hypot(dx, dy) >= 0.03) {
+                        return Math.atan2(dy, dx);
+                    }
+                }
+            }
+            return null;
+        }
+
+        function getReverseDesiredYaw(currentDist, distError) {
+            const currentX = Number(currentRobotPose.x);
+            const currentY = Number(currentRobotPose.y);
+            const remainingDistance = Math.abs(distError);
+            const lookbackDistance = Math.min(BS_REVERSE_CONTROL.lookaheadM, remainingDistance);
+            const pathYaw = getPathYawAtDist(currentDist, window.offsetCablePath);
+            let footprintYaw = null;
+
+            if (bsFootprints.length >= 2 && lookbackDistance > 0) {
+                const lastIdx = bsFootprints.length - 1;
+                let targetIdx = lastIdx;
+                let accumulatedDistance = Math.hypot(
+                    currentX - bsFootprints[lastIdx].x,
+                    currentY - bsFootprints[lastIdx].y
+                );
+
+                for (let i = lastIdx; i > 0 && accumulatedDistance < lookbackDistance; i--) {
+                    accumulatedDistance += Math.hypot(
+                        bsFootprints[i].x - bsFootprints[i - 1].x,
+                        bsFootprints[i].y - bsFootprints[i - 1].y
+                    );
+                    targetIdx = i - 1;
+                }
+
+                const target = bsFootprints[targetIdx];
+                const dx = currentX - target.x;
+                const dy = currentY - target.y;
+                if (Math.hypot(dx, dy) >= BS_REVERSE_CONTROL.minReferenceDistanceM) {
+                    // 历史脚印由旧到新排列，因此“旧脚印 -> 当前点”的方向就是倒车时车头应保持的正向。
+                    footprintYaw = Math.atan2(dy, dx);
+                }
+            }
+
+            // 脚印方向和规划路径方向差异过大时，说明脚印可能发生了错误裁剪或匹配到了错误分支。
+            if (footprintYaw !== null && pathYaw !== null &&
+                Math.abs(normalizeAngleRad(footprintYaw - pathYaw)) > BS_REVERSE_CONTROL.maxFootprintPathDiffRad) {
+                footprintYaw = null;
+            }
+
+            let desiredYaw = footprintYaw ?? pathYaw ?? bsReverseStartYaw;
+            if (!Number.isFinite(Number(desiredYaw))) {
+                return null;
+            }
+
+            desiredYaw = normalizeAngleRad(Number(desiredYaw));
+            if (Number.isFinite(Number(bsReverseStartYaw))) {
+                desiredYaw = clampYawAround(
+                    desiredYaw,
+                    Number(bsReverseStartYaw),
+                    BS_REVERSE_CONTROL.maxHeadingChangeRad
+                );
+            }
+            return desiredYaw;
+        }
+
+        function computeReverseYawCommand(yawError, now) {
+            let dt = 0.1;
+            let errorRate = 0;
+            if (bsLastYawControlTime > 0) {
+                dt = Math.max(0.05, Math.min(0.25, (now - bsLastYawControlTime) / 1000));
+                errorRate = normalizeAngleRad(yawError - bsLastYawError) / dt;
+            }
+
+            let targetCommand = 0;
+            if (Math.abs(yawError) > BS_REVERSE_CONTROL.yawDeadbandRad) {
+                targetCommand = BS_REVERSE_CONTROL.yawKp * yawError +
+                    BS_REVERSE_CONTROL.yawKd * errorRate;
+                targetCommand = Math.max(
+                    -BS_REVERSE_CONTROL.maxYawCommand,
+                    Math.min(BS_REVERSE_CONTROL.maxYawCommand, targetCommand)
+                );
+            }
+
+            const maxCommandStep = BS_REVERSE_CONTROL.maxYawAcceleration * dt;
+            const command = Math.max(
+                bsLastYawCommand - maxCommandStep,
+                Math.min(bsLastYawCommand + maxCommandStep, targetCommand)
+            );
+
+            bsLastYawError = yawError;
+            bsLastYawCommand = command;
+            bsLastYawControlTime = now;
+            return command;
         }
 
         // ==========================================
@@ -10925,7 +11090,7 @@
         let navGoal = null;
         let isNavigating = false;
         let navInterval = null;
-        let currentRobotPose = { x: 0, y: 0, yaw: 0 };
+        let currentRobotPose = { x: 0, y: 0, yaw: 0, updatedAt: 0 };
         window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：挂载到全局
 
         // 核心路径变量
@@ -11468,6 +11633,7 @@
             offsetPathDists = [];
             maxFaultIdx = -1;
             bsFootprints = [];
+            resetBinaryMotionController();
             window.g_faultTriggeredInBS = false;
         }
 
@@ -11704,9 +11870,9 @@
             if (bsState === 'MOVING') {
                 const distError = bsTargetDist - currentDist;
 
-                // ✅ 修复 3：将 this 改为显式的 window 挂载，防止作用域逃逸导致方向锁失效
+                // 每一轮二分移动开始时锁定移动方向，并初始化对应的航向控制器。
                 if (typeof window.bsInitialMoveDir === 'undefined') {
-                    window.bsInitialMoveDir = Math.sign(distError);
+                    initializeBinaryMotionController(Math.sign(distError));
                 }
                 const currentDir = Math.sign(distError);
                 const isOvershot = (window.bsInitialMoveDir !== 0 && currentDir !== 0 && currentDir !== window.bsInitialMoveDir);
@@ -11717,7 +11883,7 @@
                     bsState = 'EVAL_WAIT';
                     bsWaitEndTime = Date.now() + getFaultSearchWaitMs();
 
-                    window.bsInitialMoveDir = undefined; // 重置方向锁
+                    resetBinaryMotionController();
                     // ✅ 修复 2：到达目标点时，强制清空移动过程中可能积攒的“脏信号”
                     window.g_faultTriggeredInBS = false;
 
@@ -11725,64 +11891,66 @@
                     return;
                 }
 
-                // === 🌟 核心修复：倒车时沿真实脚印回退 ===
-                let targetPose;
-                const LOOKAHEAD_DIST = 0.4;
-
-                if (distError < 0 && bsFootprints.length > 5) {
-                    // 🔴 倒车模式：从机器狗真实踩过的脚印数组中，找身后 0.4 米的点
-                    let backDist = 0;
-                    let targetIdx = bsFootprints.length - 1;
-
-                    // 从数组末尾（也就是狗当前所在的位置）沿着脚印倒着往前算距离
-                    for (let i = bsFootprints.length - 1; i > 0; i--) {
-                        const d = Math.hypot(bsFootprints[i].x - bsFootprints[i - 1].x, bsFootprints[i].y - bsFootprints[i - 1].y);
-                        backDist += d;
-                        if (backDist >= LOOKAHEAD_DIST) {
-                            targetIdx = i - 1;
-                            break;
-                        }
+                const now = Date.now();
+                if (!isBinaryPoseFresh(now)) {
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                    if (now - bsLastPoseStaleWarningTime > 1000) {
+                        console.warn("⚠️ [二分定位] SLAM 位姿反馈超时，已暂停移动等待最新航向。");
+                        bsLastPoseStaleWarningTime = now;
                     }
-                    targetPose = bsFootprints[targetIdx];
-                } else {
-                    // 🟢 前进模式：继续参考系统生成的平滑偏移路径
-                    let steeringDist = Math.min(bsTargetDist, currentDist + LOOKAHEAD_DIST);
-                    targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
+                    return;
                 }
-                const dx = targetPose.x - currentRobotPose.x;
-                const dy = targetPose.y - currentRobotPose.y;
 
-                let targetYaw = Math.atan2(dy, dx);
-                let diff = targetYaw - currentRobotPose.yaw;
-                while (diff > Math.PI) diff -= 2 * Math.PI;
-                while (diff < -Math.PI) diff += 2 * Math.PI;
-
-                let v = 0.0, w = 0.0;
+                let v = 0.0;
+                let w = 0.0;
 
                 if (distError < 0) {
-                    // === 倒车模式 ===
-                    v = -0.15; // 🚀 提速：将基础倒车速度提高到 0.3 m/s (原为 -0.15)
+                    // 倒车闭环：脚印异常时使用平滑路径切向，并限制单轮最大航向变化。
+                    const desiredYaw = getReverseDesiredYaw(currentDist, distError);
+                    if (desiredYaw === null) {
+                        sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                        console.warn("⚠️ [二分定位] 无法获得可靠的倒车参考航向，已暂停移动。");
+                        return;
+                    }
 
-                    // 倒车时，机器狗的前方是远离目标的，所以要把目标偏航角反转 180 度进行纠偏2
-                    let reverseYaw = targetYaw + Math.PI;
-                    while (reverseYaw > Math.PI) reverseYaw -= 2 * Math.PI;
-                    while (reverseYaw < -Math.PI) reverseYaw += 2 * Math.PI;
+                    const yawError = normalizeAngleRad(desiredYaw - Number(currentRobotPose.yaw));
+                    const absYawError = Math.abs(yawError);
 
-                    diff = reverseYaw - currentRobotPose.yaw;
-                    while (diff > Math.PI) diff -= 2 * Math.PI;
-                    while (diff < -Math.PI) diff += 2 * Math.PI;
+                    if (absYawError >= BS_REVERSE_CONTROL.alignEnterRad) {
+                        bsReverseAligning = true;
+                    } else if (absYawError <= BS_REVERSE_CONTROL.alignExitRad) {
+                        bsReverseAligning = false;
+                    }
+
+                    w = computeReverseYawCommand(yawError, now);
+                    if (bsReverseAligning) {
+                        // 大角度时先原地闭环对准，避免边倒退边转向形成越来越大的圆弧。
+                        v = 0.0;
+                    } else {
+                        const speedScale = Math.max(
+                            0.35,
+                            1.0 - 0.65 * absYawError / BS_REVERSE_CONTROL.alignEnterRad
+                        );
+                        v = BS_REVERSE_CONTROL.reverseSpeed * speedScale;
+                    }
                 } else {
-                    // === 前进模式 ===
-                    v = 0.3; // 🚀 提速：将二分法前进速度也统一提高到 0.3 m/s
-                }
+                    // 前进阶段保持原来的纯追踪控制。
+                    const lookaheadDistance = 0.4;
+                    const steeringDist = Math.min(bsTargetDist, currentDist + lookaheadDistance);
+                    const targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
+                    const targetYaw = Math.atan2(
+                        targetPose.y - currentRobotPose.y,
+                        targetPose.x - currentRobotPose.x
+                    );
+                    const yawError = normalizeAngleRad(targetYaw - currentRobotPose.yaw);
 
-                // 结合车头误差计算转向
-                if (Math.abs(diff) > 0.8) {
-                    // 🚀 提速：即使在调整车头的大角度转向时，也保留 0.15 m/s 的底速防卡顿 (原为 0.05)
-                    v = (distError < 0) ? -0.15 : 0.15;
-                    w = diff > 0 ? 0.6 : -0.6; // 适当增加转向角速度，让纠偏更利落
-                } else {
-                    w = diff * 1.2; // 略微增加跟随时的响应灵敏度
+                    if (Math.abs(yawError) > 0.8) {
+                        v = 0.15;
+                        w = yawError > 0 ? 0.6 : -0.6;
+                    } else {
+                        v = 0.3;
+                        w = yawError * 1.2;
+                    }
                 }
 
                 if (typeof sendMoveCommand === 'function') {
@@ -12554,6 +12722,7 @@
                 offsetPathDists = [];
                 maxFaultIdx = -1;
                 bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
+                resetBinaryMotionController();
                 isFaultFindingMode = true;
                 btnFault.innerHTML = '<span class="btn-icon">⏹</span> 停止寻找';
 
@@ -12751,7 +12920,13 @@
                     window.lastRTKStatus = isRTK;
                 }
 
-                currentRobotPose = { x: px, y: py, yaw: pose.yaw };
+                const receivedYaw = Number(pose.yaw);
+                currentRobotPose = {
+                    x: px,
+                    y: py,
+                    yaw: Number.isFinite(receivedYaw) ? receivedYaw : currentRobotPose.yaw,
+                    updatedAt: Date.now()
+                };
                 window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
 
                 updateNavLine();
