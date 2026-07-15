@@ -2125,6 +2125,7 @@ input[type="range"]::-webkit-slider-thumb {
 /* 按钮组容器 */
 .header-btn-group {
     display: flex;
+    align-items: center;
     gap: 8px;
 }
 

@@ -343,22 +343,29 @@
                                 <span>路径规划与定位地图</span>
 
                                 <div class="header-btn-group">
-                                    <input type="file" id="kmlFileInput" accept=".kml" style="display: none;" />
-                                    <button id="btnLoadKml" class="header-btn-mini">
-                                        📂 读取KML航线
-                                    </button>
-
                                     <button id="btnManualDrawCable" class="header-btn-mini">
                                         📍 手动绘制电缆
                                     </button>
-                                    <button id="btnSavePcd" class="header-btn-mini"
-                                        title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
-                                        💾 保存点云
-                                    </button>
-                                    <button id="btnFaultWaitSettings" class="header-btn-mini"
-                                        title="设置自动寻找破损点每次停车检测的等待间隔">
-                                        ⚙ 参数设置
-                                    </button>
+
+                                    <div class="dropdown-group">
+                                        <button class="header-btn-mini dropdown-toggle" type="button">
+                                            🛠 工具 ▼
+                                        </button>
+                                        <div class="dropdown-content">
+                                            <input type="file" id="kmlFileInput" accept=".kml" style="display: none;" />
+                                            <button id="btnLoadKml" class="dropdown-item" type="button">
+                                                📂 读取KML航线
+                                            </button>
+                                            <button id="btnSavePcd" class="dropdown-item" type="button"
+                                                title="同时保存 PCD 点云和同名 .geo.json 经纬度标定文件">
+                                                💾 保存点云
+                                            </button>
+                                            <button id="btnFaultWaitSettings" class="dropdown-item" type="button"
+                                                title="设置自动寻找破损点每次停车检测的等待间隔">
+                                                ⚙ 参数设置
+                                            </button>
+                                        </div>
+                                    </div>
 
                                     <div class="dropdown-group">
                                         <button class="header-btn-mini dropdown-toggle">
