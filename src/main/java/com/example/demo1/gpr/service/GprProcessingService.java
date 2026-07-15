@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -31,6 +32,19 @@ public class GprProcessingService {
      * 处理指定目录下的所有 .dzt 文件
      */
     public GprProcessResult processFolder(String folderPath, GprConfig cfg) throws IOException {
+        return processFolder(folderPath, cfg, null);
+    }
+
+    /**
+     * 处理指定目录下的所有 .dzt 文件，并通过 progressListener 上报 0～100 的百分比。
+     */
+    public GprProcessResult processFolder(
+            String folderPath,
+            GprConfig cfg,
+            IntConsumer progressListener
+    ) throws IOException {
+
+        reportProgress(progressListener, 0);
 
         Path dir = Paths.get(folderPath);
         if (!Files.isDirectory(dir)) {
@@ -73,6 +87,9 @@ public class GprProcessingService {
         int globalIndex = 0;
 
         for (Path file : dztFiles) {
+            final int currentFileIndex = globalIndex;
+            reportFileProgress(progressListener, currentFileIndex, N, 0.02);
+
             // 动态推算当前文件的总道数，以便读取整个文件
             long fileSize = Files.size(file);
             int dataBytes = (int) (fileSize - cfg.getHeaderBytes());
@@ -88,6 +105,7 @@ public class GprProcessingService {
             double[][] data = read.data; // [ns x nr]
             int nz = data.length;
             int nu = data[0].length;
+            reportFileProgress(progressListener, currentFileIndex, N, 0.08);
 
             // 水平翻转 (使用全局索引)
             if (flipLR[globalIndex]) {
@@ -101,8 +119,10 @@ public class GprProcessingService {
             if (cfg.isDepthGainOn()) {
                 applyDepthGain(data, cfg.getDepthGainStrength());
             }
+            reportFileProgress(progressListener, currentFileIndex, N, 0.12);
 
             // === 4. 斐波那契搜索，最小化偏移图像熵 ===
+            final int entropyEvaluationCount = Math.max(3, cfg.getFibIters());
             FibResult fib = fibonacciMinEntropy(
                     data,
                     cfg.getDtNs(),
@@ -110,7 +130,11 @@ public class GprProcessingService {
                     cfg.getVSearchMin(),
                     cfg.getVSearchMax(),
                     cfg.getFibIters(),
-                    cfg.getEntropyBins()
+                    cfg.getEntropyBins(),
+                    completedEvaluations -> {
+                        double fraction = 0.12 + 0.78 * completedEvaluations / entropyEvaluationCount;
+                        reportFileProgress(progressListener, currentFileIndex, N, fraction);
+                    }
             );
             double vBest = fib.vBest;
             double hBest = fib.hBest;
@@ -123,6 +147,7 @@ public class GprProcessingService {
                     cfg.getDxM(),
                     vBest
             );
+            reportFileProgress(progressListener, currentFileIndex, N, 0.98);
 
             // === 6. Z 字几何计算 ===
             double phi = phiCable + dirs[globalIndex] * theta;
@@ -168,6 +193,7 @@ public class GprProcessingService {
             segResult.setGeometry(geo);
 
             results.add(segResult);
+            reportFileProgress(progressListener, currentFileIndex, N, 1.0);
 
             System.out.printf(
                     "  [%2d/%2d] %s | traces=%d dir=%+d flip=%b | v* = %.5f m/ns%n",
@@ -199,7 +225,33 @@ public class GprProcessingService {
         out.setVBestStats(new double[]{vMin, vMed, vMax});
 
         System.out.println("处理完成。");
+        reportProgress(progressListener, 100);
         return out;
+    }
+
+    private void reportFileProgress(
+            IntConsumer progressListener,
+            int fileIndex,
+            int totalFiles,
+            double fileFraction
+    ) {
+        if (totalFiles <= 0) {
+            reportProgress(progressListener, 0);
+            return;
+        }
+        double completed = fileIndex + Math.max(0.0, Math.min(1.0, fileFraction));
+        int percentage = (int) Math.floor(completed * 100.0 / totalFiles);
+        reportProgress(progressListener, Math.min(99, percentage));
+    }
+
+    private void reportProgress(IntConsumer progressListener, int percentage) {
+        notifyListener(progressListener, Math.max(0, Math.min(100, percentage)));
+    }
+
+    private void notifyListener(IntConsumer listener, int value) {
+        if (listener != null) {
+            listener.accept(value);
+        }
     }
 
     // ========================= 方向 / 翻转控制 =============================
@@ -404,7 +456,8 @@ public class GprProcessingService {
             double vmin,
             double vmax,
             int Nfib,
-            int nbins
+            int nbins,
+            IntConsumer evaluationListener
     ) {
         if (Nfib < 3) Nfib = 3;
 
@@ -423,7 +476,10 @@ public class GprProcessingService {
         double x2 = a + (double) F[k - 1] / F[k] * (b - a);
 
         double H1 = costEntropy(x1, data, dtNs, dxM, nbins);
+        int completedEvaluations = 1;
+        notifyListener(evaluationListener, completedEvaluations);
         double H2 = costEntropy(x2, data, dtNs, dxM, nbins);
+        notifyListener(evaluationListener, ++completedEvaluations);
 
         for (k = Nfib; k >= 3; k--) {
             if (H1 > H2) {
@@ -439,6 +495,7 @@ public class GprProcessingService {
                 x1 = a + (double) F[k - 2] / F[k] * (b - a);
                 H1 = costEntropy(x1, data, dtNs, dxM, nbins);
             }
+            notifyListener(evaluationListener, ++completedEvaluations);
         }
 
         FibResult out = new FibResult();

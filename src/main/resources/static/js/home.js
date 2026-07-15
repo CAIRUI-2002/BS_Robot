@@ -244,6 +244,7 @@
     function $(id) { return document.getElementById(id); }
 
     const OPERATION_STATUS_HISTORY_LIMIT = 3;
+    const GPR_PROGRESS_STATUS_KEY = "gpr-processing-progress";
     let operationStatusHistory = [];
 
     function isTrajectoryGeoCalibrationActive() {
@@ -309,6 +310,23 @@
 
         operationStatusHistory.unshift({ message, type: statusType });
         operationStatusHistory = operationStatusHistory.slice(0, OPERATION_STATUS_HISTORY_LIMIT);
+        renderOperationStatusEntries(operationStatusHistory);
+    }
+
+    function setGprProcessingProgress(value) {
+        const percentage = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+        operationStatusHistory = operationStatusHistory.filter(item => item.key !== GPR_PROGRESS_STATUS_KEY);
+        operationStatusHistory.unshift({
+            key: GPR_PROGRESS_STATUS_KEY,
+            message: `处理进度：${percentage}%`,
+            type: ""
+        });
+        operationStatusHistory = operationStatusHistory.slice(0, OPERATION_STATUS_HISTORY_LIMIT);
+        renderOperationStatusEntries(operationStatusHistory);
+    }
+
+    function clearGprProcessingProgress() {
+        operationStatusHistory = operationStatusHistory.filter(item => item.key !== GPR_PROGRESS_STATUS_KEY);
         renderOperationStatusEntries(operationStatusHistory);
     }
 
@@ -4904,7 +4922,6 @@
         const btnLoadCurrentPointCloudMap = $("btnLoadCurrentPointCloudMap"); // ✅ 加载路径页当前点云地图
         const btnClearGprPointCloudMap = $("btnClearGprPointCloudMap"); // ✅ 清除三维重建页点云地图
 
-        if (btnStart) btnStart.addEventListener("click", startGprProcessing);
         if (btnLoadCurrentPointCloudMap) {
             btnLoadCurrentPointCloudMap.addEventListener("click", loadCurrentPathFaultMapToGpr);
         }
@@ -5912,6 +5929,40 @@
     }
 
     // 调用后端接口
+    function createGprProgressTaskId() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+            return window.crypto.randomUUID();
+        }
+        return `gpr-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function startGprProgressPolling(taskId) {
+        let stopped = false;
+        let timer = null;
+
+        const poll = function () {
+            if (stopped) return;
+            fetch("/api/gpr/progress?taskId=" + encodeURIComponent(taskId), { cache: "no-store" })
+                .then(res => res.ok ? res.json() : null)
+                .then(data => {
+                    if (!stopped && data && Number.isFinite(Number(data.progress))) {
+                        setGprProcessingProgress(Number(data.progress));
+                    }
+                })
+                .catch(() => {
+                    // 处理请求刚创建时进度记录可能尚未注册，下次轮询会自动补上。
+                });
+        };
+
+        poll();
+        timer = window.setInterval(poll, 400);
+
+        return function stopPolling() {
+            stopped = true;
+            if (timer !== null) window.clearInterval(timer);
+        };
+    }
+
     function startGprProcessing() {
         const input = $("folderPathInput");
         if (!input) return;
@@ -5925,9 +5976,15 @@
         currentGprFolderPath = normalizeGprFolderPath(folderPath);
         currentGprAnnotationStorageKey = getGprFolderAnnotationKey(currentGprFolderPath);
 
-        setStatus("正在处理，请稍候……", null);
+        const btnStart = $("btnStartGpr");
+        if (btnStart && btnStart.disabled) return;
+        if (btnStart) btnStart.disabled = true;
 
-        fetch("/api/gpr/process?folderPath=" + encodeURIComponent(folderPath), {
+        const taskId = createGprProgressTaskId();
+        setGprProcessingProgress(0);
+        const stopProgressPolling = startGprProgressPolling(taskId);
+
+        fetch("/api/gpr/process?folderPath=" + encodeURIComponent(folderPath) + "&taskId=" + encodeURIComponent(taskId), {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
@@ -5944,12 +6001,18 @@
                 if (!data || !data.segments || !data.segments.length) {
                     throw new Error("返回数据为空或格式不正确");
                 }
-                setStatus("处理完成。当前显示的是第 1 段 B 扫结果。", "success");
+                stopProgressPolling();
+                clearGprProcessingProgress();
                 await renderGprResults(data);
             })
             .catch(function (err) {
                 console.error(err);
+                clearGprProcessingProgress();
                 setStatus("处理失败：" + err.message, "error");
+            })
+            .finally(function () {
+                stopProgressPolling();
+                if (btnStart) btnStart.disabled = false;
             });
 
     }
@@ -6320,21 +6383,19 @@
             segmentSelect.value = "0";
         }
 
-        showSegment(0);
+        // 初次展示由 renderGprResults 统一记录完成日志，避免 showSegment 重复写入。
+        showSegment(0, false);
         render3DZigzagAll(result, true);
 
-        if (calibrationLoadInfo && calibrationLoadInfo.loaded) {
-            setStatus(
-                "处理完成",
-                "success"
-            );
-        } else if (calibrationLoadInfo && calibrationLoadInfo.reason === "signature-mismatch") {
+        if (calibrationLoadInfo && calibrationLoadInfo.reason === "signature-mismatch") {
             setStatus("处理完成。已在当前GPR文件夹中发现历史校准，但剖面数量或文件名不一致，已使用当前自动识别结果。", "error");
+        } else {
+            setStatus("处理完成", "success");
         }
     }
 
     // 显示指定索引的剖面（2D）
-    function showSegment(index) {
+    function showSegment(index, showStatus = true) {
         if (!gprResult || !gprResult.segments) return;
         if (index < 0 || index >= gprResult.segments.length) return;
 
@@ -6348,7 +6409,9 @@
             render2DCanvas("mig2dCanvas", seg.migratedData);
         }
 
-        setStatus("处理完成。当前显示的是第 " + (index + 1) + " 段 B 扫结果。", "success");
+        if (showStatus) {
+            setStatus("处理完成。当前显示的是第 " + (index + 1) + " 段 B 扫结果。", "success");
+        }
     }
 
     // ====================== 2D 灰度图绘制 ======================

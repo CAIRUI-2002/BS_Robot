@@ -1,6 +1,9 @@
 package com.example.demo1.controller;
 
 import java.io.File;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.FileSystemResource;
@@ -28,6 +31,10 @@ import com.example.demo1.gpr.service.GprProcessingService;
 @RequestMapping("/api/gpr")
 public class GprController {
 
+    private static final long PROGRESS_RETENTION_MILLIS = 10 * 60 * 1000L;
+
+    private final ConcurrentMap<String, ProgressEntry> progressByTaskId = new ConcurrentHashMap<>();
+
     @Autowired
     private GprProcessingService gprProcessingService;
 
@@ -49,13 +56,79 @@ public class GprController {
     @PostMapping("/process")
     public GprProcessResult processFolder(
             @RequestParam("folderPath") String folderPath,
+            @RequestParam(value = "taskId", required = false) String taskId,
             @RequestBody(required = false) GprConfig config
     ) throws Exception {
         if (config == null) {
             config = new GprConfig(); // 使用默认参数
         }
-        return gprProcessingService.processFolder(folderPath, config);
+
+        String normalizedTaskId = normalizeTaskId(taskId);
+        if (normalizedTaskId == null) {
+            return gprProcessingService.processFolder(folderPath, config);
+        }
+
+        cleanupExpiredProgress();
+        ProgressEntry entry = new ProgressEntry();
+        progressByTaskId.put(normalizedTaskId, entry);
+
+        try {
+            GprProcessResult result = gprProcessingService.processFolder(folderPath, config, entry::update);
+            entry.update(100);
+            return result;
+        } catch (Exception ex) {
+            progressByTaskId.remove(normalizedTaskId, entry);
+            throw ex;
+        }
     }
+
+    /**
+     * 查询指定 GPR 处理任务的百分比进度。
+     */
+    @GetMapping("/progress")
+    public ResponseEntity<Map<String, Integer>> getProgress(@RequestParam("taskId") String taskId) {
+        cleanupExpiredProgress();
+        ProgressEntry entry = progressByTaskId.get(taskId);
+        if (entry == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(Map.of("progress", entry.getProgress()));
+    }
+
+    private String normalizeTaskId(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            return null;
+        }
+        String normalized = taskId.trim();
+        if (normalized.length() > 128) {
+            throw new IllegalArgumentException("taskId 长度不能超过 128 个字符");
+        }
+        return normalized;
+    }
+
+    private void cleanupExpiredProgress() {
+        long cutoff = System.currentTimeMillis() - PROGRESS_RETENTION_MILLIS;
+        progressByTaskId.entrySet().removeIf(item -> item.getValue().getUpdatedAt() < cutoff);
+    }
+
+    private static final class ProgressEntry {
+        private volatile int progress;
+        private volatile long updatedAt = System.currentTimeMillis();
+
+        private void update(int value) {
+            progress = Math.max(progress, Math.max(0, Math.min(100, value)));
+            updatedAt = System.currentTimeMillis();
+        }
+
+        private int getProgress() {
+            return progress;
+        }
+
+        private long getUpdatedAt() {
+            return updatedAt;
+        }
+    }
+
     /**
      * 读取绝对路径的点云文件并返回流给 Three.js PCDLoader
      * 用法示例： GET /api/gpr/pcd?filePath=/mnt/e/data/map.pcd
