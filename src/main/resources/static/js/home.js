@@ -9284,47 +9284,111 @@
             }
         }
 
-        // --- 4. WebSocket 连接 (✅ 保持不变) ---
+        // --- 4. 声磁 WebSocket：心跳保活 + Wi-Fi 断开后自动重连 ---
         const wsUrl = "ws://10.21.31.104:8001/ws/signal";
-        const ws = new WebSocket(wsUrl);
+        const SIGNAL_RECONNECT_DELAY_MS = 2000;
+        const SIGNAL_HEARTBEAT_INTERVAL_MS = 5000;
+        let signalWs = null;
+        let signalReconnectTimer = null;
+        let signalHeartbeatTimer = null;
 
-        ws.onopen = () => {
-            console.log("📡 AUC Signal Engine Connected");
-            if (statusDiv) {
-                statusDiv.textContent = "● AUC LIVE";
-                statusDiv.style.color = "#0f0";
+        function updateSignalConnectionStatus(text, color) {
+            if (!statusDiv) return;
+            statusDiv.textContent = text;
+            statusDiv.style.color = color;
+        }
+
+        function clearSignalHeartbeat() {
+            if (signalHeartbeatTimer !== null) {
+                window.clearInterval(signalHeartbeatTimer);
+                signalHeartbeatTimer = null;
             }
-            resizeCanvas();
-        };
+        }
 
-        ws.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === "mixed_signal" || msg.type === "signal") {
-                    // 1. 处理磁信号 (Ch1) -> 送入 AUC 算法 & 绘图缓存
-                    // 修改为：
-                    if (msg.mag_data && msg.snd_data) {
-                        channel1Data = msg.mag_data;
-                        channel2Data = msg.snd_data;
-                        processSignals(msg.mag_data, msg.snd_data);
-                    } else if (msg.ch1 && msg.ch2) {
-                        channel1Data = msg.ch1;
-                        channel2Data = msg.ch2;
-                        processSignals(msg.ch1, msg.ch2);
-                    }
+        function scheduleSignalReconnect() {
+            if (signalReconnectTimer !== null) return;
+
+            updateSignalConnectionStatus("● RECONNECTING", "#ffb000");
+            console.warn("⚠️ 声磁 WebSocket 已断开，2 秒后自动重连...");
+            signalReconnectTimer = window.setTimeout(() => {
+                signalReconnectTimer = null;
+                connectSignalWebSocket();
+            }, SIGNAL_RECONNECT_DELAY_MS);
+        }
+
+        function connectSignalWebSocket() {
+            if (signalWs && (
+                signalWs.readyState === WebSocket.OPEN ||
+                signalWs.readyState === WebSocket.CONNECTING
+            )) {
+                return;
+            }
+
+            console.log("正在尝试连接声磁 WebSocket:", wsUrl);
+            const socket = new WebSocket(wsUrl);
+            signalWs = socket;
+
+            socket.onopen = () => {
+                if (signalWs !== socket) return;
+
+                if (signalReconnectTimer !== null) {
+                    window.clearTimeout(signalReconnectTimer);
+                    signalReconnectTimer = null;
                 }
-            } catch (e) {
-                console.error("Data Parse Error", e);
-            }
-        };
 
-        ws.onerror = (err) => {
-            if (statusDiv) { statusDiv.textContent = "● ERROR"; statusDiv.style.color = "#f00"; }
-        };
+                clearSignalHeartbeat();
+                signalHeartbeatTimer = window.setInterval(() => {
+                    if (signalWs === socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send("ping");
+                    }
+                }, SIGNAL_HEARTBEAT_INTERVAL_MS);
 
-        ws.onclose = () => {
-            if (statusDiv) { statusDiv.textContent = "● OFFLINE"; statusDiv.style.color = "#f00"; }
-        };
+                console.log("📡 AUC Signal Engine Connected");
+                updateSignalConnectionStatus("● AUC LIVE", "#0f0");
+                resizeCanvas();
+            };
+
+            socket.onmessage = (event) => {
+                if (signalWs !== socket) return;
+
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === "mixed_signal" || msg.type === "signal") {
+                        // 1. 处理磁信号 (Ch1) -> 送入 AUC 算法 & 绘图缓存
+                        if (msg.mag_data && msg.snd_data) {
+                            channel1Data = msg.mag_data;
+                            channel2Data = msg.snd_data;
+                            processSignals(msg.mag_data, msg.snd_data);
+                        } else if (msg.ch1 && msg.ch2) {
+                            channel1Data = msg.ch1;
+                            channel2Data = msg.ch2;
+                            processSignals(msg.ch1, msg.ch2);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Data Parse Error", e);
+                }
+            };
+
+            socket.onerror = (err) => {
+                if (signalWs !== socket) return;
+
+                console.warn("声磁 WebSocket 连接异常:", err);
+                updateSignalConnectionStatus("● ERROR", "#f00");
+                socket.close();
+            };
+
+            socket.onclose = () => {
+                if (signalWs !== socket) return;
+
+                signalWs = null;
+                clearSignalHeartbeat();
+                updateSignalConnectionStatus("● OFFLINE", "#f00");
+                scheduleSignalReconnect();
+            };
+        }
+
+        connectSignalWebSocket();
     })();
 
     // ==========================================
