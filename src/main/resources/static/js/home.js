@@ -10775,6 +10775,225 @@
         // 先只对点云/机器狗/轨迹做统一高度补偿，不动 grid。
         const SLAM_Z_OFFSET = 0.8;
 
+        // ✅ 地面点云覆盖路径时的自适应抬高配置
+        // 不采用“路径上方只要有点就抬高”的判断，因为行人经过也会在路径上方产生临时点云。
+        // 这里按 XY 网格累计高度直方图，只接受跨多个相邻网格、重复出现且占主导的低位高度层作为地面。
+        const PATH_GROUND_LIFT_CONFIG = {
+            cellSizeM: 0.20,
+            queryRadiusM: 0.36,
+            heightBinM: 0.03,
+            maxBinsPerCell: 7,
+            minGroundVotes: 12,
+            minSupportingCells: 2,
+            maxGroundAbovePathM: 0.12,
+            maxGroundBelowPathM: 0.45,
+            pathRadiusM: 0.03,
+            separationEpsilonM: 0.003,
+            gridSampleStride: 3,
+            maxGridCells: 120000
+        };
+        const pathGroundHeightGrid = new Map();
+
+        function getPathGroundCellKey(cellX, cellY) {
+            return cellX + ":" + cellY;
+        }
+
+        function recordPointForPathGroundDetection(x, y, worldZ) {
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(worldZ)) return;
+            if (Math.abs(x) >= 9000 || Math.abs(y) >= 9000 || Math.abs(worldZ) >= 100) return;
+
+            const cellSize = PATH_GROUND_LIFT_CONFIG.cellSizeM;
+            const cellX = Math.floor(x / cellSize);
+            const cellY = Math.floor(y / cellSize);
+            const key = getPathGroundCellKey(cellX, cellY);
+            let cell = pathGroundHeightGrid.get(key);
+
+            if (!cell) {
+                // 限制长期运行时的索引大小；被移除的旧区域在再次扫描到时会自动重建。
+                if (pathGroundHeightGrid.size >= PATH_GROUND_LIFT_CONFIG.maxGridCells) {
+                    const removeCount = Math.ceil(PATH_GROUND_LIFT_CONFIG.maxGridCells * 0.08);
+                    const iterator = pathGroundHeightGrid.keys();
+                    for (let i = 0; i < removeCount; i++) {
+                        const old = iterator.next();
+                        if (old.done) break;
+                        pathGroundHeightGrid.delete(old.value);
+                    }
+                }
+                cell = { bins: new Map() };
+                pathGroundHeightGrid.set(key, cell);
+            }
+
+            const heightBin = Math.round(worldZ / PATH_GROUND_LIFT_CONFIG.heightBinM);
+            cell.bins.set(heightBin, Math.min(65535, (cell.bins.get(heightBin) || 0) + 1));
+
+            // 人体/车辆等竖向目标会产生许多零散高度层。每格只保留投票最稳定的少数高度层，
+            // 防止这些临时高位点长期占用内存或参与地面判断。
+            if (cell.bins.size > PATH_GROUND_LIFT_CONFIG.maxBinsPerCell) {
+                let weakestBin = null;
+                let weakestVotes = Infinity;
+                cell.bins.forEach((votes, bin) => {
+                    if (votes < weakestVotes) {
+                        weakestVotes = votes;
+                        weakestBin = bin;
+                    }
+                });
+                if (weakestBin !== null) cell.bins.delete(weakestBin);
+            }
+        }
+
+        function estimateStableGroundHeightNearPath(x, y, pathWorldZ) {
+            const cfg = PATH_GROUND_LIFT_CONFIG;
+            const centerCellX = Math.floor(x / cfg.cellSizeM);
+            const centerCellY = Math.floor(y / cfg.cellSizeM);
+            const cellRadius = Math.ceil(cfg.queryRadiusM / cfg.cellSizeM);
+            const aggregated = new Map(); // heightBin -> {votes, cells}
+
+            for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+                    const cellCenterDx = dx * cfg.cellSizeM;
+                    const cellCenterDy = dy * cfg.cellSizeM;
+                    if (Math.hypot(cellCenterDx, cellCenterDy) > cfg.queryRadiusM + cfg.cellSizeM * 0.75) continue;
+
+                    const cell = pathGroundHeightGrid.get(getPathGroundCellKey(centerCellX + dx, centerCellY + dy));
+                    if (!cell) continue;
+
+                    cell.bins.forEach((votes, bin) => {
+                        const height = bin * cfg.heightBinM;
+                        if (height < pathWorldZ - cfg.maxGroundBelowPathM ||
+                            height > pathWorldZ + cfg.maxGroundAbovePathM) {
+                            return;
+                        }
+                        let item = aggregated.get(bin);
+                        if (!item) {
+                            item = { votes: 0, cells: 0 };
+                            aggregated.set(bin, item);
+                        }
+                        item.votes += votes;
+                        item.cells += 1;
+                    });
+                }
+            }
+
+            if (!aggregated.size) return null;
+
+            // 高度相邻的三个 bin 合并评分，以适应地面小坡度和点云测高噪声。
+            const scored = [];
+            aggregated.forEach((item, bin) => {
+                let votes = 0;
+                let cells = 0;
+                for (let offset = -1; offset <= 1; offset++) {
+                    const neighbor = aggregated.get(bin + offset);
+                    if (!neighbor) continue;
+                    votes += neighbor.votes;
+                    cells += neighbor.cells;
+                }
+                scored.push({ bin, votes, cells });
+            });
+            scored.sort((a, b) => b.votes - a.votes || a.bin - b.bin);
+            const strongest = scored[0];
+            if (!strongest || strongest.votes < cfg.minGroundVotes || strongest.cells < cfg.minSupportingCells) {
+                return null;
+            }
+
+            // 若较低高度层拥有足够多的稳定投票，优先认定它为地面。
+            // 行人通常形成更高的点层，因此即使短时点数较多，也不会替代下方连续地面层。
+            const stableCandidates = scored.filter(item =>
+                item.votes >= cfg.minGroundVotes &&
+                item.cells >= cfg.minSupportingCells
+            );
+            const ground = stableCandidates.reduce((lowest, item) =>
+                !lowest || item.bin < lowest.bin ? item : lowest
+            , null);
+            if (!ground) return null;
+
+            let weightedHeight = 0;
+            let totalVotes = 0;
+            for (let offset = -1; offset <= 1; offset++) {
+                const bin = ground.bin + offset;
+                const item = aggregated.get(bin);
+                if (!item) continue;
+                weightedHeight += bin * cfg.heightBinM * item.votes;
+                totalVotes += item.votes;
+            }
+            const centerZ = totalVotes > 0 ? weightedHeight / totalVotes : ground.bin * cfg.heightBinM;
+
+            // 地面顶边使用“地面主高度层及其紧邻上层”中仍具有稳定空间支持的最高 bin。
+            // 更高的人体点层与地面层不连续，不会进入这个顶边计算。
+            let topBin = ground.bin;
+            for (let offset = 0; offset <= 1; offset++) {
+                const bin = ground.bin + offset;
+                const item = aggregated.get(bin);
+                if (item && item.votes >= cfg.minGroundVotes && item.cells >= cfg.minSupportingCells) {
+                    topBin = Math.max(topBin, bin);
+                }
+            }
+
+            return {
+                centerZ,
+                // 加半个量化步长，表示该高度 bin 的实际最高边界，而不是固定抬高距离。
+                topZ: (topBin + 0.5) * cfg.heightBinM
+            };
+        }
+
+        function getRenderedPointCloudRadiusM() {
+            const scanPointSize = Number(scanMesh?.material?.size);
+            const mapPointSize = Number(mapMesh?.material?.size);
+            const pointDiameter = Math.max(
+                Number.isFinite(scanPointSize) ? scanPointSize : 0,
+                Number.isFinite(mapPointSize) ? mapPointSize : 0
+            );
+            return Math.max(0, pointDiameter * 0.5);
+        }
+
+        function liftPathDisplayPointsAboveGround(points, parentWorldZ = 0) {
+            if (!Array.isArray(points) || !points.length) return [];
+            const cfg = PATH_GROUND_LIFT_CONFIG;
+            const lifted = points.map(source => {
+                return source.clone ? source.clone() : new THREE.Vector3(
+                    Number(source.x), Number(source.y), Number(source.z || 0)
+                );
+            });
+            const pointCloudRadiusM = getRenderedPointCloudRadiusM();
+            let wholePathLiftM = 0;
+
+            // 先逐点检查覆盖情况，但暂不改变任何点的高度。
+            // 整条路径最终统一采用其中最大的必要抬高量，保持原有三维形状不变。
+            lifted.forEach(point => {
+                const baseWorldZ = Number(point.z) + Number(parentWorldZ || 0);
+                const groundSurface = estimateStableGroundHeightNearPath(point.x, point.y, baseWorldZ);
+                if (!groundSurface || !Number.isFinite(groundSurface.topZ)) return;
+
+                // 只有地面点的球形显示范围确实触及管线路径时才抬高。
+                // 高于该窄地面带的行人点云不会进入 groundSurface，因此不会触发本条件。
+                const groundCloudTopZ = groundSurface.topZ + pointCloudRadiusM;
+                const pathBottomZ = baseWorldZ - cfg.pathRadiusM;
+                if (groundCloudTopZ < pathBottomZ) return;
+
+                // 目标中心高度按当前地面点云的真实顶边动态计算：
+                // 地面点顶边 + 管线路径半径 + 极小分离量，刚好脱离覆盖即可。
+                const targetWorldZ = groundCloudTopZ + cfg.pathRadiusM + cfg.separationEpsilonM;
+                const liftM = targetWorldZ - baseWorldZ;
+                if (liftM > wholePathLiftM) wholePathLiftM = liftM;
+            });
+
+            if (wholePathLiftM > 0) {
+                lifted.forEach(point => {
+                    point.z += wholePathLiftM;
+                });
+            }
+
+            // 用高度签名判断地面索引更新后是否真的需要重建 TubeGeometry。
+            // 行人高位点被过滤后签名不会改变，因此不会导致路径重绘或抬高。
+            let heightHash = lifted.length >>> 0;
+            lifted.forEach(point => {
+                heightHash = (((heightHash * 31) >>> 0) + (Math.round(point.z * 1000) >>> 0)) >>> 0;
+            });
+            lifted.groundLiftedPointCount = wholePathLiftM > 0 ? lifted.length : 0;
+            lifted.groundWholePathLiftM = wholePathLiftM;
+            lifted.groundLiftSignature = `${lifted.length}:${heightHash}`;
+            return lifted;
+        }
+
         // B1. 实时雷达层
         const scanGeom = new THREE.BufferGeometry();
         // 👇 修改后：扩大为 50000 个点，尺寸调为 0.05
@@ -10846,6 +11065,51 @@
         const PIPELINE_TRACK_SIDE_OFFSET_M = 0.10;   // S 型巡线时连续补点需要更多利用 1/2 信号，避免黄线被旧方向拖偏
         const MAX_CABLE_POINT_TURN_DEG = 22;         // 单个近距离采样点不允许出现不符合电缆物理特性的巨大折角
         let lastSignalPose = null;
+        let lastPathGroundLiftRefreshMs = 0;
+
+        function rememberPathGroundLiftState(mesh, visiblePoints) {
+            if (!mesh || !visiblePoints) return mesh;
+            mesh.userData = mesh.userData || {};
+            mesh.userData.groundLiftSignature = visiblePoints.groundLiftSignature || "";
+            mesh.userData.groundLiftedPointCount = visiblePoints.groundLiftedPointCount || 0;
+            mesh.userData.groundWholePathLiftM = Number(visiblePoints.groundWholePathLiftM || 0);
+            return mesh;
+        }
+
+        function refreshRenderedPathsForGroundLift(force = false) {
+            const now = performance.now();
+            if (!force && now - lastPathGroundLiftRefreshMs < 750) return;
+            lastPathGroundLiftRefreshMs = now;
+
+            if (currentTrailMesh && trailPoints.length >= 2) {
+                const visibleTrailPoints = liftPathDisplayPointsAboveGround(trailPoints, trailGroup.position.z);
+                if (currentTrailMesh.userData?.groundLiftSignature !== visibleTrailPoints.groundLiftSignature) {
+                    const curve = new THREE.CatmullRomCurve3(visibleTrailPoints);
+                    const newGeometry = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
+                    currentTrailMesh.geometry.dispose();
+                    currentTrailMesh.geometry = newGeometry;
+                    rememberPathGroundLiftState(currentTrailMesh, visibleTrailPoints);
+                }
+            }
+
+            const cableDisplayPoints = Array.isArray(window.savedCablePath) ? window.savedCablePath : [];
+            if (currentCableMesh && cableDisplayPoints.length >= 2) {
+                const visibleCablePoints = liftPathDisplayPointsAboveGround(cableDisplayPoints, cableGroup.position.z);
+                if (currentCableMesh.userData?.groundLiftSignature !== visibleCablePoints.groundLiftSignature) {
+                    const curve = new THREE.CatmullRomCurve3(visibleCablePoints, false, "centripetal", 0.35);
+                    const newGeometry = new THREE.TubeGeometry(
+                        curve,
+                        Math.max(cableDisplayPoints.length * 8, 16),
+                        0.03,
+                        8,
+                        false
+                    );
+                    currentCableMesh.geometry.dispose();
+                    currentCableMesh.geometry = newGeometry;
+                    rememberPathGroundLiftState(currentCableMesh, visibleCablePoints);
+                }
+            }
+        }
 
         function isValidCablePos(pos) {
             return pos && Number.isFinite(pos.x) && Number.isFinite(pos.y) && pos.x !== -999;
@@ -11197,7 +11461,8 @@
                 currentCableMesh = null;
             }
 
-            const curve = new THREE.CatmullRomCurve3(points);
+            const visiblePoints = liftPathDisplayPointsAboveGround(points, cableGroup.position.z);
+            const curve = new THREE.CatmullRomCurve3(visiblePoints);
             const tube = new THREE.TubeGeometry(
                 curve,
                 Math.max(points.length * 8, 16),
@@ -11207,6 +11472,7 @@
             );
 
             currentCableMesh = new THREE.Mesh(tube, cableMat);
+            rememberPathGroundLiftState(currentCableMesh, visiblePoints);
             cableGroup.add(currentCableMesh);
         }
 
@@ -12477,6 +12743,8 @@
                 mapAttr.needsUpdate = true;
 
                 mapCursor = 0;
+                pathGroundHeightGrid.clear();
+                refreshRenderedPathsForGroundLift(true);
                 lastKeyframePose = { x: -999, y: -999 };
             };
         }
@@ -13033,9 +13301,11 @@
                         window.syncCablePathPrediction?.(true);
 
                         // 6. 构造 CatmullRom 连续曲线并在 3D Scene 中生成黄色粗线条管线
-                        const curve = new THREE.CatmullRomCurve3(displayPoints, false, 'centripetal', 0.35);
+                        const visibleCablePoints = liftPathDisplayPointsAboveGround(displayPoints, cableGroup.position.z);
+                        const curve = new THREE.CatmullRomCurve3(visibleCablePoints, false, 'centripetal', 0.35);
                         const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
                         currentCableMesh = new THREE.Mesh(tube, cableMat); // 复用自带的黄色材质 cableMat
+                        rememberPathGroundLiftState(currentCableMesh, visibleCablePoints);
                         cableGroup.add(currentCableMesh);
 
                         // 修改最后一个测点为历史相对参考点
@@ -13711,9 +13981,11 @@
                                 currentTrailMesh.geometry.dispose();
                                 currentTrailMesh = null;
                             }
-                            const curve = new THREE.CatmullRomCurve3(trailPoints);
+                            const visibleTrailPoints = liftPathDisplayPointsAboveGround(trailPoints, trailGroup.position.z);
+                            const curve = new THREE.CatmullRomCurve3(visibleTrailPoints);
                             const tube = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
                             currentTrailMesh = new THREE.Mesh(tube, trailMat);
+                            rememberPathGroundLiftState(currentTrailMesh, visibleTrailPoints);
                             trailGroup.add(currentTrailMesh);
                         }
                     }
@@ -13815,9 +14087,11 @@
                             window.syncCablePathPrediction?.();
 
                             // 绘制平滑曲线
-                            const curve = new THREE.CatmullRomCurve3(displayPoints, false, 'centripetal', 0.35);
+                            const visibleCablePoints = liftPathDisplayPointsAboveGround(displayPoints, cableGroup.position.z);
+                            const curve = new THREE.CatmullRomCurve3(visibleCablePoints, false, 'centripetal', 0.35);
                             const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
                             currentCableMesh = new THREE.Mesh(tube, cableMat);
+                            rememberPathGroundLiftState(currentCableMesh, visibleCablePoints);
                             cableGroup.add(currentCableMesh);
                         }
                     }
@@ -13879,10 +14153,20 @@
                     for (let i = 0; i < scan.length; i += 6) {
                         if (c >= 50000 * 3) break;
 
-                        scanPos[c++] = scan[i] * scaleFactor;
-                        scanPos[c++] = scan[i + 1] * scaleFactor;
+                        const pointX = scan[i] * scaleFactor;
+                        const pointY = scan[i + 1] * scaleFactor;
+                        scanPos[c++] = pointX;
+                        scanPos[c++] = pointY;
                         let valZ = (i + 2 < scan.length) ? scan[i + 2] : 0.1;
-                        scanPos[c++] = valZ * scaleFactor;
+                        const pointZ = valZ * scaleFactor;
+                        scanPos[c++] = pointZ;
+
+                        // 只抽样建立地面高度索引，不减少实际渲染的点云数量。
+                        // 索引记录的是加入 SLAM_Z_OFFSET 后的世界高度，便于与路径世界坐标直接比较。
+                        const pointIndex = Math.floor(i / 6);
+                        if (pointIndex % PATH_GROUND_LIFT_CONFIG.gridSampleStride === 0) {
+                            recordPointForPathGroundDetection(pointX, pointY, pointZ + SLAM_Z_OFFSET);
+                        }
 
                         // 🚀 核心修改 2：去除 HSL 赋色，直接读取 RGB 真实颜色
                         // 注意：Three.js 要求的颜色范围是 0.0 ~ 1.0，所以需要除以 255
@@ -13904,6 +14188,7 @@
                     for (let i = c; i < 50000 * 3; i++) scanPos[i] = 99999;
                     scanMesh.geometry.attributes.position.needsUpdate = true;
                     scanMesh.geometry.attributes.color.needsUpdate = true;
+                    refreshRenderedPathsForGroundLift();
                 }
 
                 if (pose) {
