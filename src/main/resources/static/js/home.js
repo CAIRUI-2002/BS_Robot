@@ -237,6 +237,20 @@
         radialSegments: 12
     };
 
+    // ✅ 地上黄色电缆路径 -> 地下 GPR 管道自动校正配置
+    // 校正只改变地下管道中心线的水平 X/Z 位置；GPR 检出的埋深 Y、管径、材质和原始红圈均保留。
+    // 多条地下管道同时存在时，只选择与黄色路径最接近的一条，避免把其它管线错误吸附到电缆路径上。
+    const GPR_CABLE_PATH_ALIGNMENT_CONFIG = {
+        enabled: true,
+        minMatchDistanceM: 0.65,
+        maxMatchDistanceM: 2.0,
+        scanWidthRatio: 0.55,
+        outlierDistanceRatio: 1.35,
+        minMatchedPoints: 3,
+        minAlongPathSpanM: 0.35,
+        sampleStepM: 0.08
+    };
+
     // ==========================================
     // 1. 辅助算法与工具函数
     // ==========================================
@@ -934,9 +948,11 @@
         window.boxCenter = null;
 
         window.gprPipePickObjects = [];
+        window.gprCablePathAlignmentStats = null;
         selectedGprPipeObject = null;
         gprPipePopup3DPos = null;
         annotation3DGroups = [];
+        updateGprCableAlignmentBadge("idle", "路径校正：待加载");
 
         // 5) 清空本次 GPR 处理结果和二维剖面显示，避免旧结果按钮再次触发旧管道重绘。
         gprResult = null;
@@ -1084,6 +1100,7 @@
             colors: hasColors ? new Float32Array(colAttr.array) : null,
             hasColors,
             geoMeta: geoMeta ? clonePlainObjectForGpr(geoMeta) : null,
+            cablePath: extractCablePathFromGprGeoMetadata(geoMeta),
             group: {
                 position: getVectorSnapshot(pcdGroup.position),
                 rotation: getVectorSnapshot(pcdGroup.rotation),
@@ -1141,6 +1158,9 @@
         const pcdGroup = new THREE.Group();
         pcdGroup.name = snapshot.sourceName || "本地点云文件";
         pcdGroup.add(points);
+
+        const cableMesh = createGprSurfaceCablePathMesh(snapshot.cablePath);
+        if (cableMesh) pcdGroup.add(cableMesh);
         applyVectorSnapshot(pcdGroup.position, snapshot.group && snapshot.group.position);
         applyVectorSnapshot(pcdGroup.rotation, snapshot.group && snapshot.group.rotation);
         applyVectorSnapshot(pcdGroup.scale, snapshot.group && snapshot.group.scale);
@@ -1435,6 +1455,72 @@
         );
     }
 
+    function normalizePlainCablePathForGpr(path) {
+        if (!Array.isArray(path)) return [];
+
+        const result = [];
+        path.forEach(pt => {
+            const x = Number(pt?.x);
+            const y = Number(pt?.y);
+            const z = Number(pt?.z ?? 0.08);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+
+            const item = {
+                x,
+                y,
+                z,
+                depth: pt?.userData ? (pt.userData.depth ?? null) : (pt?.depth ?? null)
+            };
+            const prev = result[result.length - 1];
+            if (!prev || Math.hypot(item.x - prev.x, item.y - prev.y) > 1e-5) {
+                result.push(item);
+            }
+        });
+        return result;
+    }
+
+    function extractCablePathFromGprGeoMetadata(meta) {
+        if (!meta || typeof meta !== "object") return [];
+        const path = meta.inspectionOverlays?.cablePath ||
+            meta.overlays?.cablePath ||
+            meta.cablePath ||
+            [];
+        return normalizePlainCablePathForGpr(path);
+    }
+
+    function createGprSurfaceCablePathMesh(path) {
+        const plainPath = normalizePlainCablePathForGpr(path);
+        if (plainPath.length < 2 || typeof THREE === "undefined") return null;
+
+        const cablePoints = plainPath.map(slamPointToGprVector);
+        const cableCurve = new THREE.CatmullRomCurve3(cablePoints, false, "centripetal", 0.35);
+        const cableTube = new THREE.TubeGeometry(
+            cableCurve,
+            Math.max(cablePoints.length * 8, 16),
+            0.045,
+            10,
+            false
+        );
+        const cableMesh = new THREE.Mesh(
+            cableTube,
+            new THREE.MeshBasicMaterial({ color: 0xffff00 })
+        );
+        cableMesh.name = "地上黄色电缆路径";
+        cableMesh.userData.isGprSurfaceCablePath = true;
+        cableMesh.userData.slamCablePath = plainPath;
+        return cableMesh;
+    }
+
+    function updateGprCableAlignmentBadge(state, text, title = "") {
+        const badge = $("gprCableAlignmentBadge");
+        if (!badge) return;
+
+        badge.classList.remove("pending", "aligned", "unavailable", "unmatched");
+        if (state && state !== "idle") badge.classList.add(state);
+        badge.textContent = text || "路径校正：待加载";
+        badge.title = title || badge.textContent;
+    }
+
     function createGprFaultMarker(fault) {
         const faultGroup = new THREE.Group();
         const pos = slamPointToGprVector(fault);
@@ -1525,21 +1611,8 @@
             }
 
             if (cableCount >= 2) {
-                const cablePoints = snapshot.cablePath.map(slamPointToGprVector);
-                const cableCurve = new THREE.CatmullRomCurve3(cablePoints);
-                const cableTube = new THREE.TubeGeometry(
-                    cableCurve,
-                    Math.max(cablePoints.length * 8, 16),
-                    0.045,
-                    10,
-                    false
-                );
-                const cableMesh = new THREE.Mesh(
-                    cableTube,
-                    new THREE.MeshBasicMaterial({ color: 0xffff00 })
-                );
-                cableMesh.name = "当前黄色电缆路径";
-                group.add(cableMesh);
+                const cableMesh = createGprSurfaceCablePathMesh(snapshot.cablePath);
+                if (cableMesh) group.add(cableMesh);
             }
 
             if (faultCount > 0) {
@@ -1555,6 +1628,13 @@
             window.gprLoadedMapSource = "current";
             window.gprFrozenLocalPcdSnapshot = null;
             window.latestImportedInspectionMapSnapshot = snapshot;
+            updateGprCableAlignmentBadge(
+                cableCount >= 2 ? "pending" : "unavailable",
+                cableCount >= 2 ? "路径校正：待匹配" : "路径校正：无黄色路径",
+                cableCount >= 2
+                    ? `已加载 ${cableCount} 个黄色电缆路径点；生成地下管道后将自动匹配校正。`
+                    : "当前地图快照中没有可用于地下管道校正的黄色电缆路径。"
+            );
 
             // ✅ 当前点云地图单独加载完成后，不再使用整幅点云/电缆/破损点包围盒取景。
             // 原来的 setFromObject(group) 会把整张地图范围作为控制范围，导致 radius / controlSpan 过大，
@@ -5019,6 +5099,12 @@
             pcdGroup.name = sourceName || "本地点云文件";
             pcdGroup.add(points);
 
+            // 新版 .geo.json 会随点云保存黄色电缆矢量路径；加载本地图时一并恢复，
+            // 供后续 GPR 地下管道自动校正。旧版元数据没有该字段时保持原行为。
+            const localCablePath = extractCablePathFromGprGeoMetadata(geoMeta);
+            const localCableMesh = createGprSurfaceCablePathMesh(localCablePath);
+            if (localCableMesh) pcdGroup.add(localCableMesh);
+
             if (hasValidGeoMeta) {
                 pcdGroup.position.set(0, 0, 0);
                 pcdGroup.rotation.y = 0;
@@ -5048,6 +5134,13 @@
             window.currentImportedInspectionMapGroup = pcdGroup;
             window.gprHasInspectionMapLayerLoaded = true;
             freezeLocalPcdMapForGpr(points, pcdGroup, sourceName, hasValidGeoMeta ? geoMeta : null);
+            updateGprCableAlignmentBadge(
+                localCablePath.length >= 2 ? "pending" : "unavailable",
+                localCablePath.length >= 2 ? "路径校正：待匹配" : "路径校正：无黄色路径",
+                localCablePath.length >= 2
+                    ? `本地点云元数据中已恢复 ${localCablePath.length} 个黄色电缆路径点。`
+                    : "所选本地点云的元数据中没有黄色电缆矢量路径；地下管道将保留 GPR 原始位置。"
+            );
 
             // ✅ 本地点云加载完成后，不再取整幅点云包围盒中心。
             // 直接以“当前点云地图自身坐标原点/中心原点”为中心构造一个小 box，
@@ -5111,8 +5204,10 @@
                     const points = loader.parse(buffer, pcdFile.name);
                     addLoadedPcdPointsToGprScene(points, pcdFile.name, geoMeta);
 
+                    const localCableCount = extractCablePathFromGprGeoMetadata(geoMeta).length;
                     if (geoMeta && window.isGpsCalibrated) {
-                        setStatus(`✅ 本地地图加载完成：${pcdFile.name}，已恢复经纬度标定，可发送履带小车巡检。`, "success");
+                        const cableTip = localCableCount >= 2 ? `，已恢复黄色电缆路径 ${localCableCount} 点` : "";
+                        setStatus(`✅ 本地地图加载完成：${pcdFile.name}，已恢复经纬度标定${cableTip}，可发送履带小车巡检。`, "success");
                     } else {
                         setStatus(`✅ 本地点云加载完成：${pcdFile.name}；未加载 .geo.json，经纬度不可用。`, "success");
                     }
@@ -6101,6 +6196,258 @@
         };
     }
 
+    function getLoadedSurfaceCablePathForGprAlignment() {
+        // 没有扫描路径融合时，GPR 后端局部坐标尚未落到点云地图世界坐标，不能安全吸附。
+        if (!hasUsableGprScanPlanForFusion()) return [];
+
+        let plainPath = [];
+
+        if (window.gprLoadedMapSource === "current") {
+            plainPath = normalizePlainCablePathForGpr(window.latestImportedInspectionMapSnapshot?.cablePath);
+        } else if (window.gprLoadedMapSource === "local") {
+            plainPath = normalizePlainCablePathForGpr(window.gprFrozenLocalPcdSnapshot?.cablePath);
+            if (plainPath.length < 2) {
+                plainPath = extractCablePathFromGprGeoMetadata(window.gprFrozenLocalPcdSnapshot?.geoMeta);
+            }
+        }
+
+        if (plainPath.length < 2) return [];
+        return plainPath.map(slamPointToGprVector);
+    }
+
+    function buildGprCableHorizontalMeasure(points) {
+        const clean = [];
+        (Array.isArray(points) ? points : []).forEach(pt => {
+            if (!pt) return;
+            const p = pt.clone ? pt.clone() : new THREE.Vector3(Number(pt.x), Number(pt.y), Number(pt.z));
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) return;
+            const prev = clean[clean.length - 1];
+            if (!prev || Math.hypot(p.x - prev.x, p.z - prev.z) > 1e-5) clean.push(p);
+        });
+        if (clean.length < 2) return null;
+
+        const cumulative = [0];
+        for (let i = 1; i < clean.length; i++) {
+            cumulative.push(cumulative[i - 1] + Math.hypot(
+                clean[i].x - clean[i - 1].x,
+                clean[i].z - clean[i - 1].z
+            ));
+        }
+        const totalLength = cumulative[cumulative.length - 1];
+        return totalLength > 1e-5 ? { points: clean, cumulative, totalLength } : null;
+    }
+
+    function projectGprPointToMeasuredCableXZ(point, measure) {
+        if (!point || !measure) return null;
+
+        let best = null;
+        for (let i = 0; i < measure.points.length - 1; i++) {
+            const a = measure.points[i];
+            const b = measure.points[i + 1];
+            const dx = b.x - a.x;
+            const dz = b.z - a.z;
+            const lenSq = dx * dx + dz * dz;
+            if (lenSq < 1e-12) continue;
+
+            const t = Math.max(0, Math.min(1,
+                ((point.x - a.x) * dx + (point.z - a.z) * dz) / lenSq
+            ));
+            const x = a.x + dx * t;
+            const z = a.z + dz * t;
+            const distance = Math.hypot(point.x - x, point.z - z);
+
+            if (!best || distance < best.distance) {
+                const segmentLength = measure.cumulative[i + 1] - measure.cumulative[i];
+                best = {
+                    x,
+                    z,
+                    distance,
+                    along: measure.cumulative[i] + segmentLength * t
+                };
+            }
+        }
+        return best;
+    }
+
+    function getGprCablePointAtDistance(measure, along) {
+        const s = Math.max(0, Math.min(measure.totalLength, Number(along) || 0));
+        for (let i = 0; i < measure.points.length - 1; i++) {
+            const s0 = measure.cumulative[i];
+            const s1 = measure.cumulative[i + 1];
+            if (s > s1 && i < measure.points.length - 2) continue;
+            const span = s1 - s0;
+            const t = span > 1e-12 ? Math.max(0, Math.min(1, (s - s0) / span)) : 0;
+            const a = measure.points[i];
+            const b = measure.points[i + 1];
+            return new THREE.Vector3(
+                a.x + (b.x - a.x) * t,
+                0,
+                a.z + (b.z - a.z) * t
+            );
+        }
+        const last = measure.points[measure.points.length - 1];
+        return new THREE.Vector3(last.x, 0, last.z);
+    }
+
+    function interpolateGprPipeYAtCableDistance(depthSamples, along) {
+        if (!depthSamples.length) return 0;
+        if (along <= depthSamples[0].along) return depthSamples[0].y;
+        const last = depthSamples[depthSamples.length - 1];
+        if (along >= last.along) return last.y;
+
+        for (let i = 0; i < depthSamples.length - 1; i++) {
+            const a = depthSamples[i];
+            const b = depthSamples[i + 1];
+            if (along > b.along) continue;
+            const span = b.along - a.along;
+            const t = span > 1e-9 ? (along - a.along) / span : 0;
+            return a.y + (b.y - a.y) * t;
+        }
+        return last.y;
+    }
+
+    function getGprCableAlignmentMatchDistance() {
+        const scanWidth = Number(window.currentGprScanPlan?.params?.width);
+        const dynamic = Number.isFinite(scanWidth)
+            ? scanWidth * GPR_CABLE_PATH_ALIGNMENT_CONFIG.scanWidthRatio
+            : 1.25;
+        return Math.max(
+            GPR_CABLE_PATH_ALIGNMENT_CONFIG.minMatchDistanceM,
+            Math.min(GPR_CABLE_PATH_ALIGNMENT_CONFIG.maxMatchDistanceM, dynamic)
+        );
+    }
+
+    function buildGprPipeCableAlignment(centerItems, cableMeasure, maxDistance) {
+        if (!Array.isArray(centerItems) || centerItems.length < GPR_CABLE_PATH_ALIGNMENT_CONFIG.minMatchedPoints) {
+            return null;
+        }
+
+        const projected = centerItems.map(item => {
+            const hit = projectGprPointToMeasuredCableXZ(item.center, cableMeasure);
+            return hit ? { ...hit, y: Number(item.center.y), source: item } : null;
+        }).filter(Boolean);
+        if (projected.length < GPR_CABLE_PATH_ALIGNMENT_CONFIG.minMatchedPoints) return null;
+
+        const sortedDistances = projected.map(item => item.distance).sort((a, b) => a - b);
+        const medianDistance = sortedDistances[Math.floor(sortedDistances.length / 2)];
+        const meanDistance = sortedDistances.reduce((sum, value) => sum + value, 0) / sortedDistances.length;
+        const outlierLimit = maxDistance * GPR_CABLE_PATH_ALIGNMENT_CONFIG.outlierDistanceRatio;
+        const withinCount = sortedDistances.filter(value => value <= outlierLimit).length;
+        const requiredWithinCount = Math.max(
+            GPR_CABLE_PATH_ALIGNMENT_CONFIG.minMatchedPoints,
+            Math.ceil(projected.length * 0.67)
+        );
+
+        const alongValues = projected.map(item => item.along);
+        const minAlong = Math.min(...alongValues);
+        const maxAlong = Math.max(...alongValues);
+        const alongSpan = maxAlong - minAlong;
+        if (
+            medianDistance > maxDistance ||
+            withinCount < requiredWithinCount ||
+            alongSpan < GPR_CABLE_PATH_ALIGNMENT_CONFIG.minAlongPathSpanM
+        ) {
+            return null;
+        }
+
+        // 沿黄色路径加密采样，保证弯道也跟随地上路径；每个采样点的 Y 由相邻 GPR 测点埋深插值。
+        const depthSamples = projected.slice().sort((a, b) => a.along - b.along);
+        const sampleDistances = [minAlong, maxAlong];
+        depthSamples.forEach(item => sampleDistances.push(item.along));
+        cableMeasure.cumulative.forEach(value => {
+            if (value > minAlong && value < maxAlong) sampleDistances.push(value);
+        });
+
+        const sampleStep = Math.max(0.03, GPR_CABLE_PATH_ALIGNMENT_CONFIG.sampleStepM);
+        for (let s = minAlong + sampleStep; s < maxAlong; s += sampleStep) {
+            sampleDistances.push(s);
+        }
+
+        sampleDistances.sort((a, b) => a - b);
+        const uniqueDistances = sampleDistances.filter((value, index, arr) =>
+            index === 0 || Math.abs(value - arr[index - 1]) > 1e-5
+        );
+        const alignedPoints = uniqueDistances.map(along => {
+            const pt = getGprCablePointAtDistance(cableMeasure, along);
+            pt.y = interpolateGprPipeYAtCableDistance(depthSamples, along);
+            return pt;
+        });
+
+        if (alignedPoints.length < 2) return null;
+        return {
+            alignedPoints,
+            projected,
+            medianDistance,
+            meanDistance,
+            alongSpan,
+            score: medianDistance + meanDistance * 0.2
+        };
+    }
+
+    function selectBestGprPipeCableAlignment(pipelineEntries) {
+        const surfaceCablePath = getLoadedSurfaceCablePathForGprAlignment();
+        const cableMeasure = buildGprCableHorizontalMeasure(surfaceCablePath);
+        const maxDistance = getGprCableAlignmentMatchDistance();
+
+        window.gprCablePathAlignmentStats = {
+            available: !!cableMeasure,
+            applied: false,
+            pathPointCount: surfaceCablePath.length,
+            maxMatchDistanceM: maxDistance
+        };
+
+        if (!GPR_CABLE_PATH_ALIGNMENT_CONFIG.enabled || !cableMeasure) {
+            updateGprCableAlignmentBadge(
+                "unavailable",
+                "路径校正：无黄色路径",
+                "当前已加载地图中没有可用的黄色电缆矢量路径，地下管道保留 GPR 原始位置。"
+            );
+            return null;
+        }
+
+        const candidates = (Array.isArray(pipelineEntries) ? pipelineEntries : [])
+            .map(entry => {
+                const alignment = buildGprPipeCableAlignment(entry.centers, cableMeasure, maxDistance);
+                return alignment ? { ...entry, alignment } : null;
+            })
+            .filter(Boolean);
+
+        // 用户明确指定过材质时，以“地下电缆”为最高优先级；明确指定为 PVC/金属的管道不参与吸附。
+        const explicitCables = candidates.filter(item => item.assignment?.materialType === "cable");
+        const eligible = explicitCables.length
+            ? explicitCables
+            : candidates.filter(item => !item.assignment || !item.assignment.materialType);
+        eligible.sort((a, b) => a.alignment.score - b.alignment.score);
+        const best = eligible[0] || null;
+
+        if (!best) {
+            window.gprCablePathAlignmentStats.reason = "no-matching-pipeline";
+            updateGprCableAlignmentBadge(
+                "unmatched",
+                "路径校正：未匹配",
+                `已加载黄色电缆路径，但没有地下管道通过 ${maxDistance.toFixed(2)}m 对应距离检查；为避免误校正，已保留 GPR 原始路径。`
+            );
+            return null;
+        }
+
+        window.gprCablePathAlignmentStats = {
+            ...window.gprCablePathAlignmentStats,
+            applied: true,
+            pipeKey: best.colorKey,
+            measuredPointCount: best.centers.length,
+            alignedPointCount: best.alignment.alignedPoints.length,
+            medianOffsetM: best.alignment.medianDistance,
+            meanOffsetM: best.alignment.meanDistance,
+            alignedSpanM: best.alignment.alongSpan
+        };
+        updateGprCableAlignmentBadge(
+            "aligned",
+            "路径校正：已对齐",
+            `地下电缆已吸附到地上黄色路径；校正前中位水平误差 ${best.alignment.medianDistance.toFixed(2)}m，保留 GPR 原始埋深。`
+        );
+        return best;
+    }
+
     function getPlannedGprPathBottomPoints(maxDepth, groundY = 0) {
         if (!hasUsableGprScanPlanForFusion()) return null;
 
@@ -6923,6 +7270,15 @@
         // 避免固定 Y=0 导致地下长方体突出地面点云。
         const gprGroundY = estimateGprGroundYFromLoadedPointCloud();
         window.gprGroundYForDepthReference = gprGroundY;
+        window.gprCablePathAlignmentStats = null;
+        const loadedCablePointCount = getLoadedSurfaceCablePathForGprAlignment().length;
+        updateGprCableAlignmentBadge(
+            loadedCablePointCount >= 2 ? "pending" : "unavailable",
+            loadedCablePointCount >= 2 ? "路径校正：匹配中" : "路径校正：无黄色路径",
+            loadedCablePointCount >= 2
+                ? `正在用已加载的 ${loadedCablePointCount} 个黄色路径点匹配地下管道。`
+                : "未同时满足黄色路径和扫描路径融合条件，地下管道将保留 GPR 原始位置。"
+        );
         console.log("✅ GPR地下环境地面高度基准 groundY =", Number(gprGroundY.toFixed(4)));
 
         // 3.1 逐段构建 Z 字平面
@@ -7161,23 +7517,9 @@
                     arr.push(e);
                 });
 
-                // 给每条管道分配不同颜色，并单独建组
-                const connPipelinesGroup = new THREE.Group();
-                let pipelineIndex = 0;
-                const pipelineCount = pipelinesMap.size;
-
-                pipelinesMap.forEach(edgeItems => {
-                    const pipelineGroup = new THREE.Group();
-
-                    const color = new THREE.Color();
-                    if (pipelineCount === 1) {
-                        color.setHex(0xffff00);
-                    } else {
-                        color.setHSL((pipelineIndex / pipelineCount), 0.8, 0.5);
-                    }
-                    pipelineIndex++;
-
-                    // 将同一连通分量中的圆心按剖面序号排序，形成一条连续曲线。
+                // 先整理每条候选管道并完成“黄色地上电缆路径”对应关系判断。
+                // 匹配必须在所有连通分量之间全局择优，不能在 forEach 中遇到第一条就吸附。
+                const pipelineEntries = Array.from(pipelinesMap.entries()).map(([root, edgeItems]) => {
                     const centerMap = new Map();
                     edgeItems.forEach(e => {
                         centerMap.set(e.aId, e.a);
@@ -7189,31 +7531,78 @@
                             if (Math.abs(a.yCoord - b.yCoord) > 1e-9) return a.yCoord - b.yCoord;
                             return a.zCoord - b.zCoord;
                         });
+                    const colorKey = makeGprPipeColorKeyFromCenters(centers, { source: "auto" });
+                    const legacyColorKey = makeGprPipeLegacyColorKeyFromCenters(centers, { source: "auto" });
+                    return {
+                        root,
+                        edgeItems,
+                        centers,
+                        colorKey,
+                        legacyColorKey,
+                        assignment: getGprPipeAssignmentByKey(colorKey, [legacyColorKey])
+                    };
+                });
+                const selectedCableAlignment = selectBestGprPipeCableAlignment(pipelineEntries);
+
+                // 给每条管道分配不同颜色，并单独建组
+                const connPipelinesGroup = new THREE.Group();
+                let pipelineIndex = 0;
+                const pipelineCount = pipelineEntries.length;
+
+                pipelineEntries.forEach(entry => {
+                    const edgeItems = entry.edgeItems;
+                    const centers = entry.centers;
+                    const pipelineGroup = new THREE.Group();
+
+                    const color = new THREE.Color();
+                    if (pipelineCount === 1) {
+                        color.setHex(0xffff00);
+                    } else {
+                        color.setHSL((pipelineIndex / pipelineCount), 0.8, 0.5);
+                    }
+                    pipelineIndex++;
 
                     // 如果同一剖面内出现多个点，说明可能是分叉/误连。
                     // 这种情况下继续使用原来的逐段连接，避免平滑曲线错误穿插。
                     const segSet = new Set(centers.map(item => item.segIndex));
-                    const canUseSmoothTube = PIPE_SMOOTH_CONFIG.enabled
-                        && centers.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth
-                        && segSet.size === centers.length;
+                    const cableAlignment = selectedCableAlignment && selectedCableAlignment.root === entry.root
+                        ? selectedCableAlignment.alignment
+                        : null;
+                    const renderCenterlinePoints = cableAlignment
+                        ? cableAlignment.alignedPoints
+                        : centers.map(item => item.center);
+                    const canUseSmoothTube = !!cableAlignment || (
+                        PIPE_SMOOTH_CONFIG.enabled &&
+                        centers.length >= PIPE_SMOOTH_CONFIG.minPointsForSmooth &&
+                        segSet.size === centers.length
+                    );
 
-                    const autoPipeColorKey = makeGprPipeColorKeyFromCenters(centers, { source: "auto" });
-                    const autoLegacyColorKey = makeGprPipeLegacyColorKeyFromCenters(centers, { source: "auto" });
+                    const autoPipeColorKey = entry.colorKey;
+                    const autoLegacyColorKey = entry.legacyColorKey;
                     const autoDefaultColorHex = color.getHex();
                     const autoRenderColorHex = resolveGprPipeColorHexByKey(autoPipeColorKey, autoDefaultColorHex, [autoLegacyColorKey]);
 
                     if (canUseSmoothTube) {
                         const avgRadius = centers.reduce((sum, item) => sum + item.radius, 0) / centers.length;
                         const smoothTube = createSmoothTubeThroughPoints(
-                            centers.map(item => item.center),
+                            renderCenterlinePoints,
                             avgRadius,
                             autoRenderColorHex
                         );
                         if (smoothTube) {
                             registerGprPipePickMesh(
                                 smoothTube,
-                                centers.map(item => item.center),
-                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey, legacyColorKey: autoLegacyColorKey }
+                                renderCenterlinePoints,
+                                {
+                                    source: "auto",
+                                    name: cableAlignment ? "黄色路径校正地下电缆" : "自动识别地下管道",
+                                    colorHex: autoDefaultColorHex,
+                                    colorKey: autoPipeColorKey,
+                                    legacyColorKey: autoLegacyColorKey,
+                                    alignedToSurfaceCable: !!cableAlignment,
+                                    alignmentMedianOffsetM: cableAlignment?.medianDistance ?? null,
+                                    alignmentMeanOffsetM: cableAlignment?.meanDistance ?? null
+                                }
                             );
                             pipelineGroup.add(smoothTube);
                         }
@@ -7221,16 +7610,31 @@
 
                     // 兜底：点数不足 3 个、存在分叉、或平滑管道创建失败时，仍用原来的相邻圆柱连接。
                     if (pipelineGroup.children.length === 0) {
-                        edgeItems.forEach(e => {
-                            const cylinder = createHollowCylinderBetween(e.a.center, e.b.center, e.radius);
+                        const fallbackEdges = cableAlignment
+                            ? renderCenterlinePoints.slice(0, -1).map((point, index) => ({
+                                a: point,
+                                b: renderCenterlinePoints[index + 1],
+                                radius: centers.reduce((sum, item) => sum + item.radius, 0) / centers.length
+                            }))
+                            : edgeItems.map(e => ({ a: e.a.center, b: e.b.center, radius: e.radius }));
+                        fallbackEdges.forEach(e => {
+                            const cylinder = createHollowCylinderBetween(e.a, e.b, e.radius);
                             if (!cylinder) return;
                             if (cylinder.material && cylinder.material.color) {
                                 cylinder.material.color.setHex(autoRenderColorHex);
                             }
                             registerGprPipePickMesh(
                                 cylinder,
-                                [e.a.center, e.b.center],
-                                { source: "auto", name: "自动识别地下管道", colorHex: autoDefaultColorHex, colorKey: autoPipeColorKey, legacyColorKey: autoLegacyColorKey }
+                                [e.a, e.b],
+                                {
+                                    source: "auto",
+                                    name: cableAlignment ? "黄色路径校正地下电缆" : "自动识别地下管道",
+                                    colorHex: autoDefaultColorHex,
+                                    colorKey: autoPipeColorKey,
+                                    legacyColorKey: autoLegacyColorKey,
+                                    alignedToSurfaceCable: !!cableAlignment,
+                                    alignmentMedianOffsetM: cableAlignment?.medianDistance ?? null
+                                }
                             );
                             pipelineGroup.add(cylinder);
                         });
@@ -7379,6 +7783,11 @@
             }
         }
 
+        // 没有形成自动管道连通分量时也要结束“匹配中”状态，明确告知没有执行误吸附。
+        if (!window.gprCablePathAlignmentStats) {
+            selectBestGprPipeCableAlignment([]);
+        }
+
         // 3.3 路径折线（放在底部）
         const plannedPathPoints = getPlannedGprPathBottomPoints(maxDepth, gprGroundY);
         const bottomPathPoints = [];
@@ -7479,7 +7888,11 @@
         if (usePlannedLayout) {
             reloadInspectionMapAndScanPlanAfterGprRender(true);
             const usedLegs = Math.min(segments.length, plannedLegCount);
-            setStatus(`✅ GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。`, "success");
+            const alignmentStats = window.gprCablePathAlignmentStats;
+            const alignmentText = alignmentStats?.applied
+                ? ` 地下电缆已按黄色路径校正（原中位水平偏差 ${alignmentStats.medianOffsetM.toFixed(2)}m），埋深保持 GPR 测量值。`
+                : " 未找到可安全对应的黄色路径/地下管道，未执行路径校正。";
+            setStatus(`✅ GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。${alignmentText}`, "success");
         }
 
         // ========== 交互：左键旋转，中键/右键平移，滚轮缩放 ==========
@@ -12186,9 +12599,17 @@
             );
 
             const bounds = computeCurrentVisibleMapBounds();
+            const cablePath = Array.isArray(window.savedCablePath)
+                ? window.savedCablePath.map(p => ({
+                    x: roundNumber(p.x, 5),
+                    y: roundNumber(p.y, 5),
+                    z: roundNumber(p.z ?? 0.08, 5),
+                    depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
+                })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z))
+                : [];
 
             return {
-                version: 2,
+                version: 3,
                 type: "slam_pcd_geo_metadata",
                 createdAt: new Date().toISOString(),
                 pcdFileName: pcdFileName,
@@ -12218,8 +12639,13 @@
                     calibratedAt: window.geoTransform?.calibratedAt || null
                 },
                 mapBounds: bounds,
+                // PCD 本体只能保存点云。将黄色电缆矢量路径放进同名 geo.json，
+                // 使本地点云再次进入三维重建页后仍可显示路径并校正地下 GPR 管道。
+                inspectionOverlays: {
+                    cablePath
+                },
                 usage: {
-                    loadTip: "读取点云时同时选择本 .geo.json 文件，可自动恢复 window.geoTransform；旧版文件仍恢复 window.gpsAnchor/window.slamAnchor/window.headingOffset。",
+                    loadTip: "读取点云时同时选择本 .geo.json 文件，可恢复经纬度标定和黄色电缆矢量路径；旧版文件仍恢复 window.gpsAnchor/window.slamAnchor/window.headingOffset。",
                     crawlerTip: "恢复标定后，三维重建页指定扫描区域会调用 slamToGps() 生成履带小车经纬度航点。"
                 }
             };
@@ -12400,8 +12826,10 @@
                     downloadTextFile(result.text, pcdFileName, "application/octet-stream");
                     downloadTextFile(JSON.stringify(geoMeta, null, 2), geoFileName, "application/json");
 
+                    const savedCableCount = geoMeta.inspectionOverlays?.cablePath?.length || 0;
                     if (geoMeta.calibration && geoMeta.calibration.isGpsCalibrated) {
-                        setStatus(`✅ 点云和经纬度元数据已保存：${result.pointCount} 个点，${pcdFileName} + ${geoFileName}`, "success");
+                        const cableTip = savedCableCount >= 2 ? `，黄色电缆路径 ${savedCableCount} 点` : "";
+                        setStatus(`✅ 点云和经纬度元数据已保存：${result.pointCount} 个点${cableTip}，${pcdFileName} + ${geoFileName}`, "success");
                     } else {
                         alert("⚠️ 当前 GPS 尚未标定，已保存 PCD 和 geo.json，但 geo.json 中没有可用经纬度标定。后续读取该地图时不能直接生成履带小车 GPS 航点。 ");
                         setStatus(`⚠️ PCD 已保存：${result.pointCount} 个点，但 GPS 未标定，geo.json 不可用于巡检航点换算。`, "error");
