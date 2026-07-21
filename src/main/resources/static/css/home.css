@@ -2853,6 +2853,32 @@ input[type="range"]::-webkit-slider-thumb {
     user-select: none;
 }
 
+.dog-rot-joystick-base {
+    width: 130px;
+    height: 130px;
+    margin: 0 auto;
+    box-shadow: inset 0 0 15px rgba(0, 0, 0, 0.8);
+}
+
+.dog-rot-joystick-stick {
+    width: 44px;
+    height: 44px;
+    top: 43px;
+    left: 43px;
+}
+
+.dog-rot-joystick-base.compact {
+    width: 100px;
+    height: 100px;
+}
+
+.dog-rot-joystick-stick.compact {
+    width: 40px;
+    height: 40px;
+    top: 30px;
+    left: 30px;
+}
+
 /* ==========================================
    ✅ [新增] 三维视图左下角实时GPS悬浮窗
    ========================================== */
