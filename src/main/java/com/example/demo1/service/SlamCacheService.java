@@ -25,7 +25,7 @@ public class SlamCacheService {
     private static final Logger log = LoggerFactory.getLogger(SlamCacheService.class);
 
     private static final int MAX_POINT_COUNT = 2_000_000;
-    private static final String ROBOT_WS_URL = "ws://10.21.31.104:9090";
+    private static final String ROBOT_WS_URL = "ws://10.21.31.104:9090/cloud";
 
     private final List<Point3D> pointBuffer = Collections.synchronizedList(new ArrayList<>());
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -125,7 +125,8 @@ public class SlamCacheService {
     private void handleWsMessage(String message) {
         try {
             JsonNode rootNode = objectMapper.readTree(message);
-            if (!rootNode.has("type") || !"slam_data".equals(rootNode.get("type").asText())) {
+            String type = rootNode.has("type") ? rootNode.get("type").asText() : "";
+            if (!"cloud_data".equals(type) && !"slam_data".equals(type)) {
                 return;
             }
 

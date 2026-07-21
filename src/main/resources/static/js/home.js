@@ -13675,59 +13675,127 @@
 
         // --- 6. WebSocket ---
         const ROBOT_IP = "10.21.31.104";
-        const wsUrl = "ws://" + ROBOT_IP + ":9090";
-        let hasLoggedSlamSuccess = false;
+        const poseWsUrl = "ws://" + ROBOT_IP + ":9090/pose";
+        const cloudWsUrl = "ws://" + ROBOT_IP + ":9090/cloud";
+        let hasLoggedPoseSuccess = false;
+        let hasLoggedCloudSuccess = false;
         let isFirstFrame = true;
-        let slamWs = null;
-        let slamReconnectTimer = null;
+        let poseWs = null;
+        let cloudWs = null;
+        let poseReconnectTimer = null;
+        let cloudReconnectTimer = null;
 
         // 👇 1. 新增：记录点云渲染时间戳，用于节流
         let lastPointCloudRenderTime = 0;
 
-        function scheduleSlamReconnect() {
-            if (slamReconnectTimer !== null) return;
+        function schedulePoseReconnect() {
+            if (poseReconnectTimer !== null) return;
 
-            console.warn("⚠️ 点云 WebSocket 已断开，2 秒后自动重连...");
-            slamReconnectTimer = window.setTimeout(() => {
-                slamReconnectTimer = null;
-                connectSlamWebSocket();
+            console.warn("⚠️ 位姿 WebSocket 已断开，2 秒后自动重连...");
+            poseReconnectTimer = window.setTimeout(() => {
+                poseReconnectTimer = null;
+                connectPoseWebSocket();
             }, 2000);
         }
 
-        function connectSlamWebSocket() {
-            if (slamWs && (
-                slamWs.readyState === WebSocket.OPEN ||
-                slamWs.readyState === WebSocket.CONNECTING
+        function scheduleCloudReconnect() {
+            if (cloudReconnectTimer !== null) return;
+
+            console.warn("⚠️ 点云 WebSocket 已断开，2 秒后自动重连...");
+            cloudReconnectTimer = window.setTimeout(() => {
+                cloudReconnectTimer = null;
+                connectCloudWebSocket();
+            }, 2000);
+        }
+
+        function connectPoseWebSocket() {
+            if (poseWs && (
+                poseWs.readyState === WebSocket.OPEN ||
+                poseWs.readyState === WebSocket.CONNECTING
             )) {
                 return;
             }
 
-            console.log("正在尝试连接点云 WebSocket:", wsUrl);
-            const socket = new WebSocket(wsUrl);
-            slamWs = socket;
+            console.log("正在尝试连接位姿 WebSocket:", poseWsUrl);
+            const socket = new WebSocket(poseWsUrl);
+            poseWs = socket;
 
             socket.onopen = () => {
-                if (slamWs !== socket) return;
+                if (poseWs !== socket) return;
 
-                if (slamReconnectTimer !== null) {
-                    window.clearTimeout(slamReconnectTimer);
-                    slamReconnectTimer = null;
+                if (poseReconnectTimer !== null) {
+                    window.clearTimeout(poseReconnectTimer);
+                    poseReconnectTimer = null;
                 }
-                console.log("✅ 点云 WebSocket 已连接:", wsUrl);
+                console.log("✅ 位姿 WebSocket 已连接:", poseWsUrl);
             };
 
             socket.onmessage = (event) => {
-                if (slamWs !== socket) return;
+                if (poseWs !== socket) return;
 
                 try {
                     const data = JSON.parse(event.data);
-                    // ✅ 加上对 'pose_data' 的支持
-                    if (data.type === 'slam_data' || data.type === 'pose_data') {
-                        if (!hasLoggedSlamSuccess) {
-                            console.log("%c🚀 位置数据传输成功！...", "color: #00e5ff; font-weight: bold;");
-                            hasLoggedSlamSuccess = true;
+                    if (data.type === 'pose_data') {
+                        if (!hasLoggedPoseSuccess) {
+                            console.log("%c🚀 位姿数据传输成功！", "color: #00e5ff; font-weight: bold;");
+                            hasLoggedPoseSuccess = true;
                         }
-                        updateVis(data);
+                        updateVis(data, { processPose: true, processScan: false });
+                    }
+                } catch (e) {
+                    console.error("位姿 WebSocket 消息解析失败:", e);
+                }
+            };
+
+            socket.onerror = (event) => {
+                if (poseWs !== socket) return;
+
+                console.warn("位姿 WebSocket 连接异常:", event);
+                socket.close();
+            };
+
+            socket.onclose = () => {
+                if (poseWs !== socket) return;
+
+                poseWs = null;
+                hasLoggedPoseSuccess = false;
+                schedulePoseReconnect();
+            };
+        }
+
+        function connectCloudWebSocket() {
+            if (cloudWs && (
+                cloudWs.readyState === WebSocket.OPEN ||
+                cloudWs.readyState === WebSocket.CONNECTING
+            )) {
+                return;
+            }
+
+            console.log("正在尝试连接点云 WebSocket:", cloudWsUrl);
+            const socket = new WebSocket(cloudWsUrl);
+            cloudWs = socket;
+
+            socket.onopen = () => {
+                if (cloudWs !== socket) return;
+
+                if (cloudReconnectTimer !== null) {
+                    window.clearTimeout(cloudReconnectTimer);
+                    cloudReconnectTimer = null;
+                }
+                console.log("✅ 点云 WebSocket 已连接:", cloudWsUrl);
+            };
+
+            socket.onmessage = (event) => {
+                if (cloudWs !== socket) return;
+
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'cloud_data' || data.type === 'slam_data') {
+                        if (!hasLoggedCloudSuccess) {
+                            console.log("%c🌐 点云数据传输成功！", "color: #00e5ff; font-weight: bold;");
+                            hasLoggedCloudSuccess = true;
+                        }
+                        updateVis(data, { processPose: false, processScan: true });
                     }
                 } catch (e) {
                     console.error("点云 WebSocket 消息解析失败:", e);
@@ -13735,26 +13803,30 @@
             };
 
             socket.onerror = (event) => {
-                if (slamWs !== socket) return;
+                if (cloudWs !== socket) return;
 
                 console.warn("点云 WebSocket 连接异常:", event);
                 socket.close();
             };
 
             socket.onclose = () => {
-                if (slamWs !== socket) return;
+                if (cloudWs !== socket) return;
 
-                slamWs = null;
-                hasLoggedSlamSuccess = false;
-                scheduleSlamReconnect();
+                cloudWs = null;
+                hasLoggedCloudSuccess = false;
+                scheduleCloudReconnect();
             };
         }
 
-        connectSlamWebSocket();
+        connectPoseWebSocket();
+        connectCloudWebSocket();
 
-        function updateVis(data) {
+        function updateVis(data, options = {}) {
+            const processPose = options.processPose !== false;
+            const processScan = options.processScan !== false;
             const pose = data.robot;
 
+            if (processPose) {
             // ==========================================
             // 🌟🌟🌟 新增：拦截解析 Python 传来的 RTK 数据
             // ==========================================
@@ -14209,7 +14281,9 @@
                     }
                 }
             }
+            }
 
+            if (!processScan) return;
             const scan = data.scan;
             if (scan && scan.length > 0) {
                 const scanAttr = scanMesh.geometry.attributes.position;
@@ -14267,9 +14341,10 @@
                     refreshRenderedPathsForGroundLift();
                 }
 
-                if (pose) {
-                    const poseX = pose.x * scaleFactor;
-                    const poseY = pose.y * scaleFactor;
+                const scanPose = data.robot || currentRobotPose;
+                if (scanPose && Number.isFinite(Number(scanPose.x)) && Number.isFinite(Number(scanPose.y))) {
+                    const poseX = Number(scanPose.x) * scaleFactor;
+                    const poseY = Number(scanPose.y) * scaleFactor;
                     const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
 
                     const mapPos = mapMesh.geometry.attributes.position.array;
