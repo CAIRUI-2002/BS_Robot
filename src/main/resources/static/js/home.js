@@ -13684,9 +13684,63 @@
         let cloudWs = null;
         let poseReconnectTimer = null;
         let cloudReconnectTimer = null;
+        let isPointCloudScanPaused = false;
+        const btnTogglePointCloudScan = document.getElementById('btnTogglePointCloudScan');
 
         // 👇 1. 新增：记录点云渲染时间戳，用于节流
         let lastPointCloudRenderTime = 0;
+
+        function updatePointCloudScanButton() {
+            if (!btnTogglePointCloudScan) return;
+
+            if (isPointCloudScanPaused) {
+                btnTogglePointCloudScan.innerText = "开始点云扫描";
+                btnTogglePointCloudScan.title = "恢复接收并绘制点云数据";
+            } else {
+                btnTogglePointCloudScan.innerText = "暂停点云扫描";
+                btnTogglePointCloudScan.title = "暂停接收并绘制点云数据，当前点云地图保持定格";
+            }
+        }
+
+        function pausePointCloudScan() {
+            isPointCloudScanPaused = true;
+            hasLoggedCloudSuccess = false;
+
+            if (cloudReconnectTimer !== null) {
+                window.clearTimeout(cloudReconnectTimer);
+                cloudReconnectTimer = null;
+            }
+
+            const socket = cloudWs;
+            cloudWs = null;
+            if (socket && (
+                socket.readyState === WebSocket.OPEN ||
+                socket.readyState === WebSocket.CONNECTING
+            )) {
+                socket.close();
+            }
+
+            updatePointCloudScanButton();
+            setStatus("点云扫描已暂停，当前点云地图保持定格。", "warning");
+        }
+
+        function resumePointCloudScan() {
+            isPointCloudScanPaused = false;
+            updatePointCloudScanButton();
+            connectCloudWebSocket();
+            setStatus("点云扫描已开始，正在接收并绘制点云数据。", "success");
+        }
+
+        if (btnTogglePointCloudScan) {
+            updatePointCloudScanButton();
+            btnTogglePointCloudScan.addEventListener('click', function () {
+                if (isPointCloudScanPaused) {
+                    resumePointCloudScan();
+                } else {
+                    pausePointCloudScan();
+                }
+            });
+        }
 
         function schedulePoseReconnect() {
             if (poseReconnectTimer !== null) return;
@@ -13699,6 +13753,7 @@
         }
 
         function scheduleCloudReconnect() {
+            if (isPointCloudScanPaused) return;
             if (cloudReconnectTimer !== null) return;
 
             console.warn("⚠️ 点云 WebSocket 已断开，2 秒后自动重连...");
@@ -13764,6 +13819,8 @@
         }
 
         function connectCloudWebSocket() {
+            if (isPointCloudScanPaused) return;
+
             if (cloudWs && (
                 cloudWs.readyState === WebSocket.OPEN ||
                 cloudWs.readyState === WebSocket.CONNECTING
@@ -13777,6 +13834,10 @@
 
             socket.onopen = () => {
                 if (cloudWs !== socket) return;
+                if (isPointCloudScanPaused) {
+                    socket.close();
+                    return;
+                }
 
                 if (cloudReconnectTimer !== null) {
                     window.clearTimeout(cloudReconnectTimer);
@@ -13787,6 +13848,7 @@
 
             socket.onmessage = (event) => {
                 if (cloudWs !== socket) return;
+                if (isPointCloudScanPaused) return;
 
                 try {
                     const data = JSON.parse(event.data);
@@ -13814,6 +13876,7 @@
 
                 cloudWs = null;
                 hasLoggedCloudSuccess = false;
+                if (isPointCloudScanPaused) return;
                 scheduleCloudReconnect();
             };
         }
