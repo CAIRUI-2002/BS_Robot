@@ -7364,7 +7364,10 @@
 
                     const geometry = new THREE.TorusGeometry(ringRadius, tubeThickness, 16, 32);
                     const ringColor = blob.colorHex || blob.pipeColorHex || 0xff0000;
-                    const material = new THREE.MeshBasicMaterial({ color: ringColor });
+                    const material = new THREE.MeshBasicMaterial({
+                        color: ringColor,
+                        side: THREE.DoubleSide
+                    });
                     const ring = new THREE.Mesh(geometry, material);
 
                     // --- C. 姿态与定位 ---
@@ -8109,7 +8112,10 @@
 
         const mesh = new THREE.Mesh(
             geometry,
-            new THREE.MeshBasicMaterial({ color: colorHex })
+            new THREE.MeshBasicMaterial({
+                color: colorHex,
+                side: THREE.DoubleSide
+            })
         );
         mesh.userData.gprCenterlinePoints = cleanPoints.map(p => p.clone());
         return mesh;
@@ -8136,7 +8142,8 @@
         );
 
         const material = new THREE.MeshBasicMaterial({
-            color: 0xffff00 // ✅ 将初始底层颜色也改为黄色
+            color: 0xffff00, // ✅ 将初始底层颜色也改为黄色
+            side: THREE.DoubleSide
         });
 
         const mesh = new THREE.Mesh(geometry, material);
