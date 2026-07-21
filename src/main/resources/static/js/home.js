@@ -4981,6 +4981,38 @@
             btnFaultWaitSettings.onclick = openFaultWaitParamModal;
         }
 
+        const headerDropdownGroups = Array.from(document.querySelectorAll('.header-btn-group .dropdown-group'));
+        function closeHeaderDropdowns(exceptGroup) {
+            headerDropdownGroups.forEach(group => {
+                if (group !== exceptGroup) {
+                    group.classList.remove('open');
+                }
+            });
+        }
+
+        headerDropdownGroups.forEach(group => {
+            const toggle = group.querySelector('.dropdown-toggle');
+            if (!toggle) return;
+
+            toggle.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const willOpen = !group.classList.contains('open');
+                closeHeaderDropdowns(group);
+                group.classList.toggle('open', willOpen);
+            });
+        });
+
+        document.addEventListener('click', function () {
+            closeHeaderDropdowns();
+        });
+
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') {
+                closeHeaderDropdowns();
+            }
+        });
+
         // --- A. 获取 DOM ---
         const btn3D = $("btn3DReconstruct");
         const btnRobotNav = $("btnRobotNav");
@@ -10207,6 +10239,43 @@
                     setStatus("手动绘制结束", "warning");
                 }
             };
+        }
+
+        const btnStartPointCloudLidar = document.getElementById('btnStartPointCloudLidar');
+        if (btnStartPointCloudLidar) {
+            btnStartPointCloudLidar.addEventListener('click', async function () {
+                const oldText = btnStartPointCloudLidar.innerText;
+                btnStartPointCloudLidar.disabled = true;
+                btnStartPointCloudLidar.innerText = "⏳ 启动中...";
+                setStatus("正在向点云激光雷达发送启动指令...", "warning");
+
+                try {
+                    const res = await fetch("/api/lidar/start", { method: "POST" });
+                    const data = await res.json().catch(() => ({}));
+
+                    if (!res.ok || data.success === false) {
+                        throw new Error(data.message || ("HTTP " + res.status));
+                    }
+
+                    btnStartPointCloudLidar.innerText = "✅ 雷达已启动";
+                    setStatus("点云激光雷达已成功启动", "success");
+
+                    setTimeout(() => {
+                        btnStartPointCloudLidar.innerText = oldText || "📡 启动点云雷达";
+                    }, 2000);
+                } catch (err) {
+                    console.error("点云激光雷达启动失败", err);
+                    btnStartPointCloudLidar.innerText = "❌ 启动失败";
+                    setStatus("点云激光雷达启动失败", "error");
+                    alert("点云激光雷达启动失败：" + (err.message || err));
+
+                    setTimeout(() => {
+                        btnStartPointCloudLidar.innerText = oldText || "📡 启动点云雷达";
+                    }, 2000);
+                } finally {
+                    btnStartPointCloudLidar.disabled = false;
+                }
+            });
         }
 
         // 1. 计算整条路径的距离积分

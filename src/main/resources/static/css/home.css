@@ -2164,6 +2164,11 @@ input[type="range"]::-webkit-slider-thumb {
     background: rgba(0, 120, 200, 0.8);
 }
 
+.lidar-start-btn:disabled {
+    opacity: 0.75;
+    cursor: wait;
+}
+
 
 /* ==========================================
    新增：操作栏全自动填充样式 (Auto Fill)
@@ -2945,8 +2950,8 @@ input[type="range"]::-webkit-slider-thumb {
     /* 按钮之间的垂直间距 */
 }
 
-/* 鼠标悬浮时以 Flex 模式显示下拉框 */
-.dropdown-group:hover .dropdown-content {
+/* 点击按钮后以 Flex 模式显示下拉框 */
+.dropdown-group.open .dropdown-content {
     display: flex;
 }
 
