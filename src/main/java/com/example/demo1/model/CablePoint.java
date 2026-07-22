@@ -7,5 +7,7 @@ public class CablePoint {
     private Double x;
     private Double y;
     private Double z;
+    private Double lat;
+    private Double lon;
     private Double depth;
 }

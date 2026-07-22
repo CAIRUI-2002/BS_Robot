@@ -11728,24 +11728,89 @@
         // ✅ 正式 B/S：巡检结果保存与历史回显
         // 只保存路径点、破损点坐标、图片 URL，不保存点云
         // ==========================================
-        function plainCablePoint(p) {
+        function roundInspectionCoordinate(value, digits = 10) {
+            const n = Number(value);
+            return Number.isFinite(n) ? Number(n.toFixed(digits)) : null;
+        }
+
+        function getStoredInspectionGps(point) {
+            if (!point) return null;
+            const lat = roundInspectionCoordinate(point.lat ?? point.latitude ?? point.userData?.lat, 10);
+            const lon = roundInspectionCoordinate(point.lon ?? point.lng ?? point.longitude ?? point.userData?.lon, 10);
+            return lat !== null && lon !== null ? { lat, lon } : null;
+        }
+
+        function getGpsFromSlamPoint(x, y, sourcePoint = null) {
+            const sx = Number(x);
+            const sy = Number(y);
+
+            if (Number.isFinite(sx) && Number.isFinite(sy) && typeof window.slamToGps === "function") {
+                const gps = window.slamToGps(sx, sy);
+                const lat = roundInspectionCoordinate(gps?.lat, 10);
+                const lon = roundInspectionCoordinate(gps?.lon, 10);
+                if (lat !== null && lon !== null) return { lat, lon };
+            }
+
+            return getStoredInspectionGps(sourcePoint);
+        }
+
+        function getCurrentSlamFromInspectionGps(point) {
+            const gps = getStoredInspectionGps(point);
+            if (gps && typeof window.gpsToSlam === "function") {
+                const slam = window.gpsToSlam(gps.lat, gps.lon);
+                const x = Number(slam?.x);
+                const y = Number(slam?.y);
+                if (Number.isFinite(x) && Number.isFinite(y)) {
+                    return {
+                        x,
+                        y,
+                        projectedFromGps: true
+                    };
+                }
+            }
+
             return {
-                x: Number(p.x),
-                y: Number(p.y),
+                x: Number(point?.x),
+                y: Number(point?.y),
+                projectedFromGps: false
+            };
+        }
+
+        function hasInspectionGps(point) {
+            return !!getStoredInspectionGps(point);
+        }
+
+        function plainCablePoint(p) {
+            const x = Number(p.x);
+            const y = Number(p.y);
+            const gps = getGpsFromSlamPoint(x, y, p);
+
+            return {
+                x,
+                y,
                 z: Number(p.z ?? 0.08),
+                lat: gps ? gps.lat : null,
+                lon: gps ? gps.lon : null,
                 depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
             };
         }
 
         function vectorCablePoint(p) {
+            const projected = getCurrentSlamFromInspectionGps(p);
             const v = new THREE.Vector3(
-                Number(p.x),
-                Number(p.y),
+                projected.x,
+                projected.y,
                 Number(p.z ?? 0.08)
             );
+            const gps = getStoredInspectionGps(p);
 
             v.userData = {
-                depth: p.depth ?? null
+                depth: p.depth ?? null,
+                lat: gps ? gps.lat : null,
+                lon: gps ? gps.lon : null,
+                originalX: Number(p.x),
+                originalY: Number(p.y),
+                projectedFromGps: projected.projectedFromGps
             };
 
             return v;
@@ -11795,16 +11860,23 @@
 
         function createFaultMarkerFromHistory(fault) {
             const faultId = fault.faultId || fault.id || ("fault_" + Date.now());
+            const projected = getCurrentSlamFromInspectionGps(fault);
+            const gps = getStoredInspectionGps(fault);
 
             const faultGroup = new THREE.Group();
 
             faultGroup.position.set(
-                Number(fault.x),
-                Number(fault.y),
+                projected.x,
+                projected.y,
                 Number(fault.z ?? 0.08)
             );
 
             faultGroup.userData.faultId = faultId;
+            faultGroup.userData.lat = gps ? gps.lat : null;
+            faultGroup.userData.lon = gps ? gps.lon : null;
+            faultGroup.userData.originalX = Number(fault.x);
+            faultGroup.userData.originalY = Number(fault.y);
+            faultGroup.userData.projectedFromGps = projected.projectedFromGps;
 
             const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
             const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
@@ -11868,6 +11940,10 @@
                 ? window.savedCablePath.map(plainCablePoint)
                 : [];
 
+            if (cablePath.length >= 2 && cablePath.some(point => !hasInspectionGps(point))) {
+                throw new Error("GPS calibration is required before saving inspection-result cable coordinates.");
+            }
+
             if (cablePath.length < 2) {
                 throw new Error("当前没有有效的黄色电缆路径，无法保存巡检结果。");
             }
@@ -11884,11 +11960,22 @@
 
                 const imageUrls = await normalizeImagesToUrls(faultId, imgs);
 
+                const faultX = Number(group.position.x);
+                const faultY = Number(group.position.y);
+                const faultZ = Number(group.position.z ?? 0.08);
+                const faultGps = getGpsFromSlamPoint(faultX, faultY, group.userData);
+
+                if (!faultGps) {
+                    throw new Error("GPS calibration is required before saving inspection-result fault coordinates.");
+                }
+
                 faults.push({
                     faultId: faultId,
-                    x: Number(group.position.x),
-                    y: Number(group.position.y),
-                    z: Number(group.position.z ?? 0.08),
+                    x: faultX,
+                    y: faultY,
+                    z: faultZ,
+                    lat: faultGps.lat,
+                    lon: faultGps.lon,
                     images: {
                         left: imageUrls.left || "",
                         right: imageUrls.right || "",

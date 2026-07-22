@@ -8,5 +8,7 @@ public class FaultPoint {
     private Double x;
     private Double y;
     private Double z;
+    private Double lat;
+    private Double lon;
     private FaultImages images;
 }
