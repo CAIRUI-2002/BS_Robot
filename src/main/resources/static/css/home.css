@@ -164,7 +164,7 @@ body {
     display: flex;
     align-items: center;
     /* ✅ 增加间距：通过较大的 gap 实现“分散”感，建议 40px - 60px */
-    gap: 60px;
+    gap: clamp(18px, 2.5vw, 36px);
     pointer-events: auto;
 }
 
@@ -174,6 +174,7 @@ body {
     height: 48px;
     margin: 0;
     font-size: 15px;
+    white-space: nowrap;
 }
 
 /* ==========================================
@@ -938,16 +939,16 @@ screen and (max-height: 800px) {
 
     /* 3. 底部模式按钮组自适应适配：完美居中并缩减间距 */
     .bottom-mode-group {
-        gap: 50px;
+        gap: 18px;
         /* 缩减按钮之间的间距，防止在小屏下过于分散超出安全边界 */
     }
 
     .bottom-mode-group .tech-mode-btn {
-        width: 180px;
+        width: 150px;
         /* 按比例缩减按钮宽度 */
         height: 40px;
         /* 压低按钮高度 */
-        font-size: 15px;
+        font-size: 14px;
         /* 配合缩小字号 */
     }
 
@@ -1027,6 +1028,16 @@ screen and (max-height: 800px) {
 
 /* 针对特别窄的屏幕（竖屏或分屏），强制将 3D 视图换行 */
 @media screen and (max-width: 1000px) {
+    .bottom-mode-group {
+        gap: 10px;
+    }
+
+    .bottom-mode-group .tech-mode-btn {
+        width: 132px;
+        font-size: 13px;
+        letter-spacing: 0;
+    }
+
     .gpr-views {
         /* 改为两行布局：上面两个 2D，下面一个 3D */
         grid-template-columns: 1fr 1fr;
@@ -3655,6 +3666,94 @@ input[type="range"]::-webkit-slider-thumb {
     flex-direction: row;
     align-items: stretch;
     gap: 20px;
+}
+
+.pipeline-key-modal-content {
+    width: 420px;
+    max-width: calc(100vw - 32px);
+}
+
+.pipeline-key-modal-body {
+    padding: 18px;
+}
+
+.pipeline-key-control-box {
+    margin: 0;
+    padding: 12px;
+    min-height: 220px;
+}
+
+.pipeline-key-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    flex: 1;
+}
+
+.pipeline-key-btn {
+    min-height: 72px;
+    border-radius: 6px;
+    border: 1px solid rgba(0, 200, 255, 0.5);
+    background: linear-gradient(145deg, #1a4a6d, #0d2a40);
+    color: #eaf6ff;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    box-shadow: 0 0 8px rgba(0, 160, 233, 0.24), inset 0 2px 4px rgba(255, 255, 255, 0.12);
+    transition: transform 0.12s ease, filter 0.12s ease, box-shadow 0.12s ease;
+    user-select: none;
+}
+
+.pipeline-key-btn strong {
+    font-size: 18px;
+    letter-spacing: 0;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.pipeline-key-btn span {
+    font-size: 13px;
+    color: #a8e0ff;
+}
+
+.pipeline-key-btn:hover:not(:disabled) {
+    filter: brightness(1.12);
+    transform: translateY(-1px);
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.55), inset 0 2px 5px rgba(255, 255, 255, 0.24);
+}
+
+.pipeline-key-btn:active:not(:disabled) {
+    transform: translateY(1px);
+    background: #00ccff;
+    color: #00111f;
+}
+
+.pipeline-key-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
+}
+
+.pipeline-key-btn.sending {
+    border-color: #ffd700;
+    box-shadow: 0 0 14px rgba(255, 215, 0, 0.55);
+}
+
+.pipeline-key-status {
+    min-height: 22px;
+    margin-top: 12px;
+    color: #a8e0ff;
+    font-size: 13px;
+    text-align: center;
+}
+
+.pipeline-key-status.success {
+    color: #00ff66;
+}
+
+.pipeline-key-status.error {
+    color: #ff7b7b;
 }
 
 /* ==========================================

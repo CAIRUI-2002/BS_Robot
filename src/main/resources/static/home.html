@@ -558,6 +558,11 @@
                     <span class="btn-icon">🔍</span> 寻找破损点
                 </button>
 
+                <button id="btnShowPipelineKeyModal" class="tech-mode-btn"
+                    style="background: linear-gradient(180deg, rgba(16, 60, 110, 0.85) 0%, rgba(6, 28, 55, 0.95) 100%);">
+                    <span class="btn-icon"></span> 管线仪控制面板
+                </button>
+
                 <button id="btnShowArmModal" class="tech-mode-btn"
                     style="background: linear-gradient(180deg, rgba(16, 60, 110, 0.85) 0%, rgba(6, 28, 55, 0.95) 100%);">
                     <span class="btn-icon"></span> 机械臂控制面板
@@ -811,6 +816,39 @@
                 </div>
 
 
+            </div>
+        </div>
+    </div>
+
+    <div id="pipelineKeyModal" class="cyber-modal-overlay">
+        <div class="cyber-modal-content pipeline-key-modal-content">
+            <div class="cyber-modal-header">
+                <h3>管线仪控制面板</h3>
+                <span class="close-modal-btn" id="closePipelineKeyModal">&times;</span>
+            </div>
+            <div class="pipeline-key-modal-body">
+                <div class="control-group-box pipeline-key-control-box">
+                    <div class="group-title">管线仪按键控制</div>
+                    <div class="pipeline-key-grid">
+                        <button type="button" class="pipeline-key-btn" data-pipeline-key="POWER">
+                            <strong>POWER</strong>
+                            <span>电源</span>
+                        </button>
+                        <button type="button" class="pipeline-key-btn" data-pipeline-key="INFO">
+                            <strong>INFO</strong>
+                            <span>信息</span>
+                        </button>
+                        <button type="button" class="pipeline-key-btn" data-pipeline-key="FREQ">
+                            <strong>FREQ</strong>
+                            <span>频率</span>
+                        </button>
+                        <button type="button" class="pipeline-key-btn" data-pipeline-key="MODE">
+                            <strong>MODE</strong>
+                            <span>模式</span>
+                        </button>
+                    </div>
+                    <div id="pipelineKeyStatus" class="pipeline-key-status">等待操作...</div>
+                </div>
             </div>
         </div>
     </div>

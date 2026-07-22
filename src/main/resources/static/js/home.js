@@ -15297,6 +15297,87 @@
         }
     })();
     // ==========================================
+    // ✅ 新增：管线仪控制弹窗与按键逻辑
+    // ==========================================
+    document.addEventListener("DOMContentLoaded", function () {
+        const btnShowPipelineKeyModal = document.getElementById('btnShowPipelineKeyModal');
+        const pipelineKeyModal = document.getElementById('pipelineKeyModal');
+        const closePipelineKeyModal = document.getElementById('closePipelineKeyModal');
+        const pipelineKeyStatus = document.getElementById('pipelineKeyStatus');
+        const pipelineKeyButtons = Array.from(document.querySelectorAll('.pipeline-key-btn[data-pipeline-key]'));
+
+        function setPipelineKeyStatus(text, type) {
+            if (!pipelineKeyStatus) return;
+            pipelineKeyStatus.textContent = text;
+            pipelineKeyStatus.classList.remove('success', 'error');
+            if (type) pipelineKeyStatus.classList.add(type);
+        }
+
+        function setPipelineKeyButtonsDisabled(disabled) {
+            pipelineKeyButtons.forEach(btn => {
+                btn.disabled = disabled;
+            });
+        }
+
+        async function sendPipelineKeyCommand(keyName, activeButton) {
+            if (!keyName) return;
+
+            setPipelineKeyButtonsDisabled(true);
+            if (activeButton) activeButton.classList.add('sending');
+            setPipelineKeyStatus(`正在发送 ${keyName} 指令...`, "");
+            setStatus(`管线仪：发送 ${keyName} 指令`, "");
+
+            try {
+                const res = await fetch(`/api/pipeline-key/key?name=${encodeURIComponent(keyName)}`, {
+                    method: "POST",
+                    cache: "no-store"
+                });
+                const contentType = res.headers.get("content-type") || "";
+                const data = contentType.includes("application/json") ? await res.json() : { message: await res.text() };
+
+                if (!res.ok || data.success === false) {
+                    throw new Error(data.message || `管线仪 ${keyName} 指令发送失败`);
+                }
+
+                setPipelineKeyStatus(`${keyName} 指令发送成功`, "success");
+                setStatus(`管线仪：${keyName} 指令发送成功`, "success");
+            } catch (err) {
+                const message = err && err.message ? err.message : String(err);
+                setPipelineKeyStatus(message, "error");
+                setStatus(`管线仪：${keyName} 指令发送失败`, "error");
+                addSystemMessage(`管线仪 ${keyName} 指令发送失败：${message}`, "error");
+                console.error("管线仪按键指令发送失败:", err);
+            } finally {
+                if (activeButton) activeButton.classList.remove('sending');
+                setPipelineKeyButtonsDisabled(false);
+            }
+        }
+
+        if (btnShowPipelineKeyModal && pipelineKeyModal && closePipelineKeyModal) {
+            btnShowPipelineKeyModal.addEventListener('click', function (e) {
+                e.preventDefault();
+                pipelineKeyModal.style.display = 'block';
+            });
+
+            closePipelineKeyModal.addEventListener('click', function () {
+                pipelineKeyModal.style.display = 'none';
+            });
+
+            window.addEventListener('click', function (event) {
+                if (event.target === pipelineKeyModal) {
+                    pipelineKeyModal.style.display = 'none';
+                }
+            });
+        }
+
+        pipelineKeyButtons.forEach(btn => {
+            btn.addEventListener('click', function () {
+                sendPipelineKeyCommand(this.dataset.pipelineKey, this);
+            });
+        });
+    });
+
+    // ==========================================
     // ✅ 新增：机械臂控制弹窗逻辑
     // ==========================================
     document.addEventListener("DOMContentLoaded", function () {
