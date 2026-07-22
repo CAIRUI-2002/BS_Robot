@@ -344,6 +344,153 @@
         renderOperationStatusEntries(operationStatusHistory);
     }
 
+    const SYSTEM_MESSAGE_LIMIT = 30;
+    let systemMessages = [];
+    let unreadSystemMessageCount = 0;
+    let systemMessageToastTimer = null;
+
+    function formatSystemMessageTime(timestamp) {
+        const date = new Date(timestamp);
+        const pad = value => String(value).padStart(2, "0");
+        return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+    }
+
+    function updateSystemMessageBadge() {
+        const badge = $("systemMessageBadge");
+        if (!badge) return;
+
+        if (unreadSystemMessageCount <= 0) {
+            badge.classList.add("hidden");
+            badge.textContent = "0";
+            return;
+        }
+
+        badge.textContent = unreadSystemMessageCount > 99 ? "99+" : String(unreadSystemMessageCount);
+        badge.classList.remove("hidden");
+    }
+
+    function renderSystemMessages() {
+        const list = $("systemMessageList");
+        if (!list) return;
+
+        list.innerHTML = "";
+        if (!systemMessages.length) {
+            const empty = document.createElement("div");
+            empty.className = "system-message-empty";
+            empty.textContent = "暂无系统消息";
+            list.appendChild(empty);
+            return;
+        }
+
+        systemMessages.forEach(item => {
+            const row = document.createElement("div");
+            row.className = "system-message-item";
+            if (item.type) row.classList.add(item.type);
+
+            const time = document.createElement("div");
+            time.className = "system-message-item-time";
+            time.textContent = formatSystemMessageTime(item.timestamp);
+
+            const text = document.createElement("div");
+            text.className = "system-message-item-text";
+            text.textContent = item.message;
+
+            row.appendChild(time);
+            row.appendChild(text);
+            list.appendChild(row);
+        });
+    }
+
+    function showSystemMessageToast(message, type = "warning") {
+        const toast = $("systemMessageToast");
+        if (!toast) return;
+
+        const statusType = normalizeStatusType(type);
+        toast.className = "system-message-toast";
+        if (statusType) toast.classList.add(statusType);
+        toast.textContent = message;
+
+        if (systemMessageToastTimer !== null) {
+            window.clearTimeout(systemMessageToastTimer);
+            systemMessageToastTimer = null;
+        }
+
+        // 触发布局刷新，使连续消息也能重新播放淡入效果。
+        void toast.offsetWidth;
+        toast.classList.add("visible");
+
+        systemMessageToastTimer = window.setTimeout(() => {
+            toast.classList.remove("visible");
+            systemMessageToastTimer = null;
+        }, 2000);
+    }
+
+    function setSystemMessagePanelOpen(open) {
+        const panel = $("systemMessagePanel");
+        if (!panel) return;
+
+        panel.classList.toggle("hidden", !open);
+        if (open) {
+            unreadSystemMessageCount = 0;
+            updateSystemMessageBadge();
+        }
+    }
+
+    function addSystemMessage(message, type = "warning") {
+        const text = message == null ? "" : String(message).trim();
+        if (!text) return;
+
+        const panel = $("systemMessagePanel");
+        const isPanelOpen = panel && !panel.classList.contains("hidden");
+        systemMessages.unshift({
+            message: text,
+            type: normalizeStatusType(type),
+            timestamp: Date.now()
+        });
+        systemMessages = systemMessages.slice(0, SYSTEM_MESSAGE_LIMIT);
+
+        if (!isPanelOpen) {
+            unreadSystemMessageCount += 1;
+        }
+
+        renderSystemMessages();
+        updateSystemMessageBadge();
+        showSystemMessageToast(text, type);
+    }
+
+    function initSystemMessageCenter() {
+        const wrapper = $("systemMessageWrapper");
+        const button = $("btnSystemMessages");
+        const panel = $("systemMessagePanel");
+        if (!wrapper || !button || !panel || button.dataset.bound === "true") return;
+
+        button.dataset.bound = "true";
+        button.addEventListener("click", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            setSystemMessagePanelOpen(panel.classList.contains("hidden"));
+        });
+
+        panel.addEventListener("click", function (e) {
+            e.stopPropagation();
+        });
+
+        document.addEventListener("click", function (e) {
+            if (!wrapper.contains(e.target)) {
+                setSystemMessagePanelOpen(false);
+            }
+        });
+
+        document.addEventListener("keydown", function (e) {
+            if (e.key === "Escape") {
+                setSystemMessagePanelOpen(false);
+            }
+        });
+
+        renderSystemMessages();
+        updateSystemMessageBadge();
+    }
+
     // ==========================================
     // ✅ 点云地图经纬度元数据工具函数
     // 说明：PCD 只保存 SLAM 点云本体；同名 .geo.json 保存 GPS/SLAM 标定参数。
@@ -1660,6 +1807,7 @@
             }
 
             setStatus(`✅ 当前点云地图已加载：点云 ${pointCount} 点，电缆路径 ${cableCount} 点，破损点 ${faultCount} 个。`, "success");
+            addSystemMessage("当前点云地图已加载。", "success");
 
             if (btn) {
                 btn.classList.add("loaded");
@@ -4938,6 +5086,7 @@
 
         // ✅ 启动机械臂末端摄像头实时视频流
         initArmEndCameraStream();
+        initSystemMessageCenter();
 
         // ✅ 初始化所有浮动滑块的位置
         ['manualSpeedX', 'manualSpeedY', 'autoSpeedX', 'autoSpeedY'].forEach(id => {
@@ -5240,8 +5389,10 @@
                     if (geoMeta && window.isGpsCalibrated) {
                         const cableTip = localCableCount >= 2 ? `，已恢复黄色电缆路径 ${localCableCount} 点` : "";
                         setStatus(`✅ 本地地图加载完成：${pcdFile.name}，已恢复经纬度标定${cableTip}，可发送履带小车巡检。`, "success");
+                        addSystemMessage(`本地地图加载完成：${pcdFile.name}。`, "success");
                     } else {
                         setStatus(`✅ 本地点云加载完成：${pcdFile.name}；未加载 .geo.json，经纬度不可用。`, "success");
+                        addSystemMessage(`本地点云加载完成：${pcdFile.name}；未加载 geo.json。`, "success");
                     }
                 } catch (err) {
                     console.error("本地地图读取失败:", err);
@@ -6770,6 +6921,7 @@
             setStatus("处理完成。已在当前GPR文件夹中发现历史校准，但剖面数量或文件名不一致，已使用当前自动识别结果。", "error");
         } else {
             setStatus("处理完成", "success");
+            addSystemMessage("地下环境渲染处理完成。", "success");
         }
     }
 
@@ -10178,6 +10330,7 @@
 
         let mapCursor = 0;
         let lastKeyframePose = { x: -999, y: -999 };
+        let shouldNotifyPointCloudReceivedAfterStart = false;
 
         // ✅ 新增：用于连续破损区域追踪的状态变量
         window.lastFaultMarker = null;    // 🌟 修复：将其挂载到 window 变为全局变量
@@ -10258,12 +10411,14 @@
                     }
 
                     btnStartPointCloudLidar.innerText = "✅ 雷达已启动";
+                    shouldNotifyPointCloudReceivedAfterStart = true;
                     setStatus("点云激光雷达已成功启动", "success");
 
                     setTimeout(() => {
                         btnStartPointCloudLidar.innerText = oldText || "📡 启动点云雷达";
                     }, 2000);
                 } catch (err) {
+                    shouldNotifyPointCloudReceivedAfterStart = false;
                     console.error("点云激光雷达启动失败", err);
                     btnStartPointCloudLidar.innerText = "❌ 启动失败";
                     setStatus("点云激光雷达启动失败", "error");
@@ -11089,6 +11244,7 @@
 
         // B2. 历史地图层
         const mapMaxPoints = 3000000;
+        const mapMaxComponents = mapMaxPoints * 3;
         const mapGeom = new THREE.BufferGeometry();
         const mapPositions = new Float32Array(mapMaxPoints * 3);
         const mapColors = new Float32Array(mapMaxPoints * 3);
@@ -11097,6 +11253,91 @@
         mapGeom.setAttribute('color', new THREE.BufferAttribute(mapColors, 3));
 
         for (let i = 0; i < mapMaxPoints * 3; i++) mapPositions[i] = 99999;
+
+        let pendingMapUpdateRanges = [];
+
+        function queueMapBufferUpdateRange(offset, count) {
+            if (!Number.isFinite(offset) || !Number.isFinite(count) || count <= 0) return;
+            pendingMapUpdateRanges.push({
+                offset: Math.max(0, Math.floor(offset)),
+                count: Math.min(mapMaxComponents, Math.floor(count))
+            });
+        }
+
+        function markAttributeUpdateRanges(attribute, ranges) {
+            if (!attribute || !ranges.length) return;
+
+            if (typeof attribute.clearUpdateRanges === "function") {
+                attribute.clearUpdateRanges();
+            }
+
+            if (typeof attribute.addUpdateRange === "function") {
+                ranges.forEach(range => {
+                    if (range.count > 0) attribute.addUpdateRange(range.offset, range.count);
+                });
+                attribute.needsUpdate = true;
+                return;
+            }
+
+            let start = Infinity;
+            let end = -Infinity;
+            ranges.forEach(range => {
+                if (range.count <= 0) return;
+                start = Math.min(start, range.offset);
+                end = Math.max(end, range.offset + range.count);
+            });
+
+            if (!Number.isFinite(start) || end <= start) return;
+            if (attribute.updateRange) {
+                attribute.updateRange.offset = start;
+                attribute.updateRange.count = end - start;
+            }
+            attribute.needsUpdate = true;
+        }
+
+        function flushPendingMapBufferUpdates() {
+            if (!pendingMapUpdateRanges.length) return;
+
+            const ranges = pendingMapUpdateRanges;
+            pendingMapUpdateRanges = [];
+
+            markAttributeUpdateRanges(mapMesh.geometry.attributes.position, ranges);
+            markAttributeUpdateRanges(mapMesh.geometry.attributes.color, ranges);
+        }
+
+        function markFullAttributeUpdate(attribute) {
+            if (!attribute) return;
+            if (typeof attribute.clearUpdateRanges === "function") {
+                attribute.clearUpdateRanges();
+            }
+            if (attribute.updateRange) {
+                attribute.updateRange.offset = 0;
+                attribute.updateRange.count = -1;
+            }
+            attribute.needsUpdate = true;
+        }
+
+        function appendScanToHistoryMap(scanPos, scanCol, componentCount) {
+            if (!scanPos || !scanCol || componentCount <= 0) return;
+
+            let remaining = Math.min(componentCount, mapMaxComponents);
+            let sourceOffset = 0;
+
+            while (remaining > 0) {
+                if (mapCursor >= mapMaxComponents) mapCursor = 0;
+
+                const chunkCount = Math.min(remaining, mapMaxComponents - mapCursor);
+                mapPositions.set(scanPos.subarray(sourceOffset, sourceOffset + chunkCount), mapCursor);
+                mapColors.set(scanCol.subarray(sourceOffset, sourceOffset + chunkCount), mapCursor);
+                queueMapBufferUpdateRange(mapCursor, chunkCount);
+
+                mapCursor += chunkCount;
+                sourceOffset += chunkCount;
+                remaining -= chunkCount;
+
+                if (mapCursor >= mapMaxComponents) mapCursor = 0;
+            }
+        }
 
         const mapMesh = new THREE.Points(mapGeom, new THREE.PointsMaterial({
             vertexColors: true,
@@ -11694,6 +11935,7 @@
                 await res.json().catch(() => null);
 
                 alert("✅ 巡检结果已保存到机器狗主机 MySQL 中，仅保留最近五次。");
+                addSystemMessage("巡检结果已成功保存。", "success");
 
                 if (window.renderInspectionHistoryList) {
                     window.renderInspectionHistoryList();
@@ -11769,6 +12011,7 @@
                 }
 
                 setStatus("✅ 已加载历史巡检结果：" + (record.name || ""), "success");
+                addSystemMessage(`已加载历史巡检结果：${record.name || "未命名记录"}。`, "success");
 
             } catch (err) {
                 console.error("加载历史巡检结果失败：", err);
@@ -12670,6 +12913,7 @@
                     console.log(`🎯 [二分定位] 已完成 ${BS_MAX_ITERATIONS} 次二分法寻找，最终参考破损点位于: ${bsGoodDist.toFixed(2)}m`);
                     bsState = 'DONE';
                     setStatus(`🎯 破损点定位完成：已完成 ${BS_MAX_ITERATIONS} 次二分法寻找`, "success");
+                    addSystemMessage("破损点定位已完成。", "success");
                     stopNav(true);
                     return;
                 }
@@ -12816,9 +13060,11 @@
                 const mapAttr = mapMesh.geometry.attributes.position;
                 const mapArr = mapAttr.array;
                 for (let i = 0; i < mapArr.length; i++) mapArr[i] = 99999;
-                mapAttr.needsUpdate = true;
+                markFullAttributeUpdate(mapAttr);
+                markFullAttributeUpdate(mapMesh.geometry.attributes.color);
 
                 mapCursor = 0;
+                pendingMapUpdateRanges = [];
                 pathGroundHeightGrid.clear();
                 refreshRenderedPathsForGroundLift(true);
                 lastKeyframePose = { x: -999, y: -999 };
@@ -13174,6 +13420,7 @@
                     if (geoMeta.calibration && geoMeta.calibration.isGpsCalibrated) {
                         const cableTip = savedCableCount >= 2 ? `，黄色电缆路径 ${savedCableCount} 点` : "";
                         setStatus(`✅ 点云和经纬度元数据已保存：${result.pointCount} 个点${cableTip}，${pcdFileName} + ${geoFileName}`, "success");
+                        addSystemMessage(`点云和经纬度元数据已保存：${pcdFileName} + ${geoFileName}。`, "success");
                     } else {
                         alert("⚠️ 当前 GPS 尚未标定，已保存 PCD 和 geo.json，但 geo.json 中没有可用经纬度标定。后续读取该地图时不能直接生成履带小车 GPS 航点。 ");
                         setStatus(`⚠️ PCD 已保存：${result.pointCount} 个点，但 GPS 未标定，geo.json 不可用于巡检航点换算。`, "error");
@@ -13389,6 +13636,7 @@
                         lastCablePos.set(lastPt.x, lastPt.y, 0.08);
 
                         setStatus(`✅ KML航线加载成功！共绘制 ${cablePoints.length} 个基准电缆路径点。`, "success");
+                        addSystemMessage("KML航线加载成功。", "success");
                         console.log(`📂 [KML 加载] 成功导入航线线段，管道模型已成功在世界坐标重绘。`);
 
                     } catch (err) {
@@ -13689,6 +13937,96 @@
 
         // 👇 1. 新增：记录点云渲染时间戳，用于节流
         let lastPointCloudRenderTime = 0;
+        const POINT_CLOUD_RECEIVED_NOTICE = "已成功接收到点云数据。";
+        const POINT_CLOUD_CACHE_NOTICE = "当前点云数据传输量较大，为避免发生卡顿，已自动清理缓存";
+        const CLOUD_BACKPRESSURE_CONFIG = {
+            parseWarnMs: 120,
+            processWarnMs: 180,
+            totalWarnMs: 260,
+            mainThreadLagWarnMs: 700,
+            payloadWarnBytes: 5 * 1024 * 1024,
+            bufferedAmountWarnBytes: 8 * 1024 * 1024,
+            pendingRangeWarnCount: 18,
+            keepLatestPendingRanges: 4,
+            dropFramesAfterCleanup: 2,
+            cleanupCooldownMs: 10000
+        };
+        let lastCloudAutoCleanupAt = 0;
+        let pendingCloudFramesToDrop = 0;
+
+        function getPayloadByteLength(payload) {
+            if (typeof payload === "string") return payload.length * 2;
+            if (payload && Number.isFinite(payload.byteLength)) return payload.byteLength;
+            return 0;
+        }
+
+        function compactPendingMapUpdateRanges() {
+            if (pendingMapUpdateRanges.length <= CLOUD_BACKPRESSURE_CONFIG.keepLatestPendingRanges) return;
+            pendingMapUpdateRanges = pendingMapUpdateRanges.slice(-CLOUD_BACKPRESSURE_CONFIG.keepLatestPendingRanges);
+        }
+
+        function autoCleanupPointCloudRuntimeCache(reason) {
+            const now = performance.now();
+            if (now - lastCloudAutoCleanupAt < CLOUD_BACKPRESSURE_CONFIG.cleanupCooldownMs) return false;
+
+            lastCloudAutoCleanupAt = now;
+            compactPendingMapUpdateRanges();
+            pathGroundHeightGrid.clear();
+            pendingCloudFramesToDrop = Math.max(
+                pendingCloudFramesToDrop,
+                CLOUD_BACKPRESSURE_CONFIG.dropFramesAfterCleanup
+            );
+
+            addSystemMessage(POINT_CLOUD_CACHE_NOTICE, "warning");
+            setStatus(POINT_CLOUD_CACHE_NOTICE, "warning");
+            console.warn("点云处理检测到积压，已清理浏览器端运行缓存:", reason);
+            return true;
+        }
+
+        function monitorCloudProcessingBackpressure(stats) {
+            if (!stats) return;
+
+            const reasons = [];
+            if (stats.parseMs > CLOUD_BACKPRESSURE_CONFIG.parseWarnMs) {
+                reasons.push(`parse=${stats.parseMs.toFixed(1)}ms`);
+            }
+            if (stats.processMs > CLOUD_BACKPRESSURE_CONFIG.processWarnMs) {
+                reasons.push(`process=${stats.processMs.toFixed(1)}ms`);
+            }
+            if (stats.totalMs > CLOUD_BACKPRESSURE_CONFIG.totalWarnMs) {
+                reasons.push(`total=${stats.totalMs.toFixed(1)}ms`);
+            }
+            if (stats.bufferedAmount > CLOUD_BACKPRESSURE_CONFIG.bufferedAmountWarnBytes) {
+                reasons.push(`buffered=${Math.round(stats.bufferedAmount / 1024 / 1024)}MB`);
+            }
+            if (stats.payloadBytes > CLOUD_BACKPRESSURE_CONFIG.payloadWarnBytes) {
+                reasons.push(`payload=${Math.round(stats.payloadBytes / 1024 / 1024)}MB`);
+            }
+            if (stats.pendingRangeCount > CLOUD_BACKPRESSURE_CONFIG.pendingRangeWarnCount) {
+                reasons.push(`pendingRanges=${stats.pendingRangeCount}`);
+            }
+
+            if (reasons.length) {
+                autoCleanupPointCloudRuntimeCache(reasons.join(", "));
+            }
+        }
+
+        let lastCloudLagProbeAt = performance.now();
+        window.setInterval(() => {
+            const now = performance.now();
+            const lagMs = now - lastCloudLagProbeAt - 1000;
+            lastCloudLagProbeAt = now;
+            if (
+                !document.hidden &&
+                !isPointCloudScanPaused &&
+                hasLoggedCloudSuccess &&
+                cloudWs &&
+                cloudWs.readyState === WebSocket.OPEN &&
+                lagMs > CLOUD_BACKPRESSURE_CONFIG.mainThreadLagWarnMs
+            ) {
+                autoCleanupPointCloudRuntimeCache(`mainThreadLag=${lagMs.toFixed(1)}ms`);
+            }
+        }, 1000);
 
         function updatePointCloudScanButton() {
             if (!btnTogglePointCloudScan) return;
@@ -13722,6 +14060,7 @@
 
             updatePointCloudScanButton();
             setStatus("点云扫描已暂停，当前点云地图保持定格。", "warning");
+            addSystemMessage("点云扫描已暂停，当前点云地图保持定格。", "warning");
         }
 
         function resumePointCloudScan() {
@@ -13851,13 +14190,37 @@
                 if (isPointCloudScanPaused) return;
 
                 try {
+                    const messageStartAt = performance.now();
+                    const bufferedAmount = Number(socket.bufferedAmount) || 0;
+
+                    if (pendingCloudFramesToDrop > 0) {
+                        pendingCloudFramesToDrop -= 1;
+                        return;
+                    }
+
+                    const parseStartAt = performance.now();
                     const data = JSON.parse(event.data);
+                    const parseMs = performance.now() - parseStartAt;
                     if (data.type === 'cloud_data' || data.type === 'slam_data') {
                         if (!hasLoggedCloudSuccess) {
                             console.log("%c🌐 点云数据传输成功！", "color: #00e5ff; font-weight: bold;");
                             hasLoggedCloudSuccess = true;
                         }
-                        updateVis(data, { processPose: false, processScan: true });
+                        const processStartAt = performance.now();
+                        const visResult = updateVis(data, { processPose: false, processScan: true });
+                        const processMs = performance.now() - processStartAt;
+                        if (shouldNotifyPointCloudReceivedAfterStart && visResult && visResult.pointCloudDrawn) {
+                            shouldNotifyPointCloudReceivedAfterStart = false;
+                            addSystemMessage(POINT_CLOUD_RECEIVED_NOTICE, "success");
+                        }
+                        monitorCloudProcessingBackpressure({
+                            parseMs,
+                            processMs,
+                            totalMs: performance.now() - messageStartAt,
+                            bufferedAmount,
+                            payloadBytes: getPayloadByteLength(event.data),
+                            pendingRangeCount: pendingMapUpdateRanges.length
+                        });
                     }
                 } catch (e) {
                     console.error("点云 WebSocket 消息解析失败:", e);
@@ -13888,6 +14251,7 @@
             const processPose = options.processPose !== false;
             const processScan = options.processScan !== false;
             const pose = data.robot;
+            const result = { pointCloudDrawn: false };
 
             if (processPose) {
             // ==========================================
@@ -14346,7 +14710,7 @@
             }
             }
 
-            if (!processScan) return;
+            if (!processScan) return result;
             const scan = data.scan;
             if (scan && scan.length > 0) {
                 const scanAttr = scanMesh.geometry.attributes.position;
@@ -14401,6 +14765,7 @@
                     for (let i = c; i < 50000 * 3; i++) scanPos[i] = 99999;
                     scanMesh.geometry.attributes.position.needsUpdate = true;
                     scanMesh.geometry.attributes.color.needsUpdate = true;
+                    result.pointCloudDrawn = c > 0;
                     refreshRenderedPathsForGroundLift();
                 }
 
@@ -14410,26 +14775,18 @@
                     const poseY = Number(scanPose.y) * scaleFactor;
                     const dist = Math.sqrt(Math.pow(poseX - lastKeyframePose.x, 2) + Math.pow(poseY - lastKeyframePose.y, 2));
 
-                    const mapPos = mapMesh.geometry.attributes.position.array;
-                    const mapCol = mapMesh.geometry.attributes.color.array;
-
-                    for (let k = 0; k < c; k++) {
-                        if (mapCursor >= mapMaxPoints * 3) mapCursor = 0;
-                        mapPos[mapCursor] = scanPos[k];
-                        mapCol[mapCursor] = scanCol[k];
-                        mapCursor++;
-                    }
+                    appendScanToHistoryMap(scanPos, scanCol, c);
 
                     // 👇 3. 只有当判定需要刷新时，才将历史地图数据推入 GPU
                     if (shouldRender3D) {
-                        mapMesh.geometry.attributes.position.needsUpdate = true;
-                        mapMesh.geometry.attributes.color.needsUpdate = true;
+                        flushPendingMapBufferUpdates();
                         lastPointCloudRenderTime = now; // 刷新时间戳
                     }
 
                     lastKeyframePose = { x: poseX, y: poseY };
                 }
             }
+            return result;
         }
         // 将 3D 点击位置实时投影到 2D 屏幕，使弹出框跟随地图旋转缩放
         function updatePopupPosition() {

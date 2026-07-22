@@ -56,6 +56,19 @@
                         <div class="active-glow-bar"></div>
                     </div>
                 </nav>
+                <div class="system-message-wrapper" id="systemMessageWrapper">
+                    <div id="systemMessageToast" class="system-message-toast" role="status" aria-live="polite"></div>
+                    <button id="btnSystemMessages" class="system-message-btn" type="button" title="系统消息">
+                        <span class="system-message-icon">🔔</span>
+                        <span id="systemMessageBadge" class="system-message-badge hidden">0</span>
+                    </button>
+                    <div id="systemMessagePanel" class="system-message-panel hidden">
+                        <div class="system-message-panel-title">系统消息</div>
+                        <div id="systemMessageList" class="system-message-list">
+                            <div class="system-message-empty">暂无系统消息</div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
 

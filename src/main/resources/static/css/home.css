@@ -316,6 +316,181 @@ body {
     padding-right: 15px;
 }
 
+.system-message-wrapper {
+    position: relative;
+    flex: 0 0 auto;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    margin-left: 10px;
+    z-index: 1006;
+}
+
+.system-message-btn {
+    position: relative;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(0, 204, 255, 0.75);
+    border-radius: 6px;
+    background: linear-gradient(180deg, rgba(12, 70, 108, 0.85), rgba(4, 30, 56, 0.9));
+    box-shadow: inset 0 0 12px rgba(0, 204, 255, 0.12), 0 0 10px rgba(0, 204, 255, 0.25);
+    color: #d8f7ff;
+    cursor: pointer;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.system-message-btn:hover {
+    border-color: #00e5ff;
+    box-shadow: inset 0 0 16px rgba(0, 204, 255, 0.2), 0 0 14px rgba(0, 204, 255, 0.45);
+    transform: translateY(-1px);
+}
+
+.system-message-icon {
+    font-size: 18px;
+    line-height: 1;
+}
+
+.system-message-toast {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 10px);
+    max-width: 320px;
+    min-width: 190px;
+    padding: 8px 12px;
+    border: 1px solid rgba(0, 204, 255, 0.36);
+    border-left: 3px solid rgba(0, 204, 255, 0.72);
+    border-radius: 6px;
+    background: rgba(4, 24, 42, 0.92);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+    color: #dff8ff;
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translate(8px, -50%);
+    transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
+    z-index: 2;
+}
+
+.system-message-toast.visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(0, -50%);
+}
+
+.system-message-toast.success {
+    border-left-color: #00e676;
+}
+
+.system-message-toast.warning {
+    border-left-color: #ffcc00;
+}
+
+.system-message-toast.error {
+    border-left-color: #ff4d5e;
+}
+
+.system-message-badge {
+    position: absolute;
+    top: -4px;
+    right: -5px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border: 1px solid rgba(255, 255, 255, 0.75);
+    border-radius: 8px;
+    background: #ff334a;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 15px;
+    text-align: center;
+    box-shadow: 0 0 8px rgba(255, 51, 74, 0.75);
+    box-sizing: border-box;
+}
+
+.system-message-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 330px;
+    max-height: 320px;
+    overflow: hidden;
+    border: 1px solid rgba(0, 204, 255, 0.65);
+    border-radius: 6px;
+    background: rgba(3, 20, 38, 0.96);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55), inset 0 0 18px rgba(0, 204, 255, 0.12);
+    color: #d8f7ff;
+}
+
+.system-message-panel.hidden,
+.system-message-badge.hidden {
+    display: none;
+}
+
+.system-message-panel-title {
+    height: 36px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid rgba(0, 204, 255, 0.35);
+    background: rgba(9, 74, 113, 0.55);
+    color: #9eefff;
+    font-size: 15px;
+    font-weight: 800;
+}
+
+.system-message-list {
+    max-height: 284px;
+    overflow-y: auto;
+}
+
+.system-message-empty {
+    padding: 18px 12px;
+    color: rgba(216, 247, 255, 0.58);
+    font-size: 13px;
+    text-align: center;
+}
+
+.system-message-item {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(0, 204, 255, 0.18);
+    border-left: 3px solid rgba(0, 204, 255, 0.55);
+    background: rgba(8, 41, 70, 0.52);
+}
+
+.system-message-item.warning {
+    border-left-color: #ffcc00;
+}
+
+.system-message-item.error {
+    border-left-color: #ff4d5e;
+}
+
+.system-message-item.success {
+    border-left-color: #00ff66;
+}
+
+.system-message-item-time {
+    margin-bottom: 4px;
+    color: rgba(158, 239, 255, 0.62);
+    font-size: 11px;
+}
+
+.system-message-item-text {
+    color: #e8fbff;
+    font-size: 13px;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
 /* 3. 最左侧固定圆形 Logo 按钮 */
 .cyber-logo-btn {
     width: 42px;
