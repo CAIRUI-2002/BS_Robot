@@ -16,6 +16,19 @@
     const ARM_API_BASE = "http://10.21.31.104:5005";
     // 机械臂末端摄像头 Flask 服务端口，跟随当前访问上位机的机器狗 IP。
     const ARM_CAMERA_BASE = "http://" + (window.location.hostname || "10.21.31.104") + ":5001";
+    const ROBOT_CAMERA_WEBRTC_BASE = "http://10.21.31.103:8889";
+    const ROBOT_CAMERA_WHEP_URLS = {
+        front: ROBOT_CAMERA_WEBRTC_BASE + "/video1/whep",
+        back: ROBOT_CAMERA_WEBRTC_BASE + "/video2/whep"
+    };
+    const robotCameraReaders = {
+        front: null,
+        back: null
+    };
+    const robotCameraStreams = {
+        front: null,
+        back: null
+    };
 
     // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
     window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
@@ -983,6 +996,131 @@
 
         // 便于现场调试时在浏览器控制台手动重连：window.reconnectArmEndCameraStream()
         window.reconnectArmEndCameraStream = connectStream;
+    }
+
+    function getRobotCameraVideoElements(direction) {
+        return Array.from(document.querySelectorAll(
+            `.robot-camera-video[data-camera="${direction}"]`
+        ));
+    }
+
+    function attachRobotCameraStream(direction, stream) {
+        getRobotCameraVideoElements(direction).forEach(video => {
+            video.muted = true;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.srcObject = stream;
+            video.title = ROBOT_CAMERA_WHEP_URLS[direction] || "";
+
+            const playPromise = video.play();
+            if (playPromise && typeof playPromise.catch === "function") {
+                playPromise.catch(err => {
+                    console.warn(`机器狗${direction}摄像头自动播放失败:`, err);
+                });
+            }
+        });
+    }
+
+    function closeRobotCameraReader(direction) {
+        const reader = robotCameraReaders[direction];
+        if (reader && typeof reader.close === "function") {
+            reader.close();
+        }
+        robotCameraReaders[direction] = null;
+    }
+
+    function startRobotCameraReader(direction) {
+        const url = ROBOT_CAMERA_WHEP_URLS[direction];
+        if (!url || getRobotCameraVideoElements(direction).length === 0) return;
+
+        closeRobotCameraReader(direction);
+
+        robotCameraReaders[direction] = new window.MediaMTXWebRTCReader({
+            url,
+            onTrack: evt => {
+                if (!evt.track || evt.track.kind !== "video") return;
+
+                const stream = evt.streams && evt.streams[0]
+                    ? evt.streams[0]
+                    : new MediaStream([evt.track]);
+
+                robotCameraStreams[direction] = stream;
+                attachRobotCameraStream(direction, stream);
+
+                evt.track.onended = () => {
+                    console.warn(`机器狗${direction}摄像头视频轨道已结束`);
+                };
+            },
+            onError: err => {
+                console.warn(`机器狗${direction}摄像头 WHEP 连接异常:`, err);
+            }
+        });
+    }
+
+    function initRobotWideCameraStreams() {
+        if (!window.MediaMTXWebRTCReader) {
+            console.error("MediaMTX reader.js 未加载，无法连接机器狗前后广角 WebRTC 视频。");
+            return;
+        }
+
+        startRobotCameraReader("front");
+        startRobotCameraReader("back");
+
+        window.reconnectRobotWideCameraStreams = function () {
+            startRobotCameraReader("front");
+            startRobotCameraReader("back");
+        };
+    }
+
+    function captureRobotCameraFrame(direction, quality = 0.92) {
+        const videos = getRobotCameraVideoElements(direction);
+        const video = videos.find(item =>
+            item.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+            item.videoWidth > 0 &&
+            item.videoHeight > 0
+        );
+
+        if (!video) {
+            throw new Error(direction === "front"
+                ? "前摄像头画面尚未就绪"
+                : "后摄像头画面尚未就绪");
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context = canvas.getContext("2d");
+        if (!context) {
+            throw new Error("浏览器无法创建抓拍画布");
+        }
+
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL("image/jpeg", quality);
+    }
+
+    async function captureFaultRobotCamera(direction, label) {
+        if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
+            alert(`⚠️ 当前没有检测到破损点，无法进行${label}抓拍绑定！`);
+            return;
+        }
+
+        const faultId = window.lastFaultMarker.userData.faultId;
+
+        try {
+            console.log(`📸 开始截取机器狗【${label}】摄像头画面...`);
+            const imageBase64 = captureRobotCameraFrame(direction);
+
+            if (!window.faultImagesMap.has(faultId)) {
+                window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
+            }
+
+            await bindCapturedImageToFault(faultId, direction, imageBase64);
+            console.log(`✅ ${label}抓拍完成并已绑定`);
+        } catch (err) {
+            console.error(`${label}抓拍失败:`, err);
+            alert(`${label}抓拍失败：${err.message || err}`);
+        }
     }
 
 
@@ -5086,6 +5224,7 @@
 
         // ✅ 启动机械臂末端摄像头实时视频流
         initArmEndCameraStream();
+        initRobotWideCameraStreams();
         initSystemMessageCenter();
 
         // ✅ 初始化所有浮动滑块的位置
@@ -9354,64 +9493,14 @@
     // 5.6 ✅ 破损点前方拍照序列 (直接截取机器狗前摄)
     // ==========================================
     window.captureFaultFrontSequence = function () {
-        if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
-            alert("⚠️ 当前没有检测到破损点，无法进行前方抓拍绑定！");
-            return;
-        }
-        const faultId = window.lastFaultMarker.userData.faultId;
-        console.log("📸 开始截取机器狗【前方】摄像头画面...");
-
-        // 直接请求 video_server.py 提供的 5000 端口抓拍接口
-        fetch("http://10.21.31.104:5000/api/capture")
-            .then(res => res.json())
-            .then(data => {
-                // 读取后端返回的 data.front
-                if (data.status === "success" && data.front) {
-                    if (!window.faultImagesMap.has(faultId)) {
-                        window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
-                    }
-                    bindCapturedImageToFault(faultId, "back", data.rear)
-                        .catch(err => {
-                            console.error("后方图片上传或绑定失败:", err);
-                            alert("后方图片上传失败：" + err.message);
-                        });
-                } else {
-                    console.error("前方抓拍失败，未获取到图像数据");
-                }
-            })
-            .catch(err => console.error("前方抓拍请求失败:", err));
+        captureFaultRobotCamera("front", "前方");
     };
 
     // ==========================================
     // 5.7 ✅ 破损点后方拍照序列 (直接截取机器狗后摄)
     // ==========================================
     window.captureFaultBackSequence = function () {
-        if (!window.lastFaultMarker || !window.lastFaultMarker.userData.faultId) {
-            alert("⚠️ 当前没有检测到破损点，无法进行后方抓拍绑定！");
-            return;
-        }
-        const faultId = window.lastFaultMarker.userData.faultId;
-        console.log("📸 开始截取机器狗【后方】摄像头画面...");
-
-        // 直接请求 video_server.py 提供的 5000 端口抓拍接口
-        fetch("http://10.21.31.104:5000/api/capture")
-            .then(res => res.json())
-            .then(data => {
-                // 读取后端返回的 data.rear
-                if (data.status === "success" && data.rear) {
-                    if (!window.faultImagesMap.has(faultId)) {
-                        window.faultImagesMap.set(faultId, { left: "", right: "", front: "", back: "" });
-                    }
-                    bindCapturedImageToFault(faultId, "back", data.rear)
-                        .catch(err => {
-                            console.error("后方图片上传或绑定失败:", err);
-                            alert("后方图片上传失败：" + err.message);
-                        });
-                } else {
-                    console.error("后方抓拍失败，未获取到图像数据");
-                }
-            })
-            .catch(err => console.error("后方抓拍请求失败:", err));
+        captureFaultRobotCamera("back", "后方");
     };
 
     // ==========================================

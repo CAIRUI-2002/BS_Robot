@@ -1740,7 +1740,8 @@ screen and (max-height: 800px) {
 }
 
 /* 如果图片加载失败显示的文字颜色 */
-.video-box img {
+.video-box img,
+.video-box video {
     color: #888;
     font-size: 12px;
 }
@@ -1785,12 +1786,18 @@ screen and (max-height: 800px) {
 
 /* 视频画面/流 */
 .stream-img {
+    display: block;
     width: 100%;
     height: 100%;
     object-fit: cover;
     /* 👈 将 contain 改为 cover，它会自动等比放大填满容器 */
     object-position: center;
     /* 👈 建议加上这行，保证画面是以正中心为基准进行放大裁剪的 */
+    background: #000;
+}
+
+.robot-camera-video {
+    background: #000;
 }
 
 /* 仅针对“路径查找及故障定点”面板中的画面进行放大裁剪 */

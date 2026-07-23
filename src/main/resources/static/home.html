@@ -274,16 +274,16 @@
                                 <span class="video-label-overlay label-front">
                                     ● 前视广角
                                 </span>
-                                <img src="http://10.21.31.104:5000/front_feed" class="stream-img" alt="连接中..."
-                                    onerror="this.alt='无法连接视频服务';" />
+                                <video class="stream-img robot-camera-video" data-camera="front" autoplay muted
+                                    playsinline></video>
                             </div>
 
                             <div class="video-box">
                                 <span class="video-label-overlay label-rear">
                                     ● 后视广角
                                 </span>
-                                <img src="http://10.21.31.104:5000/rear_feed" class="stream-img" alt="连接中..."
-                                    onerror="this.alt='无法连接视频服务';" />
+                                <video class="stream-img robot-camera-video" data-camera="back" autoplay muted
+                                    playsinline></video>
                             </div>
 
                         </div>
@@ -469,13 +469,13 @@
                             <div class="pf-video-vertical">
                                 <div class="video-box">
                                     <span class="video-label-overlay label-front">● 前视广角</span>
-                                    <img src="http://10.21.31.104:5000/front_feed" class="stream-img" alt="连接中..."
-                                        onerror="this.alt='无法连接视频服务';" />
+                                    <video class="stream-img robot-camera-video" data-camera="front" autoplay muted
+                                        playsinline></video>
                                 </div>
                                 <div class="video-box">
                                     <span class="video-label-overlay label-rear">● 后视广角</span>
-                                    <img src="http://10.21.31.104:5000/rear_feed" class="stream-img" alt="连接中..."
-                                        onerror="this.alt='无法连接视频服务';" />
+                                    <video class="stream-img robot-camera-video" data-camera="back" autoplay muted
+                                        playsinline></video>
                                 </div>
                             </div>
 
@@ -951,6 +951,7 @@
     <script src="/js/PCDLoader.js"></script>
     <script src="/js/sockjs.min.js"></script>
     <script src="/js/stomp.min.js"></script>
+    <script src="/js/reader.js"></script>
     <script src="/js/home.js"></script>
 </body>
 
