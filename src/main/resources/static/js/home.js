@@ -10440,28 +10440,28 @@
         let offsetPathDists = [];    // 缓存偏移路径上每个点到起点的累加距离
         let bsFootprints = [];       // ✅ 新增：用于记录机器狗前进时的真实历史脚印
 
-        // 二分倒车闭环控制参数：使用 SLAM yaw 做反馈，不再用固定角速度开环转向。
-        const BS_REVERSE_CONTROL = Object.freeze({
-            lookaheadM: 0.4,
-            minReferenceDistanceM: 0.08,
-            maxHeadingChangeRad: 25 * Math.PI / 180,
-            maxFootprintPathDiffRad: 35 * Math.PI / 180,
-            alignEnterRad: 18 * Math.PI / 180,
-            alignExitRad: 7 * Math.PI / 180,
-            yawDeadbandRad: 2 * Math.PI / 180,
-            yawKp: 0.85,
-            yawKd: 0.06,
+        let bsLastPoseStaleWarningTime = 0;
+        const BS_PATH_CONTROL = Object.freeze({
+            lookaheadM: 0.45,
+            localProjectionWindowM: 2.0,
+            arriveDistM: 0.10,
+            arriveCrossTrackM: 0.20,
+            minSpeed: 0.06,
+            maxForwardSpeed: 0.22,
+            maxReverseSpeed: 0.16,
+            distanceKp: 0.85,
+            yawDeadbandRad: 5 * Math.PI / 180,
+            yawKp: 1.05,
             maxYawCommand: 0.35,
-            maxYawAcceleration: 1.0,
-            reverseSpeed: -0.12,
+            alignEnterRad: 24 * Math.PI / 180,
+            alignExitRad: 10 * Math.PI / 180,
+            crossTrackDeadbandM: 0.025,
+            crossTrackKp: 0.85,
+            maxStrafeCommand: 0.12,
             poseTimeoutMs: 400
         });
-        let bsReverseStartYaw = null;
-        let bsReverseAligning = false;
-        let bsLastYawError = 0;
-        let bsLastYawCommand = 0;
-        let bsLastYawControlTime = 0;
-        let bsLastPoseStaleWarningTime = 0;
+        let bsLastProjectionS = null;
+        let bsPathAligning = false;
 
         // 1. 新增状态变量
         let isManualDrawingCable = false;
@@ -10522,6 +10522,12 @@
             });
         }
 
+        function clampNumber(value, min, max) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return min;
+            return Math.max(min, Math.min(max, n));
+        }
+
         // 1. 计算整条路径的距离积分
         function computePathDists(path) {
             offsetPathDists = [0];
@@ -10532,30 +10538,118 @@
             }
         }
 
+        function projectPoseToPath(pose, path, options = {}) {
+            if (!pose || !Array.isArray(path) || path.length < 2) return null;
+            if (offsetPathDists.length !== path.length) computePathDists(path);
+
+            const robotX = Number(pose.x);
+            const robotY = Number(pose.y);
+            if (!Number.isFinite(robotX) || !Number.isFinite(robotY)) return null;
+
+            const nearS = Number(options.nearS);
+            const windowM = Number(options.windowM);
+            const hasLocalWindow = Number.isFinite(nearS) && Number.isFinite(windowM) && windowM > 0;
+            const minS = hasLocalWindow ? nearS - windowM : -Infinity;
+            const maxS = hasLocalWindow ? nearS + windowM : Infinity;
+
+            let best = null;
+
+            for (let pass = 0; pass < 2; pass++) {
+                const useLocalWindow = pass === 0 && hasLocalWindow;
+
+                for (let i = 0; i < path.length - 1; i++) {
+                    const segStartS = offsetPathDists[i];
+                    const segEndS = offsetPathDists[i + 1];
+                    if (useLocalWindow && (segEndS < minS || segStartS > maxS)) continue;
+
+                    const p1 = path[i];
+                    const p2 = path[i + 1];
+                    const x1 = Number(p1.x);
+                    const y1 = Number(p1.y);
+                    const x2 = Number(p2.x);
+                    const y2 = Number(p2.y);
+                    if (!Number.isFinite(x1) || !Number.isFinite(y1) ||
+                        !Number.isFinite(x2) || !Number.isFinite(y2)) {
+                        continue;
+                    }
+
+                    const dx = x2 - x1;
+                    const dy = y2 - y1;
+                    const len2 = dx * dx + dy * dy;
+                    if (len2 < 1e-8) continue;
+
+                    const segLen = Math.sqrt(len2);
+                    const t = clampNumber(
+                        ((robotX - x1) * dx + (robotY - y1) * dy) / len2,
+                        0,
+                        1
+                    );
+                    const projX = x1 + t * dx;
+                    const projY = y1 + t * dy;
+                    const errX = robotX - projX;
+                    const errY = robotY - projY;
+                    const distSq = errX * errX + errY * errY;
+                    const s = segStartS + t * segLen;
+                    const localPenalty = hasLocalWindow ? Math.abs(s - nearS) * 0.0001 : 0;
+                    const score = distSq + localPenalty;
+
+                    if (!best || score < best.score) {
+                        const tx = dx / segLen;
+                        const ty = dy / segLen;
+                        best = {
+                            x: projX,
+                            y: projY,
+                            s,
+                            yaw: Math.atan2(dy, dx),
+                            crossTrackM: tx * errY - ty * errX,
+                            segmentIndex: i,
+                            t,
+                            distM: Math.sqrt(distSq),
+                            score
+                        };
+                    }
+                }
+
+                if (best) return best;
+            }
+
+            return null;
+        }
+
+        function getCurrentOffsetPathProjection() {
+            if (!window.offsetCablePath || window.offsetCablePath.length < 2) return null;
+            const projection = projectPoseToPath(currentRobotPose, window.offsetCablePath, {
+                nearS: bsLastProjectionS,
+                windowM: BS_PATH_CONTROL.localProjectionWindowM
+            });
+            if (projection) bsLastProjectionS = projection.s;
+            return projection;
+        }
+
         // 2. 计算当前坐标在路径上所处的“里程数” (距离起点的距离)
         function getDistOnPath(pose, path) {
-            if (!path || path.length < 2) return 0;
-            let minDist = Infinity, bestT = 0, bestIdx = 0;
-            for (let i = 0; i < path.length - 1; i++) {
-                const p1 = path[i], p2 = path[i + 1];
-                const dx = p2.x - p1.x, dy = p2.y - p1.y;
-                const len2 = dx * dx + dy * dy;
-                let t = 0;
-                if (len2 > 0) t = ((pose.x - p1.x) * dx + (pose.y - p1.y) * dy) / len2;
-                t = Math.max(0, Math.min(1, t));
-                const px = p1.x + t * dx, py = p1.y + t * dy;
-                const dist = Math.hypot(pose.x - px, pose.y - py);
-                if (dist < minDist) {
-                    minDist = dist; bestT = t; bestIdx = i;
-                }
-            }
-            return offsetPathDists[bestIdx] + bestT * Math.hypot(path[bestIdx + 1].x - path[bestIdx].x, path[bestIdx + 1].y - path[bestIdx].y);
+            const projection = projectPoseToPath(pose, path);
+            return projection ? projection.s : 0;
         }
 
         // 3. 根据给定的“里程数”，反推该点的 (x, y) 坐标
         function getPoseAtDist(targetDist, path) {
-            if (targetDist <= 0) return { x: path[0].x, y: path[0].y };
-            if (targetDist >= offsetPathDists[offsetPathDists.length - 1]) return { x: path[path.length - 1].x, y: path[path.length - 1].y };
+            if (!Array.isArray(path) || path.length === 0) return { x: 0, y: 0, yaw: 0 };
+            if (path.length === 1) return { x: path[0].x, y: path[0].y, yaw: 0 };
+            if (offsetPathDists.length !== path.length) computePathDists(path);
+
+            const yawAtSegment = (idx) => {
+                const safeIdx = Math.max(0, Math.min(path.length - 2, idx));
+                return Math.atan2(
+                    path[safeIdx + 1].y - path[safeIdx].y,
+                    path[safeIdx + 1].x - path[safeIdx].x
+                );
+            };
+
+            if (targetDist <= 0) return { x: path[0].x, y: path[0].y, yaw: yawAtSegment(0) };
+            if (targetDist >= offsetPathDists[offsetPathDists.length - 1]) {
+                return { x: path[path.length - 1].x, y: path[path.length - 1].y, yaw: yawAtSegment(path.length - 2) };
+            }
             for (let i = 0; i < offsetPathDists.length - 1; i++) {
                 if (targetDist >= offsetPathDists[i] && targetDist <= offsetPathDists[i + 1]) {
                     const segLen = offsetPathDists[i + 1] - offsetPathDists[i];
@@ -10563,28 +10657,22 @@
                     if (segLen > 0) t = (targetDist - offsetPathDists[i]) / segLen;
                     return {
                         x: path[i].x + t * (path[i + 1].x - path[i].x),
-                        y: path[i].y + t * (path[i + 1].y - path[i].y)
+                        y: path[i].y + t * (path[i + 1].y - path[i].y),
+                        yaw: yawAtSegment(i)
                     };
                 }
             }
-            return { x: path[path.length - 1].x, y: path[path.length - 1].y };
+            return { x: path[path.length - 1].x, y: path[path.length - 1].y, yaw: yawAtSegment(path.length - 2) };
         }
 
         function resetBinaryMotionController() {
             window.bsInitialMoveDir = undefined;
-            bsReverseStartYaw = null;
-            bsReverseAligning = false;
-            bsLastYawError = 0;
-            bsLastYawCommand = 0;
-            bsLastYawControlTime = 0;
+            bsPathAligning = false;
         }
 
         function initializeBinaryMotionController(moveDirection) {
             resetBinaryMotionController();
             window.bsInitialMoveDir = moveDirection;
-            if (moveDirection < 0 && Number.isFinite(Number(currentRobotPose.yaw))) {
-                bsReverseStartYaw = normalizeAngleRad(Number(currentRobotPose.yaw));
-            }
         }
 
         function isBinaryPoseFresh(now = Date.now()) {
@@ -10592,124 +10680,106 @@
                 Number.isFinite(Number(currentRobotPose.y)) &&
                 Number.isFinite(Number(currentRobotPose.yaw)) &&
                 Number.isFinite(Number(currentRobotPose.updatedAt)) &&
-                now - Number(currentRobotPose.updatedAt) <= BS_REVERSE_CONTROL.poseTimeoutMs;
+                now - Number(currentRobotPose.updatedAt) <= BS_PATH_CONTROL.poseTimeoutMs;
         }
 
-        function clampYawAround(yaw, centerYaw, maxDelta) {
-            const delta = normalizeAngleRad(yaw - centerYaw);
-            const limitedDelta = Math.max(-maxDelta, Math.min(maxDelta, delta));
-            return normalizeAngleRad(centerYaw + limitedDelta);
-        }
-
-        function getPathYawAtDist(targetDist, path) {
-            if (!Array.isArray(path) || path.length < 2 || offsetPathDists.length !== path.length) {
+        function computeBinaryPathFollowCommand(targetDist, projection) {
+            const path = window.offsetCablePath;
+            if (!projection || !Array.isArray(path) || path.length < 2 || offsetPathDists.length !== path.length) {
                 return null;
             }
 
-            let baseIdx = 0;
-            while (baseIdx < offsetPathDists.length - 2 && offsetPathDists[baseIdx + 1] < targetDist) {
-                baseIdx++;
+            const totalDist = offsetPathDists[offsetPathDists.length - 1] || 0;
+            const targetS = clampNumber(targetDist, 0, totalDist);
+            const currentS = projection.s;
+            const distError = targetS - currentS;
+            const absDistError = Math.abs(distError);
+
+            let moveDir = Math.sign(distError);
+            if (moveDir === 0 && typeof window.bsInitialMoveDir === 'number') {
+                moveDir = window.bsInitialMoveDir;
             }
+            if (moveDir === 0) moveDir = 1;
 
-            for (let radius = 0; radius < path.length; radius++) {
-                const candidates = radius === 0
-                    ? [baseIdx]
-                    : [baseIdx - radius, baseIdx + radius];
-                for (const idx of candidates) {
-                    if (idx < 0 || idx >= path.length - 1) continue;
-                    const dx = path[idx + 1].x - path[idx].x;
-                    const dy = path[idx + 1].y - path[idx].y;
-                    if (Math.hypot(dx, dy) >= 0.03) {
-                        return Math.atan2(dy, dx);
-                    }
-                }
-            }
-            return null;
-        }
-
-        function getReverseDesiredYaw(currentDist, distError) {
-            const currentX = Number(currentRobotPose.x);
-            const currentY = Number(currentRobotPose.y);
-            const remainingDistance = Math.abs(distError);
-            const lookbackDistance = Math.min(BS_REVERSE_CONTROL.lookaheadM, remainingDistance);
-            const pathYaw = getPathYawAtDist(currentDist, window.offsetCablePath);
-            let footprintYaw = null;
-
-            if (bsFootprints.length >= 2 && lookbackDistance > 0) {
-                const lastIdx = bsFootprints.length - 1;
-                let targetIdx = lastIdx;
-                let accumulatedDistance = Math.hypot(
-                    currentX - bsFootprints[lastIdx].x,
-                    currentY - bsFootprints[lastIdx].y
-                );
-
-                for (let i = lastIdx; i > 0 && accumulatedDistance < lookbackDistance; i--) {
-                    accumulatedDistance += Math.hypot(
-                        bsFootprints[i].x - bsFootprints[i - 1].x,
-                        bsFootprints[i].y - bsFootprints[i - 1].y
-                    );
-                    targetIdx = i - 1;
-                }
-
-                const target = bsFootprints[targetIdx];
-                const dx = currentX - target.x;
-                const dy = currentY - target.y;
-                if (Math.hypot(dx, dy) >= BS_REVERSE_CONTROL.minReferenceDistanceM) {
-                    // 历史脚印由旧到新排列，因此“旧脚印 -> 当前点”的方向就是倒车时车头应保持的正向。
-                    footprintYaw = Math.atan2(dy, dx);
-                }
-            }
-
-            // 脚印方向和规划路径方向差异过大时，说明脚印可能发生了错误裁剪或匹配到了错误分支。
-            if (footprintYaw !== null && pathYaw !== null &&
-                Math.abs(normalizeAngleRad(footprintYaw - pathYaw)) > BS_REVERSE_CONTROL.maxFootprintPathDiffRad) {
-                footprintYaw = null;
-            }
-
-            let desiredYaw = footprintYaw ?? pathYaw ?? bsReverseStartYaw;
-            if (!Number.isFinite(Number(desiredYaw))) {
-                return null;
-            }
-
-            desiredYaw = normalizeAngleRad(Number(desiredYaw));
-            if (Number.isFinite(Number(bsReverseStartYaw))) {
-                desiredYaw = clampYawAround(
-                    desiredYaw,
-                    Number(bsReverseStartYaw),
-                    BS_REVERSE_CONTROL.maxHeadingChangeRad
-                );
-            }
-            return desiredYaw;
-        }
-
-        function computeReverseYawCommand(yawError, now) {
-            let dt = 0.1;
-            let errorRate = 0;
-            if (bsLastYawControlTime > 0) {
-                dt = Math.max(0.05, Math.min(0.25, (now - bsLastYawControlTime) / 1000));
-                errorRate = normalizeAngleRad(yawError - bsLastYawError) / dt;
-            }
-
-            let targetCommand = 0;
-            if (Math.abs(yawError) > BS_REVERSE_CONTROL.yawDeadbandRad) {
-                targetCommand = BS_REVERSE_CONTROL.yawKp * yawError +
-                    BS_REVERSE_CONTROL.yawKd * errorRate;
-                targetCommand = Math.max(
-                    -BS_REVERSE_CONTROL.maxYawCommand,
-                    Math.min(BS_REVERSE_CONTROL.maxYawCommand, targetCommand)
-                );
-            }
-
-            const maxCommandStep = BS_REVERSE_CONTROL.maxYawAcceleration * dt;
-            const command = Math.max(
-                bsLastYawCommand - maxCommandStep,
-                Math.min(bsLastYawCommand + maxCommandStep, targetCommand)
+            const lookahead = Math.min(
+                BS_PATH_CONTROL.lookaheadM,
+                Math.max(absDistError, BS_PATH_CONTROL.arriveDistM)
             );
+            const referenceS = clampNumber(currentS + moveDir * lookahead, 0, totalDist);
+            const referencePose = getPoseAtDist(referenceS, path);
+            const pathYaw = Number.isFinite(referencePose.yaw) ? referencePose.yaw : projection.yaw;
+            const robotYaw = Number(currentRobotPose.yaw);
+            if (!Number.isFinite(pathYaw) || !Number.isFinite(robotYaw)) return null;
 
-            bsLastYawError = yawError;
-            bsLastYawCommand = command;
-            bsLastYawControlTime = now;
-            return command;
+            const yawError = normalizeAngleRad(pathYaw - robotYaw);
+            const absYawError = Math.abs(yawError);
+
+            if (absYawError >= BS_PATH_CONTROL.alignEnterRad) {
+                bsPathAligning = true;
+            } else if (absYawError <= BS_PATH_CONTROL.alignExitRad) {
+                bsPathAligning = false;
+            }
+
+            let w = 0.0;
+            if (absYawError > BS_PATH_CONTROL.yawDeadbandRad) {
+                w = clampNumber(
+                    BS_PATH_CONTROL.yawKp * yawError,
+                    -BS_PATH_CONTROL.maxYawCommand,
+                    BS_PATH_CONTROL.maxYawCommand
+                );
+            }
+
+            let v = 0.0;
+            if (!bsPathAligning && absDistError > BS_PATH_CONTROL.arriveDistM) {
+                const maxSpeed = moveDir > 0
+                    ? BS_PATH_CONTROL.maxForwardSpeed
+                    : BS_PATH_CONTROL.maxReverseSpeed;
+                const baseSpeed = clampNumber(
+                    BS_PATH_CONTROL.distanceKp * absDistError,
+                    BS_PATH_CONTROL.minSpeed,
+                    maxSpeed
+                );
+                const yawScale = clampNumber(
+                    1.0 - 0.65 * absYawError / BS_PATH_CONTROL.alignEnterRad,
+                    0.35,
+                    1.0
+                );
+                const lateralScale = clampNumber(
+                    1.0 - 0.55 * Math.abs(projection.crossTrackM) / 0.45,
+                    0.45,
+                    1.0
+                );
+                v = moveDir * baseSpeed * yawScale * lateralScale;
+            }
+
+            let y = 0.0;
+            const crossTrack = Math.abs(projection.crossTrackM) > BS_PATH_CONTROL.crossTrackDeadbandM
+                ? projection.crossTrackM
+                : 0.0;
+            if (!bsPathAligning && crossTrack !== 0.0) {
+                const pathLeftX = -Math.sin(pathYaw);
+                const pathLeftY = Math.cos(pathYaw);
+                const bodyLeftX = -Math.sin(robotYaw);
+                const bodyLeftY = Math.cos(robotYaw);
+                const correctionX = -BS_PATH_CONTROL.crossTrackKp * crossTrack * pathLeftX;
+                const correctionY = -BS_PATH_CONTROL.crossTrackKp * crossTrack * pathLeftY;
+                y = clampNumber(
+                    correctionX * bodyLeftX + correctionY * bodyLeftY,
+                    -BS_PATH_CONTROL.maxStrafeCommand,
+                    BS_PATH_CONTROL.maxStrafeCommand
+                );
+            }
+
+            return {
+                v,
+                w,
+                y,
+                targetS,
+                currentS,
+                distError,
+                crossTrackM: projection.crossTrackM,
+                yawError
+            };
         }
 
         // ==========================================
@@ -12871,6 +12941,8 @@
             offsetPathDists = [];
             maxFaultIdx = -1;
             bsFootprints = [];
+            bsLastProjectionS = null;
+            bsPathAligning = false;
             resetBinaryMotionController();
             window.g_faultTriggeredInBS = false;
         }
@@ -12893,7 +12965,10 @@
             // =========================================================
             if (isFaultFindingMode && window.offsetCablePath && window.offsetCablePath.length > 0) {
                 if (offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
-                const currentDist = getDistOnPath(currentRobotPose, window.offsetCablePath);
+                const currentProjection = getCurrentOffsetPathProjection();
+                const currentDist = currentProjection
+                    ? currentProjection.s
+                    : getDistOnPath(currentRobotPose, window.offsetCablePath);
 
                 // 确保机器狗已经并入偏移路径，而不是还在去起点的路上
                 if (cableTrackingState === 'FOLLOWING') {
@@ -12901,7 +12976,7 @@
                     // 1. 初始化步进阶段
                     if (bsState === 'INACTIVE') {
                         bsState = 'STEP_FORWARD';
-                        bsTargetDist = currentDist + 0.8; // 设定 2m 后的目标距离
+                        bsTargetDist = currentDist + 0.8; // 设定 0.8m 后的目标距离
                         bsGoodDist = currentDist;         // 默认当前起点为有信号区域
                         console.log(`🚀 [破损点步进] 开始步进，目标距离: ${bsTargetDist.toFixed(2)}m`);
                     }
@@ -12911,9 +12986,9 @@
 
                         // ✅ [新增] 运动中检测到信号：动态推迟目标点 (无缝顺延，不停车)
                         if (window.g_faultTriggeredInBS) {
-                            console.log(`⚡ [破损点步进] 运动中 (${currentDist.toFixed(2)}m处) 检测到信号！重新以此点推算 2m 目标...`);
+                            console.log(`⚡ [破损点步进] 运动中 (${currentDist.toFixed(2)}m处) 检测到信号！重新以此点推算 0.8m 目标...`);
                             bsGoodDist = currentDist;         // 刷新有信号边界为当前位置
-                            bsTargetDist = currentDist + 0.8; // 目标直接顺延，从当前点再往后推 2m
+                            bsTargetDist = currentDist + 0.8; // 目标直接顺延，从当前点再往后推 0.8m
                             window.g_faultTriggeredInBS = false; // 消费掉这个信号
                             // 这里我们不 return，让代码继续往下走，这样机器狗就不会有任何停顿，直接平滑继续走
                         }
@@ -12922,12 +12997,12 @@
                             // 到达最新节点，立即停车并开始等待倒计时
                             bsState = 'STEP_WAIT';
                             bsWaitEndTime = Date.now() + getFaultSearchWaitMs();
-                            window.g_faultTriggeredInBS = false; // 清空这 2m 移动中可能产生的历史信号干扰
+                            window.g_faultTriggeredInBS = false; // 清空这 0.8m 移动中可能产生的历史信号干扰
                             sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
                             console.log(`⏱️ [破损点步进] 到达 ${currentDist.toFixed(2)}m，停车等待 ${getFaultSearchWaitLabel()} 检测信号...`);
                             return; // 拦截结束，不执行下面的纯追踪
                         }
-                        // 还没走到 2m，这里不 return，放行去执行下方的常规纯追踪 (前进)
+                        // 还没走到 0.8m，这里不 return，放行去执行下方的常规纯追踪 (前进)
                     }
 
                     // 3. 停车等待阶段 (STEP_WAIT)
@@ -12936,9 +13011,9 @@
 
                         // A. 等待期间检测到信号：立即中断等待，继续前行
                         if (window.g_faultTriggeredInBS) {
-                            console.log(`✅ [破损点步进] 收到破损点信号！立即继续前进 2m...`);
+                            console.log(`✅ [破损点步进] 收到破损点信号！立即继续前进 0.8m...`);
                             bsGoodDist = currentDist;         // 更新有信号边界
-                            bsTargetDist = currentDist + 0.8; // 目标再推 2m
+                            bsTargetDist = currentDist + 0.8; // 目标再推 0.8m
                             bsState = 'STEP_FORWARD';
                             window.g_faultTriggeredInBS = false;
                             return;
@@ -12961,7 +13036,7 @@
 
                     // 4. 二分法接管阶段 (复用原来的逻辑)
                     else if (bsState === 'MOVING' || bsState === 'EVAL_WAIT' || bsState === 'DONE' || bsState === 'INIT_WAIT') {
-                        handleBinarySearchControl(currentDist);
+                        handleBinarySearchControl(currentDist, currentProjection);
                         return;
                     }
                 }
@@ -13045,7 +13120,7 @@
                 sendMoveCommand(v, w, 0.0, 0.0, 0.0, false);
             }
         }
-        function handleBinarySearchControl(currentDist) {
+        function handleBinarySearchControl(currentDist, currentProjection = null) {
             const now = Date.now();
 
             // 阶段 1: 触发后的首次 5秒 等待
@@ -13107,7 +13182,15 @@
 
             // 阶段 3: 向目标点移动 (支持倒车防偏移)
             if (bsState === 'MOVING') {
-                const distError = bsTargetDist - currentDist;
+                const projection = currentProjection || getCurrentOffsetPathProjection();
+                if (!projection) {
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                    console.warn("⚠️ [二分定位] 无法将当前位置投影到偏移路径，已暂停移动。");
+                    return;
+                }
+
+                const activeCurrentDist = projection.s;
+                const distError = bsTargetDist - activeCurrentDist;
 
                 // 每一轮二分移动开始时锁定移动方向，并初始化对应的航向控制器。
                 if (typeof window.bsInitialMoveDir === 'undefined') {
@@ -13115,9 +13198,11 @@
                 }
                 const currentDir = Math.sign(distError);
                 const isOvershot = (window.bsInitialMoveDir !== 0 && currentDir !== 0 && currentDir !== window.bsInitialMoveDir);
+                const lateralError = Math.abs(projection.crossTrackM);
 
-                // 如果误差小于 0.1m，或者发生穿透，视为到达目标
-                if (Math.abs(distError) < 0.1 || isOvershot) {
+                // 里程到位且横向误差收敛后，才进入原地等待检测；避免“到里程但不在轨迹上”。
+                if ((Math.abs(distError) < BS_PATH_CONTROL.arriveDistM && lateralError <= BS_PATH_CONTROL.arriveCrossTrackM) ||
+                    (isOvershot && lateralError <= BS_PATH_CONTROL.arriveCrossTrackM)) {
                     sendMoveCommand(0, 0, 0, 0.0, 0.0, true); // 停车
                     bsState = 'EVAL_WAIT';
                     bsWaitEndTime = Date.now() + getFaultSearchWaitMs();
@@ -13130,70 +13215,25 @@
                     return;
                 }
 
-                const now = Date.now();
-                if (!isBinaryPoseFresh(now)) {
+                const moveNow = Date.now();
+                if (!isBinaryPoseFresh(moveNow)) {
                     sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
-                    if (now - bsLastPoseStaleWarningTime > 1000) {
+                    if (moveNow - bsLastPoseStaleWarningTime > 1000) {
                         console.warn("⚠️ [二分定位] SLAM 位姿反馈超时，已暂停移动等待最新航向。");
-                        bsLastPoseStaleWarningTime = now;
+                        bsLastPoseStaleWarningTime = moveNow;
                     }
                     return;
                 }
 
-                let v = 0.0;
-                let w = 0.0;
-
-                if (distError < 0) {
-                    // 倒车闭环：脚印异常时使用平滑路径切向，并限制单轮最大航向变化。
-                    const desiredYaw = getReverseDesiredYaw(currentDist, distError);
-                    if (desiredYaw === null) {
-                        sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
-                        console.warn("⚠️ [二分定位] 无法获得可靠的倒车参考航向，已暂停移动。");
-                        return;
-                    }
-
-                    const yawError = normalizeAngleRad(desiredYaw - Number(currentRobotPose.yaw));
-                    const absYawError = Math.abs(yawError);
-
-                    if (absYawError >= BS_REVERSE_CONTROL.alignEnterRad) {
-                        bsReverseAligning = true;
-                    } else if (absYawError <= BS_REVERSE_CONTROL.alignExitRad) {
-                        bsReverseAligning = false;
-                    }
-
-                    w = computeReverseYawCommand(yawError, now);
-                    if (bsReverseAligning) {
-                        // 大角度时先原地闭环对准，避免边倒退边转向形成越来越大的圆弧。
-                        v = 0.0;
-                    } else {
-                        const speedScale = Math.max(
-                            0.35,
-                            1.0 - 0.65 * absYawError / BS_REVERSE_CONTROL.alignEnterRad
-                        );
-                        v = BS_REVERSE_CONTROL.reverseSpeed * speedScale;
-                    }
-                } else {
-                    // 前进阶段保持原来的纯追踪控制。
-                    const lookaheadDistance = 0.4;
-                    const steeringDist = Math.min(bsTargetDist, currentDist + lookaheadDistance);
-                    const targetPose = getPoseAtDist(steeringDist, window.offsetCablePath);
-                    const targetYaw = Math.atan2(
-                        targetPose.y - currentRobotPose.y,
-                        targetPose.x - currentRobotPose.x
-                    );
-                    const yawError = normalizeAngleRad(targetYaw - currentRobotPose.yaw);
-
-                    if (Math.abs(yawError) > 0.8) {
-                        v = 0.15;
-                        w = yawError > 0 ? 0.6 : -0.6;
-                    } else {
-                        v = 0.3;
-                        w = yawError * 1.2;
-                    }
+                const command = computeBinaryPathFollowCommand(bsTargetDist, projection);
+                if (!command) {
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                    console.warn("⚠️ [二分定位] 路径闭环控制计算失败，已暂停移动。");
+                    return;
                 }
 
                 if (typeof sendMoveCommand === 'function') {
-                    sendMoveCommand(v, w, 0.0, 0.0, 0.0, false);
+                    sendMoveCommand(command.v, command.w, command.y, 0.0, 0.0, false);
                 }
             }
         }
@@ -13984,6 +14024,8 @@
                 offsetPathDists = [];
                 maxFaultIdx = -1;
                 bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
+                bsLastProjectionS = null;
+                bsPathAligning = false;
                 resetBinaryMotionController();
                 isFaultFindingMode = true;
                 btnFault.innerHTML = '<span class="btn-icon">⏹</span> 停止寻找';
@@ -14065,6 +14107,8 @@
 
                 window.offsetCablePath = offsetPath; // 存入全局供二分法与步进寻找使用
                 offsetPathDists = [];
+                bsLastProjectionS = null;
+                bsPathAligning = false;
 
                 // === 柔性并入逻辑：从离机器狗最近的位置开始，沿“车头朝向对应的前方”搜索 ===
                 console.log("✅ 启用按车头方向的柔性平行并入 (Heading-Based Flexible Parallel Merge)...");
