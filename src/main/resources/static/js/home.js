@@ -21,6 +21,8 @@
         front: ROBOT_CAMERA_WEBRTC_BASE + "/video1/whep",
         back: ROBOT_CAMERA_WEBRTC_BASE + "/video2/whep"
     };
+    const ROBOT_CAMERA_CALIBRATION_URL = "/config/robot-camera-calibration.json";
+    const ROBOT_CAMERA_DIRECTIONS = ["front", "back"];
     const robotCameraReaders = {
         front: null,
         back: null
@@ -29,6 +31,36 @@
         front: null,
         back: null
     };
+    const robotCameraSourceVideos = {
+        front: null,
+        back: null
+    };
+    const robotCameraCanvases = {
+        front: null,
+        back: null
+    };
+    const robotCameraRenderers = {
+        front: null,
+        back: null
+    };
+    const robotCameraRenderLoopTokens = {
+        front: 0,
+        back: 0
+    };
+    const robotCameraFrameRequests = {
+        front: null,
+        back: null
+    };
+    const robotCameraLastResizeChecks = {
+        front: 0,
+        back: 0
+    };
+    const robotCameraLabelStates = {
+        front: "",
+        back: ""
+    };
+    let robotCameraCalibrationConfig = null;
+    let robotCameraCorrectionMode = "inspection";
 
     // ====== 🌍 GPS 与 SLAM 坐标映射全局变量 ======
     window.gpsAnchor = null;        // 起点真实的 GPS 坐标 {lat, lon}
@@ -998,40 +1030,304 @@
         window.reconnectArmEndCameraStream = connectStream;
     }
 
-    function getRobotCameraVideoElements(direction) {
-        return Array.from(document.querySelectorAll(
-            `.robot-camera-video[data-camera="${direction}"]`
-        ));
+    function getRobotCameraSourceVideo(direction) {
+        if (robotCameraSourceVideos[direction]) return robotCameraSourceVideos[direction];
+        const id = direction === "front" ? "robotCameraSourceFront" : "robotCameraSourceBack";
+        const video = document.getElementById(id);
+        if (!video) return null;
+
+        video.muted = true;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.classList.add("stream-img", "robot-camera-video-fallback");
+        video.setAttribute("playsinline", "");
+        video.setAttribute("webkit-playsinline", "");
+        video.title = ROBOT_CAMERA_WHEP_URLS[direction] || "";
+        robotCameraSourceVideos[direction] = video;
+        return video;
     }
 
-    function attachRobotCameraStream(direction, stream) {
-        getRobotCameraVideoElements(direction).forEach(video => {
-            video.muted = true;
-            video.autoplay = true;
-            video.playsInline = true;
-            video.srcObject = stream;
-            video.title = ROBOT_CAMERA_WHEP_URLS[direction] || "";
+    function ensureRobotCameraCanvas(direction) {
+        if (robotCameraCanvases[direction]) return robotCameraCanvases[direction];
+        const canvas = document.createElement("canvas");
+        canvas.className = "stream-img robot-camera-canvas";
+        canvas.dataset.camera = direction;
+        canvas.width = 960;
+        canvas.height = 540;
+        canvas.setAttribute("aria-label", direction === "front" ? "机器狗前摄像头画面" : "机器狗后摄像头画面");
+        robotCameraCanvases[direction] = canvas;
+        return canvas;
+    }
 
-            const playPromise = video.play();
-            if (playPromise && typeof playPromise.catch === "function") {
-                playPromise.catch(err => {
-                    console.warn(`机器狗${direction}摄像头自动播放失败:`, err);
-                });
+    function getRobotCameraSlot(panel, direction) {
+        return panel && panel.querySelector(`[data-camera-slot="${direction}"]`);
+    }
+
+    function getRobotCameraOutputElement(direction) {
+        return robotCameraRenderers[direction]
+            ? ensureRobotCameraCanvas(direction)
+            : getRobotCameraSourceVideo(direction);
+    }
+
+    function moveRobotCameraOutputsToPanel(target) {
+        const panelId = target === "pathFault"
+            ? "pathFaultPanel"
+            : target === "robot"
+                ? "robotNavPanel"
+                : null;
+        if (!panelId) return;
+
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        const sourceContainer = document.querySelector(".robot-camera-source-container");
+
+        ROBOT_CAMERA_DIRECTIONS.forEach(direction => {
+            const slot = getRobotCameraSlot(panel, direction);
+            const video = getRobotCameraSourceVideo(direction);
+            const output = getRobotCameraOutputElement(direction);
+            if (!slot || !output) return;
+
+            if (robotCameraRenderers[direction] && sourceContainer && video && video.parentElement !== sourceContainer) {
+                sourceContainer.appendChild(video);
             }
+            if (output.parentElement !== slot) slot.appendChild(output);
+        });
+
+        requestAnimationFrame(() => {
+            ROBOT_CAMERA_DIRECTIONS.forEach(direction => {
+                resizeRobotCameraCanvas(direction, true);
+                renderRobotCameraFrame(direction, true);
+            });
         });
     }
 
+    function createDisabledRobotCameraCalibration() {
+        return {
+            version: "unavailable",
+            model: "opencv-fisheye",
+            preview: {
+                maxWidth: 1280,
+                maxHeight: 720,
+                maxDevicePixelRatio: 1.5
+            },
+            front: { enabled: false, inputSize: [1920, 1080] },
+            back: { enabled: false, inputSize: [1920, 1080] }
+        };
+    }
+
+    async function loadRobotCameraCalibration() {
+        try {
+            const response = await fetch(ROBOT_CAMERA_CALIBRATION_URL, { cache: "no-store" });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const config = await response.json();
+            if (!config || config.model !== "opencv-fisheye") {
+                throw new Error("不支持的标定配置格式");
+            }
+            return config;
+        } catch (error) {
+            console.warn("机器狗摄像头标定配置加载失败，将显示原始画面:", error);
+            return createDisabledRobotCameraCalibration();
+        }
+    }
+
+    function initializeRobotCameraRenderer(direction) {
+        const canvas = ensureRobotCameraCanvas(direction);
+        const video = getRobotCameraSourceVideo(direction);
+        if (!canvas || !video || !window.FisheyeWebGLRenderer) {
+            console.warn(`机器狗${direction}摄像头无法初始化 WebGL，回退原始视频。`);
+            robotCameraRenderers[direction] = null;
+            return;
+        }
+
+        try {
+            const renderer = new window.FisheyeWebGLRenderer(
+                canvas,
+                robotCameraCalibrationConfig && robotCameraCalibrationConfig[direction],
+                {
+                    profile: robotCameraCorrectionMode,
+                    correctionEnabled: robotCameraCorrectionMode !== "raw"
+                }
+            );
+            renderer.setVideo(video);
+            robotCameraRenderers[direction] = renderer;
+        } catch (error) {
+            robotCameraRenderers[direction] = null;
+            console.warn(`机器狗${direction}摄像头 WebGL 初始化失败，回退原始视频:`, error);
+        }
+        updateRobotCameraLabels(direction);
+    }
+
+    function resizeRobotCameraCanvas(direction, force = false) {
+        const renderer = robotCameraRenderers[direction];
+        const canvas = robotCameraCanvases[direction];
+        if (!renderer || !canvas || !canvas.parentElement) return;
+
+        const now = performance.now();
+        if (!force && now - robotCameraLastResizeChecks[direction] < 250) return;
+        robotCameraLastResizeChecks[direction] = now;
+
+        const rect = canvas.parentElement.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+
+        const preview = robotCameraCalibrationConfig && robotCameraCalibrationConfig.preview || {};
+        const maxWidth = Number(preview.maxWidth) > 0 ? Number(preview.maxWidth) : 1280;
+        const maxHeight = Number(preview.maxHeight) > 0 ? Number(preview.maxHeight) : 720;
+        const maxDpr = Number(preview.maxDevicePixelRatio) > 0
+            ? Number(preview.maxDevicePixelRatio)
+            : 1.5;
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, maxDpr);
+        const video = getRobotCameraSourceVideo(direction);
+        const aspect = video && video.videoWidth && video.videoHeight
+            ? video.videoWidth / video.videoHeight
+            : 16 / 9;
+
+        let width = Math.max(rect.width * pixelRatio, rect.height * pixelRatio * aspect);
+        let height = width / aspect;
+        const scale = Math.min(1, maxWidth / width, maxHeight / height);
+        width *= scale;
+        height *= scale;
+        renderer.resize(width, height);
+    }
+
+    function isRobotCameraPanelActive() {
+        const active = window.currentActivePanel || "robot";
+        return active === "robot" || active === "pathFault";
+    }
+
+    function renderRobotCameraFrame(direction, force = false) {
+        const renderer = robotCameraRenderers[direction];
+        if (!renderer || (!force && !isRobotCameraPanelActive())) return false;
+        resizeRobotCameraCanvas(direction);
+        const rendered = renderer.render();
+        if (rendered) updateRobotCameraLabels(direction);
+        return rendered;
+    }
+
+    function stopRobotCameraRenderLoop(direction) {
+        robotCameraRenderLoopTokens[direction] += 1;
+        const request = robotCameraFrameRequests[direction];
+        if (!request) return;
+
+        if (
+            request.type === "video" &&
+            request.video &&
+            typeof request.video.cancelVideoFrameCallback === "function"
+        ) {
+            request.video.cancelVideoFrameCallback(request.id);
+        } else if (request.type === "animation") {
+            cancelAnimationFrame(request.id);
+        }
+        robotCameraFrameRequests[direction] = null;
+    }
+
+    function startRobotCameraRenderLoop(direction) {
+        stopRobotCameraRenderLoop(direction);
+        const video = getRobotCameraSourceVideo(direction);
+        if (!video) return;
+        const token = robotCameraRenderLoopTokens[direction];
+
+        const scheduleNext = () => {
+            if (token !== robotCameraRenderLoopTokens[direction]) return;
+            if (typeof video.requestVideoFrameCallback === "function") {
+                const id = video.requestVideoFrameCallback(() => {
+                    if (token !== robotCameraRenderLoopTokens[direction]) return;
+                    renderRobotCameraFrame(direction);
+                    scheduleNext();
+                });
+                robotCameraFrameRequests[direction] = { type: "video", id, video };
+            } else {
+                const id = requestAnimationFrame(() => {
+                    if (token !== robotCameraRenderLoopTokens[direction]) return;
+                    renderRobotCameraFrame(direction);
+                    scheduleNext();
+                });
+                robotCameraFrameRequests[direction] = { type: "animation", id, video };
+            }
+        };
+
+        renderRobotCameraFrame(direction, true);
+        scheduleNext();
+    }
+
+    function updateRobotCameraLabels(direction) {
+        const renderer = robotCameraRenderers[direction];
+        const baseLabel = direction === "front" ? "● 前视广角" : "● 后视广角";
+        let suffix = " · 连接中";
+        let title = "";
+
+        if (renderer) {
+            if (robotCameraCorrectionMode === "raw") {
+                suffix = " · 原始";
+            } else if (renderer.isCorrectionActive()) {
+                suffix = robotCameraCorrectionMode === "wide" ? " · 广视野矫正" : " · 巡检矫正";
+            } else {
+                suffix = " · 原始（待标定）";
+                title = renderer.getCorrectionReason();
+            }
+        } else if (getRobotCameraSourceVideo(direction)) {
+            suffix = " · 原始（无WebGL）";
+            title = "当前设备未启用 WebGL，已回退原始视频";
+        }
+
+        const stateKey = baseLabel + suffix + "|" + title;
+        if (robotCameraLabelStates[direction] === stateKey) return;
+        robotCameraLabelStates[direction] = stateKey;
+        document.querySelectorAll(`[data-camera-label="${direction}"]`).forEach(label => {
+            label.textContent = baseLabel;
+            label.title = title || suffix.replace(/^\s*·\s*/, "");
+        });
+    }
+
+    function setRobotCameraCorrectionMode(mode) {
+        const normalizedMode = ["inspection", "wide", "raw"].includes(mode) ? mode : "inspection";
+        robotCameraCorrectionMode = normalizedMode;
+        ROBOT_CAMERA_DIRECTIONS.forEach(direction => {
+            const renderer = robotCameraRenderers[direction];
+            if (!renderer) return;
+            renderer.setProfile(normalizedMode === "raw" ? "inspection" : normalizedMode);
+            renderer.setCorrectionEnabled(normalizedMode !== "raw");
+            renderRobotCameraFrame(direction, true);
+            updateRobotCameraLabels(direction);
+        });
+        return robotCameraCorrectionMode;
+    }
+
+    function attachRobotCameraStream(direction, stream) {
+        const video = getRobotCameraSourceVideo(direction);
+        if (!video) return;
+
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            resizeRobotCameraCanvas(direction, true);
+            startRobotCameraRenderLoop(direction);
+            updateRobotCameraLabels(direction);
+        };
+
+        const playPromise = video.play();
+        if (playPromise && typeof playPromise.then === "function") {
+            playPromise
+                .then(() => startRobotCameraRenderLoop(direction))
+                .catch(err => {
+                    console.warn(`机器狗${direction}摄像头自动播放失败:`, err);
+                });
+        }
+    }
+
     function closeRobotCameraReader(direction) {
+        stopRobotCameraRenderLoop(direction);
         const reader = robotCameraReaders[direction];
         if (reader && typeof reader.close === "function") {
             reader.close();
         }
         robotCameraReaders[direction] = null;
+        robotCameraStreams[direction] = null;
     }
 
     function startRobotCameraReader(direction) {
         const url = ROBOT_CAMERA_WHEP_URLS[direction];
-        if (!url || getRobotCameraVideoElements(direction).length === 0) return;
+        if (!url || !getRobotCameraSourceVideo(direction)) return;
 
         closeRobotCameraReader(direction);
 
@@ -1048,6 +1344,9 @@
                 attachRobotCameraStream(direction, stream);
 
                 evt.track.onended = () => {
+                    if (robotCameraStreams[direction] !== stream) return;
+                    stopRobotCameraRenderLoop(direction);
+                    robotCameraStreams[direction] = null;
                     console.warn(`机器狗${direction}摄像头视频轨道已结束`);
                 };
             },
@@ -1057,11 +1356,19 @@
         });
     }
 
-    function initRobotWideCameraStreams() {
+    async function initRobotWideCameraStreams() {
         if (!window.MediaMTXWebRTCReader) {
             console.error("MediaMTX reader.js 未加载，无法连接机器狗前后广角 WebRTC 视频。");
             return;
         }
+
+        robotCameraCalibrationConfig = await loadRobotCameraCalibration();
+        ROBOT_CAMERA_DIRECTIONS.forEach(direction => {
+            ensureRobotCameraCanvas(direction);
+            getRobotCameraSourceVideo(direction);
+            initializeRobotCameraRenderer(direction);
+        });
+        moveRobotCameraOutputsToPanel(window.currentActivePanel || "robot");
 
         startRobotCameraReader("front");
         startRobotCameraReader("back");
@@ -1070,22 +1377,32 @@
             startRobotCameraReader("front");
             startRobotCameraReader("back");
         };
+        window.setRobotCameraCorrectionMode = setRobotCameraCorrectionMode;
+        window.refreshRobotCameraOutputs = function () {
+            moveRobotCameraOutputsToPanel(window.currentActivePanel || "robot");
+        };
     }
 
     function captureRobotCameraFrame(direction, quality = 0.92) {
-        const videos = getRobotCameraVideoElements(direction);
-        const video = videos.find(item =>
-            item.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-            item.videoWidth > 0 &&
-            item.videoHeight > 0
-        );
+        const video = getRobotCameraSourceVideo(direction);
 
-        if (!video) {
+        if (
+            !video ||
+            video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+            video.videoWidth <= 0 ||
+            video.videoHeight <= 0
+        ) {
             throw new Error(direction === "front"
                 ? "前摄像头画面尚未就绪"
                 : "后摄像头画面尚未就绪");
         }
 
+        const renderer = robotCameraRenderers[direction];
+        if (renderer) {
+            return renderer.captureDataUrl(video.videoWidth, video.videoHeight, quality);
+        }
+
+        // WebGL 不可用时保留原始抓拍能力。
         const canvas = document.createElement("canvas");
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -5224,7 +5541,9 @@
 
         // ✅ 启动机械臂末端摄像头实时视频流
         initArmEndCameraStream();
-        initRobotWideCameraStreams();
+        initRobotWideCameraStreams().catch(error => {
+            console.error("机器狗前后摄像头初始化失败:", error);
+        });
         initSystemMessageCenter();
 
         // ✅ 初始化所有浮动滑块的位置
@@ -5597,6 +5916,7 @@
                 if (armPanel) { armPanel.classList.remove("hidden"); armPanel.style.display = 'flex'; }
             }
 
+            moveRobotCameraOutputsToPanel(target);
             scrollToMain();
         }
 

@@ -271,19 +271,17 @@
                         <div class="nav-display-area video-container">
 
                             <div class="video-box">
-                                <span class="video-label-overlay label-front">
+                                <span class="video-label-overlay label-front" data-camera-label="front">
                                     ● 前视广角
                                 </span>
-                                <video class="stream-img robot-camera-video" data-camera="front" autoplay muted
-                                    playsinline></video>
+                                <div class="robot-camera-slot" data-camera-slot="front"></div>
                             </div>
 
                             <div class="video-box">
-                                <span class="video-label-overlay label-rear">
+                                <span class="video-label-overlay label-rear" data-camera-label="back">
                                     ● 后视广角
                                 </span>
-                                <video class="stream-img robot-camera-video" data-camera="back" autoplay muted
-                                    playsinline></video>
+                                <div class="robot-camera-slot" data-camera-slot="back"></div>
                             </div>
 
                         </div>
@@ -468,14 +466,12 @@
 
                             <div class="pf-video-vertical">
                                 <div class="video-box">
-                                    <span class="video-label-overlay label-front">● 前视广角</span>
-                                    <video class="stream-img robot-camera-video" data-camera="front" autoplay muted
-                                        playsinline></video>
+                                    <span class="video-label-overlay label-front" data-camera-label="front">● 前视广角</span>
+                                    <div class="robot-camera-slot" data-camera-slot="front"></div>
                                 </div>
                                 <div class="video-box">
-                                    <span class="video-label-overlay label-rear">● 后视广角</span>
-                                    <video class="stream-img robot-camera-video" data-camera="back" autoplay muted
-                                        playsinline></video>
+                                    <span class="video-label-overlay label-rear" data-camera-label="back">● 后视广角</span>
+                                    <div class="robot-camera-slot" data-camera-slot="back"></div>
                                 </div>
                             </div>
 
@@ -946,13 +942,19 @@
         </div>
     </div>
 
+    <div class="robot-camera-source-container" aria-hidden="true">
+        <video id="robotCameraSourceFront" muted autoplay playsinline></video>
+        <video id="robotCameraSourceBack" muted autoplay playsinline></video>
+    </div>
+
     <script src="/js/three.min.js"></script>
     <script src="/js/GLTFLoader.js"></script>
     <script src="/js/PCDLoader.js"></script>
     <script src="/js/sockjs.min.js"></script>
     <script src="/js/stomp.min.js"></script>
     <script src="/js/reader.js"></script>
-    <script src="/js/home.js"></script>
+    <script src="/js/fisheye-webgl.js"></script>
+    <script src="/js/home.js?v=20260802-fisheye"></script>
 </body>
 
 </html>

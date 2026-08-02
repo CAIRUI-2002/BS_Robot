@@ -1,0 +1,95 @@
+{
+  "version": "approx-20260802-144353",
+  "model": "opencv-fisheye",
+  "preview": {
+    "maxWidth": 1280,
+    "maxHeight": 720,
+    "maxDevicePixelRatio": 1.5
+  },
+  "cameraSpecification": {
+    "maxResolution": [1920, 1080],
+    "currentStreamResolution": [1280, 720],
+    "diagonalFieldOfViewDegrees": 168,
+    "fixedFocusDistanceCm": 80,
+    "aperture": "F1.8"
+  },
+  "approximation": {
+    "calibrated": false,
+    "projectionAssumption": "equidistant",
+    "D": [0, 0, 0, 0],
+    "inspectionBalance": 0,
+    "wideBalance": 0.55,
+    "warning": "无标定板规格初值，仅用于现场调参，不能替代正式标定"
+  },
+  "front": {
+    "enabled": true,
+    "inputSize": [1280, 720],
+    "K": [
+      [500.86223613025203, 0, 640],
+      [0, 500.86223613025203, 360],
+      [0, 0, 1]
+    ],
+    "D": [0, 0, 0, 0],
+    "profiles": {
+      "inspection": {
+        "Knew": [
+          [470, 0, 640],
+          [0, 470, 411.1917796693689],
+          [0, 0, 1]
+        ],
+        "viewAdjustment": {
+          "purpose": "remove-bottom-robot-handle-occlusion",
+          "approximateCropPercent": 12,
+          "topEdgePreserved": true
+        }
+      },
+      "wide": {
+        "Knew": [
+          [291.36113191710535, 0, 640],
+          [0, 291.36113191710535, 360],
+          [0, 0, 1]
+        ]
+      }
+    },
+    "quality": {
+      "calibrated": false,
+      "mode": "approximate-equidistant-from-specification"
+    }
+  },
+  "back": {
+    "enabled": true,
+    "inputSize": [1280, 720],
+    "K": [
+      [500.86223613025203, 0, 640],
+      [0, 500.86223613025203, 360],
+      [0, 0, 1]
+    ],
+    "D": [0, 0, 0, 0],
+    "profiles": {
+      "inspection": {
+        "Knew": [
+          [470, 0, 640],
+          [0, 470, 411.1917796693689],
+          [0, 0, 1]
+        ],
+        "viewAdjustment": {
+          "purpose": "remove-bottom-robot-handle-occlusion",
+          "approximateCropPercent": 12,
+          "topEdgePreserved": true
+        }
+      },
+      "wide": {
+        "Knew": [
+          [291.36113191710535, 0, 640],
+          [0, 291.36113191710535, 360],
+          [0, 0, 1]
+        ]
+      }
+    },
+    "quality": {
+      "calibrated": false,
+      "mode": "approximate-equidistant-from-specification"
+    }
+  }
+}
+
