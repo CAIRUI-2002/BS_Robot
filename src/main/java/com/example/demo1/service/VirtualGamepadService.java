@@ -64,24 +64,21 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     // 信号从 1 跳变为 2，或者从 2 跳变为 1 后，强制反转的结束时间
     private volatile long signalReversalEndTime = 0L;
 
-    // ✅ [修改点 1] 新增：自动巡线速度设置 (默认值)
-    // 这些值现在可以由前端滑条通过 setAutoSpeeds 动态修改
-    private float autoForwardSpeed = 0.2f;
-    private float autoStrafeSpeed = 0.2f; // S 型偏航摆动强度；前端 autoSpeedY 滑条会更新这个值
+    // 自动巡线参数，可由前端通过 setAutoSpeeds 动态修改
+    private volatile float autoForwardSpeed = 0.2f;
 
-    // 自动巡线仅使用管线仪中心/左右信号进行 S 型偏航跟线。
-    // 已移除路径弯道识别和大转角横移模式；管线仪罗盘角度仍只透传给前端显示。
-    private static final float MAX_YAW_CMD = 0.75f;       // 自动巡线最大偏航角速度
-    private static final float MAX_SWEEP_STRENGTH = 0.35f; // 前端摆动强度最大值
-    private static final long PIPELINE_TIMEOUT_MS = 1000; // 管线仪数据超时保护
-    private static final long S_SWEEP_PERIOD_MS = 2600;   // S 型摆动周期
+    // 普通左右跟线使用的固定偏航值，不再使用 S 型正弦摆动
+    private volatile float normalTrackingYaw = 0.30f;
+
+    // 自动巡线仅使用管线仪中心/左右信号进行固定偏航跟线。
+    // 已移除 S 型正弦摆动、路径弯道识别和大转角横移模式。
+    private static final float MAX_YAW_CMD = 0.75f;
+    private static final long PIPELINE_TIMEOUT_MS = 1000;
     private static final float MIN_AUTO_FORWARD_SPEED = 0.08f;
-    private static final float S_BASE_YAW = 0.22f;
-    private static final float SIGNAL_YAW_BIAS = 0.18f;
     private static final float YAW_SMOOTHING = 0.22f;
 
     // 管线仪左右信号发生反转后，强制转向持续时间
-    private static final long SIGNAL_REVERSAL_HOLD_MS = 350L;
+    private static final long SIGNAL_REVERSAL_HOLD_MS = 550L;
 
     // 信号反转时直接使用的偏航指令
     private static final float SIGNAL_REVERSAL_YAW = 0.45f;
@@ -92,8 +89,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     // 信号反转期间的前进速度比例；0 表示先停止前进并完成反向转向
     private static final float SIGNAL_REVERSAL_FORWARD_RATIO = 0.0f;
 
-    // S 型巡线状态
-    private long autoTrackStartTime = 0L;
+    // 自动巡线偏航平滑状态
     private float lastAutoYawCmd = 0.0f;
 
     // 保留路径点计数仅用于兼容现有前端/Controller 接口，不参与运动控制
@@ -117,15 +113,16 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     }
 
     /**
-     * ✅ [修改点 2] 新增：设置自动巡线速度 (供 Controller 调用)
-     * 
-     * @param vx 前进速度
-     * @param vy S 型偏航摆动强度
+     * 设置自动巡线参数（供 Controller 调用）。
+     *
+     * @param vx 自动巡线前进速度
+     * @param vy 普通左右跟线固定偏航值，取绝对值并限制在 0～MAX_YAW_CMD
      */
     public void setAutoSpeeds(float vx, float vy) {
         this.autoForwardSpeed = vx;
-        this.autoStrafeSpeed = vy;
-        System.out.println("⚙️ [后端] 自动巡线速度更新: Forward=" + vx + ", Sweep=" + vy);
+        this.normalTrackingYaw = clamp(Math.abs(vy), 0.0f, MAX_YAW_CMD);
+        System.out.println("⚙️ [后端] 自动巡线参数更新: Forward="
+                + vx + ", TrackingYaw=" + this.normalTrackingYaw);
     }
 
     /**
@@ -172,9 +169,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     public void setAutoTracking(boolean enable) {
         this.isAutoTracking = enable;
         if (enable) {
-            // 每次启动时重置 S 型扫描和反转状态
-            long now = System.currentTimeMillis();
-            this.autoTrackStartTime = now;
+            // 每次启动时重置偏航和反转状态
             this.lastAutoYawCmd = 0.0f;
 
             // 重置管线仪方向反转状态
@@ -182,7 +177,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             this.signalReversalEndTime = 0L;
 
             updateCommand(0, 0, 0, 0, 3);
-            System.out.println("🚀 自动巡线已启动：仅使用管线仪中心/左右信号进行 S 型偏航巡线");
+            System.out.println("🚀 自动巡线已启动：仅使用管线仪中心/左右信号进行固定偏航巡线");
         } else {
             // 关闭时，速度归零
             this.vx = 0;
@@ -247,8 +242,6 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         return this.lastAutoYawCmd;
     }
 
-
-
     /**
      * 运动控制循环 (20Hz)
      * 负责计算并发送当前的速度参数
@@ -265,7 +258,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         boolean manualCommandExpired = false;
 
         if (isAutoTracking) {
-            // --- A. 自动巡线：仅执行 S 型偏航跟线，不再识别弯道或切换横移模式 ---
+            // --- A. 自动巡线：使用固定偏航跟线，不再执行 S 型正弦摆动 ---
             long now = System.currentTimeMillis();
 
             // 管线仪信号超时：超过 1 秒没有新数据，立即停车。
@@ -275,11 +268,6 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                 finalYaw = 0.0f;
                 this.lastAutoYawCmd = 0.0f;
             } else {
-                float sweepStrength = clamp(
-                        this.autoStrafeSpeed,
-                        0.0f,
-                        MAX_SWEEP_STRENGTH);
-
                 // 直接使用当前管线仪信号，不继承中心信号之前的旧方向。
                 int activeDirection = pipelineSignal;
                 boolean validDirection = activeDirection == 1 || activeDirection == 2;
@@ -310,12 +298,6 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
                 boolean signalReversalActive = now < signalReversalEndTime;
 
-                float baseSweepYaw = S_BASE_YAW + sweepStrength;
-                double phase = ((now - autoTrackStartTime) % S_SWEEP_PERIOD_MS)
-                        / (double) S_SWEEP_PERIOD_MS;
-                float sWaveYaw = (float) Math.sin(phase * Math.PI * 2.0)
-                        * baseSweepYaw;
-
                 float targetYaw;
 
                 if (signalReversalActive) {
@@ -328,21 +310,19 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                     finalYaw = targetYaw;
 
                 } else if (activeDirection == 1) {
-                    // 要求向右找线：清除左转残留，只允许右转或直行。
+                    // 要求向右找线：使用固定负偏航，左右控制完全对称。
                     if (lastAutoYawCmd > 0.0f) {
                         lastAutoYawCmd = 0.0f;
                     }
-                    float rightSweepYaw = Math.min(sWaveYaw, 0.0f);
-                    targetYaw = rightSweepYaw - SIGNAL_YAW_BIAS;
+                    targetYaw = -normalTrackingYaw;
                     finalYaw = smoothYaw(clamp(targetYaw, -MAX_YAW_CMD, MAX_YAW_CMD));
 
                 } else if (activeDirection == 2) {
-                    // 要求向左找线：清除右转残留，只允许左转或直行。
+                    // 要求向左找线：使用固定正偏航，左右控制完全对称。
                     if (lastAutoYawCmd < 0.0f) {
                         lastAutoYawCmd = 0.0f;
                     }
-                    float leftSweepYaw = Math.max(sWaveYaw, 0.0f);
-                    targetYaw = leftSweepYaw + SIGNAL_YAW_BIAS;
+                    targetYaw = normalTrackingYaw;
                     finalYaw = smoothYaw(clamp(targetYaw, -MAX_YAW_CMD, MAX_YAW_CMD));
 
                 } else {
