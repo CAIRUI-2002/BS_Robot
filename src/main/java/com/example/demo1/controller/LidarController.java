@@ -31,4 +31,16 @@ public class LidarController {
             ));
         }
     }
+
+    @PostMapping("/stop")
+    public ResponseEntity<Map<String, Object>> stop() {
+        try {
+            return ResponseEntity.ok(lidarControlService.stopRecording());
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(Map.of(
+                    "success", false,
+                    "message", e.getMessage()
+            ));
+        }
+    }
 }

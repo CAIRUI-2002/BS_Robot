@@ -23,6 +23,9 @@ public class LidarControlService {
     @Value("${lidar.record.start-url:http://192.168.19.97:8000/api/v2/record/start}")
     private String startUrl;
 
+    @Value("${lidar.record.stop-url:http://192.168.19.97:8000/api/v2/record/stop}")
+    private String stopUrl;
+
     @Value("${lidar.record.timeout-ms:10000}")
     private int timeoutMs;
 
@@ -39,13 +42,37 @@ public class LidarControlService {
 
         byte[] body = objectMapper.writeValueAsBytes(payload);
 
-        HttpURLConnection connection = (HttpURLConnection) new URL(startUrl).openConnection(Proxy.NO_PROXY);
+        DeviceResponse response = executePost(startUrl, body, true, "start");
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("projectName", projectName);
+        result.put("status", response.status());
+        result.put("response", response.body());
+        return result;
+    }
+
+    public Map<String, Object> stopRecording() throws IOException {
+        DeviceResponse response = executePost(stopUrl, new byte[0], false, "stop");
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("status", response.status());
+        result.put("response", response.body());
+        return result;
+    }
+
+    private DeviceResponse executePost(String url, byte[] body, boolean jsonBody, String action) throws IOException {
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection(Proxy.NO_PROXY);
         connection.setConnectTimeout(timeoutMs);
         connection.setReadTimeout(timeoutMs);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         connection.setRequestProperty("accept", "application/json");
-        connection.setRequestProperty("Content-Type", "application/json");
+        if (jsonBody) {
+            connection.setRequestProperty("Content-Type", "application/json");
+        }
+        connection.setFixedLengthStreamingMode(body.length);
 
         try (OutputStream out = connection.getOutputStream()) {
             out.write(body);
@@ -55,15 +82,10 @@ public class LidarControlService {
         String responseBody = readResponseBody(connection);
 
         if (status < 200 || status >= 300) {
-            throw new IOException("Lidar start request failed, status=" + status + ", body=" + responseBody);
+            throw new IOException("Lidar " + action + " request failed, status=" + status + ", body=" + responseBody);
         }
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("success", true);
-        result.put("projectName", projectName);
-        result.put("status", status);
-        result.put("response", responseBody);
-        return result;
+        return new DeviceResponse(status, responseBody);
     }
 
     private String readResponseBody(HttpURLConnection connection) throws IOException {
@@ -74,5 +96,8 @@ public class LidarControlService {
         try (stream) {
             return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
+    }
+
+    private record DeviceResponse(int status, String body) {
     }
 }

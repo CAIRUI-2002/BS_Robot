@@ -2406,9 +2406,14 @@ input[type="range"]::-webkit-slider-thumb {
     background: rgba(0, 120, 200, 0.8);
 }
 
-.lidar-start-btn:disabled {
+.lidar-start-btn:disabled,
+.lidar-stop-btn:disabled {
     opacity: 0.75;
     cursor: wait;
+}
+
+.lidar-stop-btn {
+    border-color: rgba(255, 120, 120, 0.55);
 }
 
 

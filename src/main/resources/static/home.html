@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <title>巡检机器人作业平台</title>
-    <link rel="stylesheet" href="/css/home.css" />
+    <link rel="stylesheet" href="/css/home.css?v=20260806-lidar-stop" />
 </head>
 
 <body>
@@ -357,13 +357,14 @@
                                         启动点云雷达
                                     </button>
 
+                                    <button id="btnStopPointCloudLidar" class="header-btn-mini lidar-stop-btn"
+                                        title="向点云激光雷达发送关闭指令">
+                                        关闭点云雷达
+                                    </button>
+
                                     <button id="btnTogglePointCloudScan" class="header-btn-mini"
                                         title="暂停接收并绘制点云数据，当前点云地图保持定格">
                                         暂停点云扫描
-                                    </button>
-
-                                    <button id="btnManualDrawCable" class="header-btn-mini">
-                                        📍 手动绘制电缆
                                     </button>
 
                                     <div class="dropdown-group">
@@ -371,6 +372,9 @@
                                             🛠 工具 ▼
                                         </button>
                                         <div class="dropdown-content">
+                                            <button id="btnManualDrawCable" class="dropdown-item" type="button">
+                                                📍 手动绘制电缆
+                                            </button>
                                             <input type="file" id="kmlFileInput" accept=".kml" style="display: none;" />
                                             <button id="btnLoadKml" class="dropdown-item" type="button">
                                                 📂 读取KML航线
@@ -954,7 +958,7 @@
     <script src="/js/stomp.min.js"></script>
     <script src="/js/reader.js"></script>
     <script src="/js/fisheye-webgl.js"></script>
-    <script src="/js/home.js?v=20260802-fisheye"></script>
+    <script src="/js/home.js?v=20260806-dropdown-persist"></script>
 </body>
 
 </html>

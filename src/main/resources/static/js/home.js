@@ -5599,7 +5599,14 @@
 
         headerDropdownGroups.forEach(group => {
             const toggle = group.querySelector('.dropdown-toggle');
+            const content = group.querySelector('.dropdown-content');
             if (!toggle) return;
+
+            if (content) {
+                content.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                });
+            }
 
             toggle.addEventListener('click', function (e) {
                 e.preventDefault();
@@ -10803,10 +10810,17 @@
         }
 
         const btnStartPointCloudLidar = document.getElementById('btnStartPointCloudLidar');
+        const btnStopPointCloudLidar = document.getElementById('btnStopPointCloudLidar');
+
+        function setLidarControlButtonsDisabled(disabled) {
+            if (btnStartPointCloudLidar) btnStartPointCloudLidar.disabled = disabled;
+            if (btnStopPointCloudLidar) btnStopPointCloudLidar.disabled = disabled;
+        }
+
         if (btnStartPointCloudLidar) {
             btnStartPointCloudLidar.addEventListener('click', async function () {
                 const oldText = btnStartPointCloudLidar.innerText;
-                btnStartPointCloudLidar.disabled = true;
+                setLidarControlButtonsDisabled(true);
                 btnStartPointCloudLidar.innerText = "⏳ 启动中...";
                 setStatus("正在向点云激光雷达发送启动指令...", "warning");
 
@@ -10836,7 +10850,44 @@
                         btnStartPointCloudLidar.innerText = oldText || "📡 启动点云雷达";
                     }, 2000);
                 } finally {
-                    btnStartPointCloudLidar.disabled = false;
+                    setLidarControlButtonsDisabled(false);
+                }
+            });
+        }
+
+        if (btnStopPointCloudLidar) {
+            btnStopPointCloudLidar.addEventListener('click', async function () {
+                const oldText = btnStopPointCloudLidar.innerText;
+                setLidarControlButtonsDisabled(true);
+                btnStopPointCloudLidar.innerText = "⏳ 关闭中...";
+                setStatus("正在向点云激光雷达发送关闭指令...", "warning");
+
+                try {
+                    const res = await fetch("/api/lidar/stop", { method: "POST" });
+                    const data = await res.json().catch(() => ({}));
+
+                    if (!res.ok || data.success === false) {
+                        throw new Error(data.message || ("HTTP " + res.status));
+                    }
+
+                    shouldNotifyPointCloudReceivedAfterStart = false;
+                    btnStopPointCloudLidar.innerText = "✅ 雷达已关闭";
+                    setStatus("点云激光雷达已关闭，点云扫描已结束", "success");
+
+                    setTimeout(() => {
+                        btnStopPointCloudLidar.innerText = oldText || "⏹ 关闭点云雷达";
+                    }, 2000);
+                } catch (err) {
+                    console.error("点云激光雷达关闭失败", err);
+                    btnStopPointCloudLidar.innerText = "❌ 关闭失败";
+                    setStatus("点云激光雷达关闭失败", "error");
+                    alert("点云激光雷达关闭失败：" + (err.message || err));
+
+                    setTimeout(() => {
+                        btnStopPointCloudLidar.innerText = oldText || "⏹ 关闭点云雷达";
+                    }, 2000);
+                } finally {
+                    setLidarControlButtonsDisabled(false);
                 }
             });
         }
