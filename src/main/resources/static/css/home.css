@@ -905,7 +905,7 @@ body {
     background: black;
     display: block;
 
-    /* 👇 加上这两行代码就能解决波形被横向拉伸变形的问题 */
+    /* 保持 JS 按原始矩阵比例生成的画布比例，剩余空间自动留黑。 */
     object-fit: contain;
     image-rendering: pixelated;
 }

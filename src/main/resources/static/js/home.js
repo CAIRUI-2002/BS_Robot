@@ -179,7 +179,7 @@
     // segIndex -> Set(autoKey)，用于记录被用户手动删除的自动识别红圈。
     // 自动红圈每次都会由 detectBlobs 重新计算，所以删除自动红圈不能直接 splice，必须记录忽略列表。
     const ignoredAutoMigAnnotationsBySegment = new Map();
-    const gpr2DRenderInfo = {};                      // canvasId -> {rows,cols,stepX,stepY,w,h}
+    const gpr2DRenderInfo = {};                      // canvasId -> {rows,cols,stepX,stepY,w,h}，step 可为小数
     const MANUAL_MIG_ANNOTATION = {
         displayRadiusPx: 6,
         deleteHitRadiusPx: 18
@@ -7421,14 +7421,20 @@
         const maxCanvasWidth = 500;
         const maxCanvasHeight = 500;
 
-        let scaleX = 1, scaleY = 1;
-        if (cols > maxCanvasWidth) scaleX = cols / maxCanvasWidth;
-        if (rows > maxCanvasHeight) scaleY = rows / maxCanvasHeight;
+        // 横纵方向必须使用同一个缩放比例。旧逻辑分别 Math.ceil：512 行只因略超 500
+        // 就会令 stepY 从 1 跳到 2、画布高度骤降为 256，视觉上相当于横向拉伸近 2 倍。
+        const uniformScale = Math.max(
+            1,
+            cols / maxCanvasWidth,
+            rows / maxCanvasHeight
+        );
+        const w = Math.max(1, Math.round(cols / uniformScale));
+        const h = Math.max(1, Math.round(rows / uniformScale));
 
-        const stepX = Math.ceil(scaleX);
-        const stepY = Math.ceil(scaleY);
-        const w = Math.ceil(cols / stepX);
-        const h = Math.ceil(rows / stepY);
+        // 使用连续的源矩阵坐标比例，并让画布首末像素准确对应矩阵首末行/列。
+        // 这些比例同时供圆圈绘制和鼠标标注坐标反算使用。
+        const stepX = w > 1 && cols > 1 ? (cols - 1) / (w - 1) : 1;
+        const stepY = h > 1 && rows > 1 ? (rows - 1) / (h - 1) : 1;
 
         canvas.width = w;
         canvas.height = h;
@@ -7446,10 +7452,9 @@
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
 
-        // === 替换为这部分新代码 ===
         let maxAbs = 0;
-        for (let r = 0; r < rows; r += stepY) {
-            for (let c = 0; c < cols; c += stepX) {
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
                 const absV = Math.abs(matrix[r][c]);
                 if (absV > maxAbs) maxAbs = absV;
             }
@@ -7462,8 +7467,10 @@
         const maxLim = cLimit;
 
         let idx = 0;
-        for (let y = 0, r = 0; r < rows; r += stepY, y++) {
-            for (let x = 0, c = 0; c < cols; c += stepX, x++) {
+        for (let y = 0; y < h; y++) {
+            const r = Math.min(rows - 1, Math.round(y * stepY));
+            for (let x = 0; x < w; x++) {
+                const c = Math.min(cols - 1, Math.round(x * stepX));
                 const v = matrix[r][c];
 
                 // 线性映射到 [0, 1] 范围
