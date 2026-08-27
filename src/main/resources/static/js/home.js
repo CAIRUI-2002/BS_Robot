@@ -7412,6 +7412,43 @@
 
     // ====================== 2D 灰度图绘制 ======================
 
+    function computeRobustGprAbsLimit(matrices, percentile = 0.955, maxSamples = 100000) {
+        const validMatrices = (matrices || []).filter(matrix =>
+            Array.isArray(matrix) && matrix.length > 0 && Array.isArray(matrix[0]) && matrix[0].length > 0
+        );
+        if (!validMatrices.length) return 1e-9;
+
+        const totalValues = validMatrices.reduce((sum, matrix) =>
+            sum + matrix.length * matrix[0].length, 0
+        );
+        const sampleStep = Math.max(1, Math.floor(totalValues / maxSamples));
+        const absSamples = [];
+        let maxAbs = 0;
+        let valueIndex = 0;
+
+        validMatrices.forEach(matrix => {
+            for (let r = 0; r < matrix.length; r++) {
+                for (let c = 0; c < matrix[r].length; c++) {
+                    const value = Number(matrix[r][c]);
+                    if (!Number.isFinite(value)) continue;
+                    const absValue = Math.abs(value);
+                    if (absValue > maxAbs) maxAbs = absValue;
+                    if (valueIndex % sampleStep === 0) absSamples.push(absValue);
+                    valueIndex++;
+                }
+            }
+        });
+
+        if (!absSamples.length || maxAbs === 0) return 1e-9;
+        absSamples.sort((a, b) => a - b);
+        const safePercentile = Math.max(0.5, Math.min(0.999, percentile));
+        const percentileIndex = Math.floor((absSamples.length - 1) * safePercentile);
+        const robustLimit = absSamples[percentileIndex];
+
+        // 极稀疏数据的分位数可能为 0，此时回退到原来的最大值比例。
+        return robustLimit > 0 ? robustLimit : Math.max(maxAbs * 0.6, 1e-9);
+    }
+
     function render2DCanvas(canvasId, matrix) {
         const canvas = $(canvasId);
         if (!canvas || !matrix || !matrix.length || !matrix[0].length) return;
@@ -7452,17 +7489,8 @@
         const ctx = canvas.getContext("2d");
         const imgData = ctx.createImageData(w, h);
 
-        let maxAbs = 0;
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                const absV = Math.abs(matrix[r][c]);
-                if (absV > maxAbs) maxAbs = absV;
-            }
-        }
-        if (maxAbs === 0) maxAbs = 1e-9;
-
-        // 核心：取最大绝对值的 60% 作为显示边界 (复刻 caxis)
-        const cLimit = maxAbs * 0.6;
+        // 使用 95.5% 分位数抵消浅层抑制导致的色标变化，使中层显示对比度保持稳定。
+        const cLimit = computeRobustGprAbsLimit([matrix]);
         const minLim = -cLimit;
         const maxLim = cLimit;
 
@@ -7854,25 +7882,11 @@
         const allCenters = [];
         let globalCenterId = 0;
 
-        // === 替换为这部分新代码 ===
-        // 1. 统计所有剖面的绝对最大幅值（统一色标）
-        let globalMaxAbs = 0;
-        segments.forEach(seg => {
-            const mat = useMigrated ? seg.migratedData : seg.rawData;
-            if (!mat) return;
-            const rows = mat.length;
-            const cols = mat[0].length;
-            for (let r = 0; r < rows; r++) {
-                for (let c = 0; c < cols; c++) {
-                    const absV = Math.abs(mat[r][c]);
-                    if (absV > globalMaxAbs) globalMaxAbs = absV;
-                }
-            }
-        });
-        if (globalMaxAbs === 0) globalMaxAbs = 1e-9;
-
-        // 计算统一的上下限 (60% 截断)
-        const cLimit = globalMaxAbs * 0.6;
+        // 1. 使用全部剖面的 95.5% 分位数统一色标，使浅层抑制前后的中层对比度保持稳定。
+        const displayMatrices = segments
+            .map(seg => useMigrated ? seg.migratedData : seg.rawData)
+            .filter(Boolean);
+        const cLimit = computeRobustGprAbsLimit(displayMatrices);
         let vMin = -cLimit;  // 注意这里是用 let，因为后面在 buildSegmentMesh 会作为参数传入
         let vMax = cLimit;
 

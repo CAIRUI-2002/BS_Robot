@@ -117,7 +117,7 @@ public class GprProcessingService {
 
             // === 3. 深度增益 ===
             if (cfg.isDepthGainOn()) {
-                applyDepthGain(data, cfg.getDepthGainStrength());
+                applyDepthGain(data, cfg);
             }
             reportFileProgress(progressListener, currentFileIndex, N, 0.12);
 
@@ -431,15 +431,75 @@ public class GprProcessingService {
         }
     }
 
-    private void applyDepthGain(double[][] data, double strength) {
+    private void applyDepthGain(double[][] data, GprConfig cfg) {
         int rows = data.length;
         int cols = data[0].length;
+        double safeStrength = Double.isFinite(cfg.getDepthGainStrength())
+                ? Math.max(0.0, cfg.getDepthGainStrength())
+                : 1.0;
+        double safeCurveExponent = Double.isFinite(cfg.getDepthGainCurveExponent())
+                ? Math.min(2.0, Math.max(0.1, cfg.getDepthGainCurveExponent()))
+                : 0.35;
+        double safeShallowEnd = Double.isFinite(cfg.getDepthGainShallowEnd())
+                ? Math.min(0.8, Math.max(0.02, cfg.getDepthGainShallowEnd()))
+                : 0.18;
+        double safeMiddleEnd = Double.isFinite(cfg.getDepthGainMiddleEnd())
+                ? Math.min(0.98, Math.max(safeShallowEnd + 0.05, cfg.getDepthGainMiddleEnd()))
+                : 0.72;
+        double maxTransitionWidth = Math.min(
+                0.2,
+                Math.min(2.0 * safeShallowEnd, 2.0 * (1.0 - safeMiddleEnd))
+        );
+        double safeTransitionWidth = Double.isFinite(cfg.getDepthGainTransitionWidth())
+                ? Math.min(maxTransitionWidth, Math.max(0.0, cfg.getDepthGainTransitionWidth()))
+                : 0.04;
+        double safeShallowScale = Double.isFinite(cfg.getDepthGainShallowScale())
+                ? Math.min(1.0, Math.max(0.0, cfg.getDepthGainShallowScale()))
+                : 0.03;
+        double safeMiddleScale = Double.isFinite(cfg.getDepthGainMiddleScale())
+                ? Math.min(3.0, Math.max(0.0, cfg.getDepthGainMiddleScale()))
+                : 1.30;
+        double safeDeepScale = Double.isFinite(cfg.getDepthGainDeepScale())
+                ? Math.min(3.0, Math.max(0.0, cfg.getDepthGainDeepScale()))
+                : 1.0;
+        double safeMaxGain = Double.isFinite(cfg.getDepthGainMax())
+                ? Math.max(1.0, cfg.getDepthGainMax())
+                : 2.5;
+        double safeMiddleMaxGain = Double.isFinite(cfg.getDepthGainMiddleMax())
+                ? Math.max(safeMaxGain, cfg.getDepthGainMiddleMax())
+                : 2.8;
+
         for (int r = 0; r < rows; r++) {
-            double gain = 1 + 0.0006 * Math.pow(r, strength);
+            double normalizedDepth = rows > 1 ? (double) r / (rows - 1) : 0.0;
+            double middleEntry = smoothZoneTransition(normalizedDepth, safeShallowEnd, safeTransitionWidth);
+            double deepEntry = smoothZoneTransition(normalizedDepth, safeMiddleEnd, safeTransitionWidth);
+            double shallowWeight = 1.0 - middleEntry;
+            double middleWeight = middleEntry * (1.0 - deepEntry);
+            double deepWeight = deepEntry;
+
+            double zoneScale = shallowWeight * safeShallowScale
+                    + middleWeight * safeMiddleScale
+                    + deepWeight * safeDeepScale;
+            double baseGainIncrement = safeStrength
+                    * (safeMaxGain - 1.0)
+                    * Math.pow(normalizedDepth, safeCurveExponent);
+            double gain = 1.0 + baseGainIncrement * zoneScale;
+            double allowedMaxGain = safeMaxGain
+                    + (safeMiddleMaxGain - safeMaxGain) * middleWeight;
+            gain = Math.min(allowedMaxGain, Math.max(1.0, gain));
             for (int c = 0; c < cols; c++) {
                 data[r][c] *= gain;
             }
         }
+    }
+
+    private double smoothZoneTransition(double depth, double boundary, double width) {
+        if (width <= 0.0) {
+            return depth >= boundary ? 1.0 : 0.0;
+        }
+        double t = (depth - (boundary - width / 2.0)) / width;
+        t = Math.min(1.0, Math.max(0.0, t));
+        return t * t * (3.0 - 2.0 * t);
     }
 
     // ========================= 斐波那契搜索最小熵 =============================
