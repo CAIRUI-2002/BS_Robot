@@ -1,5 +1,7 @@
 package com.example.demo1.gpr.model;
 
+import java.util.List;
+
 import lombok.Data;
 
 /**
@@ -19,6 +21,9 @@ public class BScanResult {
     // 注意：这是二维数组，前端拿到就是 [[...],[...],...]
     private double[][] rawData;
     private double[][] migratedData;
+
+    // YOLO 对 rawData（增益后、偏移前剖面）的识别结果。
+    private List<GprDetection> rawDetections = List.of();
 
     private double vBest;    // 该段最优速度 (m/ns)
     private double hBest;    // 最小熵

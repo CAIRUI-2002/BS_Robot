@@ -7382,11 +7382,19 @@
         showSegment(0, false);
         render3DZigzagAll(result, true);
 
+        const totalYoloDetections = result.segments.reduce(
+            (sum, seg) => sum + (Array.isArray(seg.rawDetections) ? seg.rawDetections.length : 0),
+            0
+        );
+
         if (calibrationLoadInfo && calibrationLoadInfo.reason === "signature-mismatch") {
-            setStatus("处理完成。已在当前GPR文件夹中发现历史校准，但剖面数量或文件名不一致，已使用当前自动识别结果。", "error");
+            setStatus(
+                "处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线。历史校准与当前剖面不一致，未加载该校准。",
+                "error"
+            );
         } else {
-            setStatus("处理完成", "success");
-            addSystemMessage("地下环境渲染处理完成。", "success");
+            setStatus("处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线。", "success");
+            addSystemMessage("地下环境渲染及 YOLO 识别完成，共标注 " + totalYoloDetections + " 个目标。", "success");
         }
     }
 
@@ -7399,14 +7407,18 @@
         const seg = gprResult.segments[index];
 
         if (seg.rawData) {
-            render2DCanvas("raw2dCanvas", seg.rawData);
+            render2DCanvas("raw2dCanvas", seg.rawData, seg.rawDetections || []);
         }
         if (seg.migratedData) {
             render2DCanvas("mig2dCanvas", seg.migratedData);
         }
 
         if (showStatus) {
-            setStatus("处理完成。当前显示的是第 " + (index + 1) + " 段 B 扫结果。", "success");
+            const detectionCount = Array.isArray(seg.rawDetections) ? seg.rawDetections.length : 0;
+            setStatus(
+                "处理完成。当前显示第 " + (index + 1) + " 段 B 扫结果，YOLO 识别到 " + detectionCount + " 个管道双曲线。",
+                "success"
+            );
         }
     }
 
@@ -7449,7 +7461,7 @@
         return robustLimit > 0 ? robustLimit : Math.max(maxAbs * 0.6, 1e-9);
     }
 
-    function render2DCanvas(canvasId, matrix) {
+    function render2DCanvas(canvasId, matrix, detections = []) {
         const canvas = $(canvasId);
         if (!canvas || !matrix || !matrix.length || !matrix[0].length) return;
 
@@ -7516,6 +7528,41 @@
             }
         }
         ctx.putImageData(imgData, 0, 0);
+
+        // YOLO 直接识别偏移前 rawData，坐标已经由后端反算到原始矩阵坐标。
+        if (canvasId === "raw2dCanvas" && Array.isArray(detections) && detections.length > 0) {
+            ctx.save();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#ff2b2b";
+            ctx.fillStyle = "#ff2b2b";
+            ctx.shadowColor = "rgba(255, 0, 0, 0.8)";
+            ctx.shadowBlur = 4;
+            ctx.font = "12px sans-serif";
+            ctx.textBaseline = "top";
+
+            detections.forEach(detection => {
+                const x1 = Math.max(0, Number(detection.x1) / stepX);
+                const y1 = Math.max(0, Number(detection.y1) / stepY);
+                const x2 = Math.min(w - 1, Number(detection.x2) / stepX);
+                const y2 = Math.min(h - 1, Number(detection.y2) / stepY);
+                if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return;
+
+                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+                const confidence = Number(detection.confidence);
+                const text = "管道 " + (Number.isFinite(confidence) ? Math.round(confidence * 100) + "%" : "");
+                const textWidth = ctx.measureText(text).width;
+                const labelHeight = 16;
+                const labelY = y1 >= labelHeight ? y1 - labelHeight : y1;
+                ctx.shadowBlur = 0;
+                ctx.fillRect(x1, labelY, textWidth + 6, labelHeight);
+                ctx.fillStyle = "#ffffff";
+                ctx.fillText(text, x1 + 3, labelY + 2);
+                ctx.fillStyle = "#ff2b2b";
+                ctx.shadowBlur = 4;
+            });
+            ctx.restore();
+        }
 
 
 

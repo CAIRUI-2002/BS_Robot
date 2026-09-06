@@ -28,6 +28,12 @@ import com.example.demo1.gpr.service.FftUtils.Complex;
 @Service
 public class GprProcessingService {
 
+    private final GprYoloDetectionService gprYoloDetectionService;
+
+    public GprProcessingService(GprYoloDetectionService gprYoloDetectionService) {
+        this.gprYoloDetectionService = gprYoloDetectionService;
+    }
+
     /**
      * 处理指定目录下的所有 .dzt 文件
      */
@@ -188,6 +194,7 @@ public class GprProcessingService {
             segResult.setNu(nu);
             segResult.setRawData(data);
             segResult.setMigratedData(migrated);
+            segResult.setRawDetections(gprYoloDetectionService.detect(data));
             segResult.setVBest(vBest);
             segResult.setHBest(hBest);
             segResult.setGeometry(geo);
