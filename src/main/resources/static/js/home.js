@@ -10811,7 +10811,11 @@
         container.style.background = "#111";
         container.style.position = "relative"; // 确保子元素绝对定位相对于此容器
 
+        // scanValidComponents / mapCursor / mapStoredComponents 的单位均为 Float32 分量数，
+        // 不是点数。统一单位可避免规划器把历史点云长度再次乘 3。
+        let scanValidComponents = 0;
         let mapCursor = 0;
+        let mapStoredComponents = 0;
         let lastKeyframePose = { x: -999, y: -999 };
         let shouldNotifyPointCloudReceivedAfterStart = false;
 
@@ -11731,7 +11735,7 @@
             );
             const ground = stableCandidates.reduce((lowest, item) =>
                 !lowest || item.bin < lowest.bin ? item : lowest
-            , null);
+                , null);
             if (!ground) return null;
 
             let weightedHeight = 0;
@@ -11929,6 +11933,7 @@
                 queueMapBufferUpdateRange(mapCursor, chunkCount);
 
                 mapCursor += chunkCount;
+                mapStoredComponents = Math.min(mapMaxComponents, mapStoredComponents + chunkCount);
                 sourceOffset += chunkCount;
                 remaining -= chunkCount;
 
@@ -12782,6 +12787,28 @@
 
         // --- ✅ A* 寻路算法 ---
         const GRID_SIZE = 0.2;
+        const NAV_OBSTACLE_CONFIG = Object.freeze({
+            // 用户指定：只将离局部地面 0.2m～1.2m 的点云视为障碍物。
+            minHeightAboveGroundM: 0.2,
+            maxHeightAboveGroundM: 1.2,
+            localGroundQueryRadiusM: 0.8,
+            minGroundVotes: 8,
+            minGroundCells: 2,
+            // 当前 SLAM_Z_OFFSET 的目的就是把地面对齐到世界坐标 Z=0；
+            // 局部地面暂时无法估计时，用它作为安全兜底，而不是退回原始 Z 判断。
+            fallbackGroundWorldZ: 0.0,
+            // 使用明确的硬膨胀距离，不再按“机体外接圆半径 + 0.15m”计算。
+            obstacleInflationRadiusM: 0.30,
+            goalSearchRadiusM: 1.6,
+            runtimeCheckIntervalMs: 500,
+            runtimeLookaheadM: 2.0
+        });
+        const NAV_INFLATION_RADIUS_M = NAV_OBSTACLE_CONFIG.obstacleInflationRadiusM;
+
+        let latestNavObstacles = new Set();
+        let latestRuntimeNavObstacles = new Set();
+        let latestNavObstacleStats = null;
+        let lastRuntimeObstacleCheckAt = 0;
 
         function worldToGrid(x, y) {
             return { x: Math.round(x / GRID_SIZE), y: Math.round(y / GRID_SIZE) };
@@ -12789,43 +12816,278 @@
         function gridToWorld(gx, gy) {
             return { x: gx * GRID_SIZE, y: gy * GRID_SIZE };
         }
+        function gridKey(gx, gy) {
+            return `${gx},${gy}`;
+        }
 
-        function planPathAStar(start, end) {
-            console.log("🔍 A* 规划中...");
-            const gridStart = worldToGrid(start.x, start.y);
-            let gridEnd = worldToGrid(end.x, end.y);
+        /**
+         * 从已有的地面高度直方图中估计当前位置的局部地面。
+         * 查询半径大于常见纸箱半宽，因此纸箱正下方被遮挡时仍能使用四周地面。
+         */
+        function estimateNavigationGroundHeight(x, y) {
+            const groundCfg = PATH_GROUND_LIFT_CONFIG;
+            const centerCellX = Math.floor(x / groundCfg.cellSizeM);
+            const centerCellY = Math.floor(y / groundCfg.cellSizeM);
+            const cellRadius = Math.ceil(
+                NAV_OBSTACLE_CONFIG.localGroundQueryRadiusM / groundCfg.cellSizeM
+            );
+            const aggregated = new Map();
 
-            const obstacles = new Set();
-            const addObstacle = (wx, wy, wz) => {
-                if (wz > 0.2 && wz < 1.0) {
-                    const g = worldToGrid(wx, wy);
-                    for (let i = -1; i <= 1; i++) {
-                        for (let j = -1; j <= 1; j++) {
-                            obstacles.add(`${g.x + i},${g.y + j}`);
-                        }
+            for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+                    const distanceM = Math.hypot(dx, dy) * groundCfg.cellSizeM;
+                    if (distanceM > NAV_OBSTACLE_CONFIG.localGroundQueryRadiusM + groundCfg.cellSizeM * 0.5) {
+                        continue;
                     }
+
+                    const cell = pathGroundHeightGrid.get(
+                        getPathGroundCellKey(centerCellX + dx, centerCellY + dy)
+                    );
+                    if (!cell) continue;
+
+                    cell.bins.forEach((votes, bin) => {
+                        let item = aggregated.get(bin);
+                        if (!item) {
+                            item = { votes: 0, cells: 0 };
+                            aggregated.set(bin, item);
+                        }
+                        item.votes += votes;
+                        item.cells += 1;
+                    });
+                }
+            }
+
+            if (!aggregated.size) return null;
+
+            const candidates = [];
+            aggregated.forEach((item, bin) => {
+                let votes = 0;
+                let cells = 0;
+                for (let offset = -1; offset <= 1; offset++) {
+                    const neighbor = aggregated.get(bin + offset);
+                    if (!neighbor) continue;
+                    votes += neighbor.votes;
+                    cells += neighbor.cells;
+                }
+                if (
+                    votes >= NAV_OBSTACLE_CONFIG.minGroundVotes &&
+                    cells >= NAV_OBSTACLE_CONFIG.minGroundCells
+                ) {
+                    candidates.push({ bin, votes, cells });
+                }
+            });
+            if (!candidates.length) return null;
+
+            // 地面应当是具有连续空间支持的最低稳定高度层；纸箱顶面虽然点数多，
+            // 但其下方/周围更低的稳定地面层会优先被选中。
+            candidates.sort((a, b) => a.bin - b.bin || b.votes - a.votes);
+            const ground = candidates[0];
+            let weightedHeight = 0;
+            let totalVotes = 0;
+            for (let offset = -1; offset <= 1; offset++) {
+                const bin = ground.bin + offset;
+                const item = aggregated.get(bin);
+                if (!item) continue;
+                weightedHeight += bin * groundCfg.heightBinM * item.votes;
+                totalVotes += item.votes;
+            }
+            return totalVotes > 0
+                ? weightedHeight / totalVotes
+                : ground.bin * groundCfg.heightBinM;
+        }
+
+        function forEachValidCloudPoint(positionArray, componentCount, zOffset, visitor) {
+            if (!positionArray || componentCount <= 0) return;
+            const safeCount = Math.min(
+                positionArray.length,
+                Math.max(0, Math.floor(componentCount / 3) * 3)
+            );
+            for (let i = 0; i < safeCount; i += 3) {
+                const x = Number(positionArray[i]);
+                const y = Number(positionArray[i + 1]);
+                const localZ = Number(positionArray[i + 2]);
+                if (
+                    !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(localZ) ||
+                    Math.abs(x) >= 9000 || Math.abs(y) >= 9000 || Math.abs(localZ) >= 9000
+                ) {
+                    continue;
+                }
+                visitor(x, y, localZ + Number(zOffset || 0));
+            }
+        }
+
+        function inflateObstacleCells(baseObstacleCells) {
+            const inflated = new Set();
+            const cellRadius = Math.ceil(NAV_INFLATION_RADIUS_M / GRID_SIZE);
+
+            baseObstacleCells.forEach(key => {
+                const [gx, gy] = key.split(',').map(Number);
+                for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                    for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+                        if (Math.hypot(dx, dy) * GRID_SIZE > NAV_INFLATION_RADIUS_M) {
+                            continue;
+                        }
+                        inflated.add(gridKey(gx + dx, gy + dy));
+                    }
+                }
+            });
+            return inflated;
+        }
+
+        function buildNavigationObstacleGrid(start, options = {}) {
+            const includeHistory = options.includeHistory !== false;
+            const logStats = options.logStats !== false;
+            const baseObstacleCells = new Set();
+            const groundCache = new Map();
+            let validPointCount = 0;
+            let obstaclePointCount = 0;
+            let fallbackGroundCellCount = 0;
+
+            const addPoint = (worldX, worldY, worldZ) => {
+                validPointCount++;
+                const g = worldToGrid(worldX, worldY);
+                const key = gridKey(g.x, g.y);
+                let groundZ;
+                if (groundCache.has(key)) {
+                    groundZ = groundCache.get(key);
+                } else {
+                    groundZ = estimateNavigationGroundHeight(worldX, worldY);
+                    if (!Number.isFinite(groundZ)) {
+                        groundZ = NAV_OBSTACLE_CONFIG.fallbackGroundWorldZ;
+                        fallbackGroundCellCount++;
+                    }
+                    groundCache.set(key, groundZ);
+                }
+
+                const heightAboveGround = worldZ - groundZ;
+                if (
+                    heightAboveGround >= NAV_OBSTACLE_CONFIG.minHeightAboveGroundM &&
+                    heightAboveGround <= NAV_OBSTACLE_CONFIG.maxHeightAboveGroundM
+                ) {
+                    baseObstacleCells.add(key);
+                    obstaclePointCount++;
                 }
             };
 
             const scanArr = scanMesh.geometry.attributes.position.array;
-            for (let i = 0; i < scanArr.length; i += 3) {
-                if (scanArr[i] < 9000) addObstacle(scanArr[i], scanArr[i + 1], scanArr[i + 2]);
-            }
-            const mapArr = mapMesh.geometry.attributes.position.array;
-            for (let i = 0; i < mapCursor * 3; i += 3) {
-                if (mapArr[i] < 9000) addObstacle(mapArr[i], mapArr[i + 1], mapArr[i + 2]);
+            forEachValidCloudPoint(
+                scanArr,
+                scanValidComponents,
+                scanMesh.position.z,
+                addPoint
+            );
+
+            if (includeHistory) {
+                const mapArr = mapMesh.geometry.attributes.position.array;
+                forEachValidCloudPoint(
+                    mapArr,
+                    mapStoredComponents,
+                    mapMesh.position.z,
+                    addPoint
+                );
             }
 
-            const endKey = `${gridEnd.x},${gridEnd.y}`;
+            const obstacles = inflateObstacleCells(baseObstacleCells);
+            const gridStart = worldToGrid(start.x, start.y);
+            // 只释放机器狗中心所在的起始格，避免自身点云令 A* 无法起步；
+            // 不清空周围膨胀区，近距离真实障碍仍会阻止规划。
+            obstacles.delete(gridKey(gridStart.x, gridStart.y));
+
+            const stats = {
+                heightBandM: [
+                    NAV_OBSTACLE_CONFIG.minHeightAboveGroundM,
+                    NAV_OBSTACLE_CONFIG.maxHeightAboveGroundM
+                ],
+                validPointCount,
+                obstaclePointCount,
+                baseObstacleCellCount: baseObstacleCells.size,
+                inflatedObstacleCellCount: obstacles.size,
+                fallbackGroundCellCount,
+                inflationRadiusM: Number(NAV_INFLATION_RADIUS_M.toFixed(3)),
+                includeHistory
+            };
+            latestNavObstacleStats = stats;
+            window.latestNavObstacleStats = { ...stats };
+            if (includeHistory) {
+                // 完整地图障碍快照供纯追踪选取前瞻点时做线段碰撞检查。
+                // 仅实时帧构建的临时栅格不能覆盖掉这份完整快照。
+                latestNavObstacles = obstacles;
+            }
+
+            if (logStats) {
+                console.info("🧱 导航障碍栅格已更新:", stats);
+                if (obstaclePointCount === 0) {
+                    console.warn("⚠️ 当前未提取到离地 0.2m～1.2m 的障碍点，请确认点云和局部地面数据有效。");
+                }
+            }
+            return { obstacles, stats };
+        }
+
+        function isGridLineCollisionFree(start, end, obstacles) {
+            if (!start || !end) return false;
+            const distance = Math.hypot(end.x - start.x, end.y - start.y);
+            const stepM = GRID_SIZE * 0.25;
+            const steps = Math.max(1, Math.ceil(distance / stepM));
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const x = start.x + (end.x - start.x) * t;
+                const y = start.y + (end.y - start.y) * t;
+                const g = worldToGrid(x, y);
+                if (obstacles.has(gridKey(g.x, g.y))) return false;
+            }
+            return true;
+        }
+
+        function isControlSegmentCollisionFree(start, end) {
+            return isGridLineCollisionFree(start, end, latestNavObstacles) &&
+                isGridLineCollisionFree(start, end, latestRuntimeNavObstacles);
+        }
+
+        function isPathPrefixCollisionFree(start, path, obstacles, maxDistanceM = Infinity) {
+            if (!start || !Array.isArray(path) || path.length === 0) return false;
+            let previous = { x: Number(start.x), y: Number(start.y) };
+            let checkedDistance = 0;
+
+            for (const point of path) {
+                const segmentLength = Math.hypot(point.x - previous.x, point.y - previous.y);
+                if (!isGridLineCollisionFree(previous, point, obstacles)) return false;
+                checkedDistance += segmentLength;
+                if (checkedDistance >= maxDistanceM) break;
+                previous = point;
+            }
+            return true;
+        }
+
+        function planPathAStar(start, end, options = {}) {
+            console.log("🔍 A* 规划中...");
+            const gridStart = worldToGrid(start.x, start.y);
+            let gridEnd = worldToGrid(end.x, end.y);
+            const { obstacles, stats } = buildNavigationObstacleGrid(start, {
+                includeHistory: options.includeHistory !== false,
+                logStats: options.logStats !== false
+            });
+            if (stats.validPointCount === 0) {
+                alert("❌ 当前没有可用于规划的有效点云，请先启动点云雷达并等待地图显示。");
+                return null;
+            }
+
+            const endKey = gridKey(gridEnd.x, gridEnd.y);
             if (obstacles.has(endKey)) {
                 console.warn("目标点不可达，搜索附近...");
                 let found = false, minD = Infinity, bestG = null;
-                for (let dx = -3; dx <= 3; dx++) {
-                    for (let dy = -3; dy <= 3; dy++) {
+                const searchRadiusCells = Math.ceil(
+                    NAV_OBSTACLE_CONFIG.goalSearchRadiusM / GRID_SIZE
+                );
+                for (let dx = -searchRadiusCells; dx <= searchRadiusCells; dx++) {
+                    for (let dy = -searchRadiusCells; dy <= searchRadiusCells; dy++) {
                         const nx = gridEnd.x + dx, ny = gridEnd.y + dy;
-                        if (!obstacles.has(`${nx},${ny}`)) {
+                        if (!obstacles.has(gridKey(nx, ny))) {
                             const d = dx * dx + dy * dy;
-                            if (d < minD) { minD = d; bestG = { x: nx, y: ny }; found = true; }
+                            if (d < minD) {
+                                minD = d;
+                                bestG = { x: nx, y: ny };
+                                found = true;
+                            }
                         }
                     }
                 }
@@ -12839,7 +13101,7 @@
             const gScore = {};
             const fScore = {};
 
-            const startKey = `${gridStart.x},${gridStart.y}`;
+            const startKey = gridKey(gridStart.x, gridStart.y);
             openSet.push(gridStart);
             gScore[startKey] = 0;
             fScore[startKey] = Math.hypot(gridStart.x - gridEnd.x, gridStart.y - gridEnd.y);
@@ -12848,56 +13110,82 @@
             while (openSet.length > 0) {
                 if (iterations++ > 5000) { console.warn("A* 超时"); break; }
 
-                openSet.sort((a, b) => (fScore[`${a.x},${a.y}`] || Infinity) - (fScore[`${b.x},${b.y}`] || Infinity));
+                openSet.sort((a, b) =>
+                    (fScore[gridKey(a.x, a.y)] ?? Infinity) -
+                    (fScore[gridKey(b.x, b.y)] ?? Infinity)
+                );
                 const current = openSet.shift();
-                const currentKey = `${current.x},${current.y}`;
+                const currentKey = gridKey(current.x, current.y);
 
                 if (current.x === gridEnd.x && current.y === gridEnd.y) {
                     const path = [];
                     let currKey = currentKey;
-                    while (cameFrom[currKey]) {
+                    while (currKey) {
                         const coords = currKey.split(',').map(Number);
-                        path.unshift({ x: coords[0] * GRID_SIZE, y: coords[1] * GRID_SIZE });
+                        path.unshift(gridToWorld(coords[0], coords[1]));
+                        if (currKey === startKey) break;
                         currKey = cameFrom[currKey];
                     }
-                    path.push({ x: gridEnd.x * GRID_SIZE, y: gridEnd.y * GRID_SIZE });
-                    return simplifyPath(path);
+                    return simplifyPath(path, obstacles);
                 }
 
                 closedSet.add(currentKey);
-                const neighbors = [{ x: 0, y: 1 }, { x: 0, y: -1 }, { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 }];
+                const neighbors = [
+                    { x: 0, y: 1 }, { x: 0, y: -1 }, { x: 1, y: 0 }, { x: -1, y: 0 },
+                    { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 }
+                ];
 
-                for (let n of neighbors) {
+                for (const n of neighbors) {
                     const neighbor = { x: current.x + n.x, y: current.y + n.y };
-                    const nKey = `${neighbor.x},${neighbor.y}`;
+                    const nKey = gridKey(neighbor.x, neighbor.y);
                     if (closedSet.has(nKey) || obstacles.has(nKey)) continue;
 
-                    const cost = (n.x === 0 || n.y === 0) ? 1.0 : 1.414;
-                    const tG = gScore[currentKey] + cost;
+                    // 对角移动时两个相邻正交格都必须可通行，禁止从障碍拐角缝隙斜穿。
+                    if (n.x !== 0 && n.y !== 0) {
+                        if (
+                            obstacles.has(gridKey(current.x + n.x, current.y)) ||
+                            obstacles.has(gridKey(current.x, current.y + n.y))
+                        ) {
+                            continue;
+                        }
+                    }
 
-                    if (tG < (gScore[nKey] || Infinity)) {
+                    const cost = (n.x === 0 || n.y === 0) ? 1.0 : Math.SQRT2;
+                    const tentativeG = gScore[currentKey] + cost;
+
+                    if (tentativeG < (gScore[nKey] ?? Infinity)) {
                         cameFrom[nKey] = currentKey;
-                        gScore[nKey] = tG;
-                        fScore[nKey] = tG + Math.hypot(neighbor.x - gridEnd.x, neighbor.y - gridEnd.y);
-                        if (!openSet.some(o => o.x === neighbor.x && o.y === neighbor.y)) openSet.push(neighbor);
+                        gScore[nKey] = tentativeG;
+                        fScore[nKey] = tentativeG + Math.hypot(neighbor.x - gridEnd.x, neighbor.y - gridEnd.y);
+                        if (!openSet.some(o => o.x === neighbor.x && o.y === neighbor.y)) {
+                            openSet.push(neighbor);
+                        }
                     }
                 }
             }
-            alert("❌ 无法找到路径"); return null;
+            alert("❌ 无法找到路径");
+            return null;
         }
 
-        function simplifyPath(path) {
+        function simplifyPath(path, obstacles) {
             if (path.length < 3) return path;
-            const newPath = [path[0]];
-            for (let i = 1; i < path.length - 1; i++) {
-                const last = newPath[newPath.length - 1];
-                const curr = path[i];
-                if (Math.hypot(curr.x - last.x, curr.y - last.y) > 0.4) {
-                    newPath.push(curr);
+            const simplified = [path[0]];
+            let anchorIndex = 0;
+
+            // 只允许删除“锚点到候选点之间完全无碰撞”的中间点。
+            // 这可以避免旧版按 0.4m 抽点后，连线重新切入纸箱或墙角。
+            while (anchorIndex < path.length - 1) {
+                let nextIndex = anchorIndex + 1;
+                for (let candidateIndex = path.length - 1; candidateIndex > anchorIndex + 1; candidateIndex--) {
+                    if (isGridLineCollisionFree(path[anchorIndex], path[candidateIndex], obstacles)) {
+                        nextIndex = candidateIndex;
+                        break;
+                    }
                 }
+                simplified.push(path[nextIndex]);
+                anchorIndex = nextIndex;
             }
-            newPath.push(path[path.length - 1]);
-            return newPath;
+            return simplified;
         }
 
         function calculateAvgError() {
@@ -13160,6 +13448,16 @@
         const btnStart = document.getElementById('btnStartNav');
         const btnClear = document.getElementById('btnClearNav');
 
+        function setNavigationButtonState(navigating) {
+            if (!btnStart) return;
+            btnStart.innerText = navigating ? "■ 停止" : "▶ 导航";
+            btnStart.title = navigating ? "立即停止并退出自主导航" : "开始前往目标点";
+            btnStart.classList.toggle('success', !navigating);
+            btnStart.classList.toggle('stop-active', navigating);
+            btnStart.setAttribute('aria-pressed', navigating ? 'true' : 'false');
+        }
+        setNavigationButtonState(false);
+
         if (btnSet) {
             btnSet.onclick = function () {
                 isPicking = !isPicking;
@@ -13187,11 +13485,16 @@
 
         if (btnStart) {
             btnStart.onclick = function () {
+                if (isNavigating) {
+                    console.log("🛑 用户点击导航按钮停止自主导航");
+                    stopNav(false);
+                    setStatus("自主导航已停止，机器狗已退出自主导航模式。", "warning");
+                    return;
+                }
                 if (navPath.length === 0) {
                     alert("请先点击 [📍选点] 生成避障路径！");
                     return;
                 }
-                if (isNavigating) return;
                 startNav();
             };
         }
@@ -13211,7 +13514,31 @@
 
         function startNav() {
             console.log("🚀 开始导航...");
+
+            // 选点后到点击“开始”之间，纸箱可能出现或点云可能继续更新。
+            // 常规导航必须基于启动瞬间的最新点云重新规划一次。
+            if (!isCableTrackingMode && !isFaultFindingMode && navGoal) {
+                const refreshedPath = planPathAStar(currentRobotPose, navGoal, {
+                    includeHistory: true,
+                    logStats: true
+                });
+                if (!refreshedPath || refreshedPath.length === 0) {
+                    setStatus("启动导航失败：最新点云中没有安全可行路径。", "error");
+                    return;
+                }
+                navPath = refreshedPath;
+                navGoal = refreshedPath[refreshedPath.length - 1];
+                flagObj.position.set(navGoal.x, navGoal.y, 0);
+                updateNavLine();
+                updateDistanceUI();
+            }
+
             isNavigating = true;
+            lastRuntimeObstacleCheckAt = 0;
+            latestRuntimeNavObstacles = new Set();
+            if (!isCableTrackingMode && !isFaultFindingMode) {
+                setNavigationButtonState(true);
+            }
 
             // 只有当不是电缆跟踪且不是寻找破损模式时，才记录 A* 原始路径
             if (!isCableTrackingMode && !isFaultFindingMode) {
@@ -13227,9 +13554,19 @@
         }
 
         function stopNav(isSuccess) {
+            const wasNavigating = isNavigating || navInterval !== null;
             isNavigating = false;
             if (navInterval) { clearInterval(navInterval); navInterval = null; }
             if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
+            // 手动停止时补发一帧零速度，降低单帧 WebSocket/UDP 丢包导致的继续运动风险。
+            if (wasNavigating && typeof sendMoveCommand === 'function') {
+                window.setTimeout(() => {
+                    if (!isNavigating) {
+                        sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                    }
+                }, 50);
+            }
+            setNavigationButtonState(false);
             console.log("🛑 导航停止");
 
             // ✅✅✅ 修正：电缆跟踪与寻找破损模式停止逻辑
@@ -13300,6 +13637,51 @@
         // ✅ 核心控制：纯追踪 (Pure Pursuit) + 二分法拦截
         function controlLoop() {
             if (navPath.length === 0) { stopNav(true); return; }
+
+            // 常规选点导航每 500ms 用最新一帧点云检查前方 2m。
+            // 一旦原路径被新障碍占用，先发停车指令，再基于历史+实时点云重规划。
+            if (!isCableTrackingMode && !isFaultFindingMode && navGoal) {
+                const now = Date.now();
+                if (now - lastRuntimeObstacleCheckAt >= NAV_OBSTACLE_CONFIG.runtimeCheckIntervalMs) {
+                    lastRuntimeObstacleCheckAt = now;
+                    const liveGrid = buildNavigationObstacleGrid(currentRobotPose, {
+                        includeHistory: false,
+                        logStats: false
+                    });
+                    latestRuntimeNavObstacles = liveGrid.obstacles;
+                    const prefixIsSafe = isPathPrefixCollisionFree(
+                        currentRobotPose,
+                        navPath,
+                        liveGrid.obstacles,
+                        NAV_OBSTACLE_CONFIG.runtimeLookaheadM
+                    );
+
+                    if (!prefixIsSafe) {
+                        console.warn("🛑 最新点云占用了前方路径，停车并重新规划。");
+                        if (typeof sendMoveCommand === 'function') {
+                            sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                        }
+
+                        const replannedPath = planPathAStar(currentRobotPose, navGoal, {
+                            includeHistory: true,
+                            logStats: true
+                        });
+                        if (!replannedPath || replannedPath.length === 0) {
+                            stopNav(false);
+                            setStatus("前方出现障碍且无法重规划，机器狗已停车。", "error");
+                            return;
+                        }
+
+                        navPath = replannedPath;
+                        navGoal = replannedPath[replannedPath.length - 1];
+                        flagObj.position.set(navGoal.x, navGoal.y, 0);
+                        updateNavLine();
+                        updateDistanceUI();
+                        setStatus("检测到新障碍，已停车并完成绕障重规划。", "warning");
+                        return;
+                    }
+                }
+            }
 
             // =========================================================
             // 🌟🌟🌟 [修改] 步进等待 (Step-and-Wait) + 二分法定位接管
@@ -13408,21 +13790,35 @@
             const LOOKAHEAD_DIST = 0.8;
             let targetIdx = 0;
             let target = navPath[0];
+            let hasCollisionFreeTarget = false;
 
             for (let i = 0; i < navPath.length; i++) {
                 const p = navPath[i];
                 const d = Math.hypot(p.x - currentRobotPose.x, p.y - currentRobotPose.y);
 
-                if (d > LOOKAHEAD_DIST) {
-                    target = p;
-                    targetIdx = i;
+                // 普通选点导航的前瞻点必须能从机器狗当前位置直线安全到达。
+                // 遇到障碍拐角时保留并瞄准拐角前的安全点，禁止纯追踪跨点切弯。
+                if (
+                    !isCableTrackingMode && !isFaultFindingMode &&
+                    !isControlSegmentCollisionFree(currentRobotPose, p)
+                ) {
                     break;
                 }
-                // 如果走到最后都没有大于前瞻距离的点，就直接瞄准终点
-                if (i === navPath.length - 1) {
-                    target = p;
-                    targetIdx = i;
+                hasCollisionFreeTarget = true;
+                target = p;
+                targetIdx = i;
+
+                if (d > LOOKAHEAD_DIST) {
+                    break;
                 }
+            }
+
+            if (!hasCollisionFreeTarget) {
+                if (typeof sendMoveCommand === 'function') {
+                    sendMoveCommand(0, 0, 0, 0.0, 0.0, false);
+                }
+                console.warn("🛑 当前没有可直达的安全前瞻点，等待下一次障碍复检与重规划。");
+                return;
             }
 
             // 4. 剔除目标点之前的过渡点，使得路径持续向前推进
@@ -13621,6 +14017,8 @@
                 markFullAttributeUpdate(mapMesh.geometry.attributes.color);
 
                 mapCursor = 0;
+                mapStoredComponents = 0;
+                scanValidComponents = 0;
                 pendingMapUpdateRanges = [];
                 pathGroundHeightGrid.clear();
                 refreshRenderedPathsForGroundLift(true);
@@ -14342,143 +14740,143 @@
             const btnFault = document.getElementById("btnFindFaultOverlay");
             if (btnFault) {
                 btnFault.onclick = function () {
-                // 如果已经在寻找（或去起点的路上），点击则停止
-                if (isNavigating && isFaultFindingMode) {
-                    console.log("🛑 用户点击停止寻找破损点");
-                    stopNav(false);
-                    return;
-                }
+                    // 如果已经在寻找（或去起点的路上），点击则停止
+                    if (isNavigating && isFaultFindingMode) {
+                        console.log("🛑 用户点击停止寻找破损点");
+                        stopNav(false);
+                        return;
+                    }
 
-                if (isCableTrackingMode) {
-                    alert("⚠️ 请先停止跟踪电缆！");
-                    return;
-                }
+                    if (isCableTrackingMode) {
+                        alert("⚠️ 请先停止跟踪电缆！");
+                        return;
+                    }
 
-                if (!window.savedCablePath || window.savedCablePath.length < 2) {
-                    alert("⚠️ 未检测到有效的电缆路径！请先进行自动巡线生成路径。");
-                    return;
-                }
+                    if (!window.savedCablePath || window.savedCablePath.length < 2) {
+                        alert("⚠️ 未检测到有效的电缆路径！请先进行自动巡线生成路径。");
+                        return;
+                    }
 
-                bsState = 'INACTIVE';
-                bsIterationCount = 0;
-                lastFaultRobotDist = -1;
-                offsetPathDists = [];
-                maxFaultIdx = -1;
-                bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
-                bsLastProjectionS = null;
-                bsPathAligning = false;
-                resetBinaryMotionController();
-                isFaultFindingMode = true;
-                btnFault.innerHTML = '<span class="btn-icon">⏹</span> 停止寻找';
+                    bsState = 'INACTIVE';
+                    bsIterationCount = 0;
+                    lastFaultRobotDist = -1;
+                    offsetPathDists = [];
+                    maxFaultIdx = -1;
+                    bsFootprints = []; // ✅ 新增：每次点击寻找破损点时，清空旧脚印
+                    bsLastProjectionS = null;
+                    bsPathAligning = false;
+                    resetBinaryMotionController();
+                    isFaultFindingMode = true;
+                    btnFault.innerHTML = '<span class="btn-icon">⏹</span> 停止寻找';
 
-                // === 核心算法：以机器狗当前朝向决定寻找破损点的搜索方向 ===
-                // 说明：savedCablePath 的绘制顺序可能是 A->B，但现场可以从 B 点朝 A 点开始。
-                // 因此点击“寻找破损点”的瞬间，不再固定沿绘制方向，而是把机器狗车头朝向的那一侧作为电缆前方。
-                let searchInfo;
-                try {
-                    searchInfo = buildFaultSearchPathByRobotHeading(window.savedCablePath, currentRobotPose);
-                } catch (err) {
-                    alert("⚠️ " + err.message);
-                    stopNav(false);
-                    return;
-                }
+                    // === 核心算法：以机器狗当前朝向决定寻找破损点的搜索方向 ===
+                    // 说明：savedCablePath 的绘制顺序可能是 A->B，但现场可以从 B 点朝 A 点开始。
+                    // 因此点击“寻找破损点”的瞬间，不再固定沿绘制方向，而是把机器狗车头朝向的那一侧作为电缆前方。
+                    let searchInfo;
+                    try {
+                        searchInfo = buildFaultSearchPathByRobotHeading(window.savedCablePath, currentRobotPose);
+                    } catch (err) {
+                        alert("⚠️ " + err.message);
+                        stopNav(false);
+                        return;
+                    }
 
-                const pathPoints = searchInfo.pathPoints;
-                const n = pathPoints.length;
-                const normals = [];
+                    const pathPoints = searchInfo.pathPoints;
+                    const n = pathPoints.length;
+                    const normals = [];
 
-                // 记录本次寻找方向，后面的红色破损点“单向推进锁”会用它来判断进度。
-                window.faultSearchReverse = searchInfo.isReversed;
-                window.faultSearchHeadingDot = searchInfo.headingDot;
-                window.faultSearchStartClosestIdx = searchInfo.closestIdx;
+                    // 记录本次寻找方向，后面的红色破损点“单向推进锁”会用它来判断进度。
+                    window.faultSearchReverse = searchInfo.isReversed;
+                    window.faultSearchHeadingDot = searchInfo.headingDot;
+                    window.faultSearchStartClosestIdx = searchInfo.closestIdx;
 
-                // 如果机器狗已经位于当前朝向对应的搜索终点附近，说明前方已经没有可寻找路径。
-                if (searchInfo.closestIdx >= n - 1) {
-                    alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
-                    stopNav(false);
-                    return;
-                }
+                    // 如果机器狗已经位于当前朝向对应的搜索终点附近，说明前方已经没有可寻找路径。
+                    if (searchInfo.closestIdx >= n - 1) {
+                        alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
+                        stopNav(false);
+                        return;
+                    }
 
-                // 1. 求出“已按机器狗朝向重排后的路径”上每个点的左法向量。
-                //    如果判定为反向搜索，pathPoints 已经被反转，所以后续所有距离积分和二分定位都会按 B->A 推进。
-                for (let i = 0; i < n; i++) {
-                    const tangent = getPathTangent2D(pathPoints, i);
-                    normals.push({ nx: -tangent.y, ny: tangent.x });
-                }
+                    // 1. 求出“已按机器狗朝向重排后的路径”上每个点的左法向量。
+                    //    如果判定为反向搜索，pathPoints 已经被反转，所以后续所有距离积分和二分定位都会按 B->A 推进。
+                    for (let i = 0; i < n; i++) {
+                        const tangent = getPathTangent2D(pathPoints, i);
+                        normals.push({ nx: -tangent.y, ny: tangent.x });
+                    }
 
-                // 2. 判断机器狗位于当前搜索方向的左侧还是右侧。
-                //    注意这里不再使用电缆绘制起点 p0，而是使用离机器狗最近的电缆点，避免 B 点反向启动时误判。
-                const nearestCableIdx = Math.max(0, Math.min(n - 1, searchInfo.closestIdx));
-                const nearestCablePoint = pathPoints[nearestCableIdx];
-                const tangentAtRobot = getPathTangent2D(pathPoints, nearestCableIdx);
-                const rx = currentRobotPose.x - nearestCablePoint.x;
-                const ry = currentRobotPose.y - nearestCablePoint.y;
-                const cross = tangentAtRobot.x * ry - tangentAtRobot.y * rx;
+                    // 2. 判断机器狗位于当前搜索方向的左侧还是右侧。
+                    //    注意这里不再使用电缆绘制起点 p0，而是使用离机器狗最近的电缆点，避免 B 点反向启动时误判。
+                    const nearestCableIdx = Math.max(0, Math.min(n - 1, searchInfo.closestIdx));
+                    const nearestCablePoint = pathPoints[nearestCableIdx];
+                    const tangentAtRobot = getPathTangent2D(pathPoints, nearestCableIdx);
+                    const rx = currentRobotPose.x - nearestCablePoint.x;
+                    const ry = currentRobotPose.y - nearestCablePoint.y;
+                    const cross = tangentAtRobot.x * ry - tangentAtRobot.y * rx;
 
-                let offsetDist = 0.5;
-                if (cross < 0) {
-                    offsetDist = -0.5;
-                    console.log(`👉 [寻找破损点] 机器狗位于当前搜索方向右侧，生成右侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
-                } else {
-                    console.log(`👈 [寻找破损点] 机器狗位于当前搜索方向左侧，生成左侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
-                }
+                    let offsetDist = 0.5;
+                    if (cross < 0) {
+                        offsetDist = -0.5;
+                        console.log(`👉 [寻找破损点] 机器狗位于当前搜索方向右侧，生成右侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
+                    } else {
+                        console.log(`👈 [寻找破损点] 机器狗位于当前搜索方向左侧，生成左侧 ${Math.abs(offsetDist).toFixed(2)}m 平行路径`);
+                    }
 
-                // 3. 生成平行偏移的新路径。
-                let offsetPath = [];
-                for (let i = 0; i < n; i++) {
-                    offsetPath.push({
-                        x: pathPoints[i].x + normals[i].nx * offsetDist,
-                        y: pathPoints[i].y + normals[i].ny * offsetDist
-                    });
-                }
-
-                // 4. 路径平滑处理，消除法向量计算放大的微小毛刺，让机器狗运动更丝滑。
-                const SMOOTH_ITERATIONS = 8;
-                for (let iter = 0; iter < SMOOTH_ITERATIONS; iter++) {
-                    let tempPath = [offsetPath[0]];
-                    for (let i = 1; i < offsetPath.length - 1; i++) {
-                        tempPath.push({
-                            x: (offsetPath[i - 1].x + offsetPath[i].x + offsetPath[i + 1].x) / 3.0,
-                            y: (offsetPath[i - 1].y + offsetPath[i].y + offsetPath[i + 1].y) / 3.0
+                    // 3. 生成平行偏移的新路径。
+                    let offsetPath = [];
+                    for (let i = 0; i < n; i++) {
+                        offsetPath.push({
+                            x: pathPoints[i].x + normals[i].nx * offsetDist,
+                            y: pathPoints[i].y + normals[i].ny * offsetDist
                         });
                     }
-                    tempPath.push(offsetPath[offsetPath.length - 1]);
-                    offsetPath = tempPath;
-                }
 
-                window.offsetCablePath = offsetPath; // 存入全局供二分法与步进寻找使用
-                offsetPathDists = [];
-                bsLastProjectionS = null;
-                bsPathAligning = false;
-
-                // === 柔性并入逻辑：从离机器狗最近的位置开始，沿“车头朝向对应的前方”搜索 ===
-                console.log("✅ 启用按车头方向的柔性平行并入 (Heading-Based Flexible Parallel Merge)...");
-                cableTrackingState = 'FOLLOWING';
-
-                let minD = Infinity;
-                let closestIdx = 0;
-                for (let i = 0; i < offsetPath.length; i++) {
-                    const d = Math.hypot(offsetPath[i].x - currentRobotPose.x, offsetPath[i].y - currentRobotPose.y);
-                    if (d < minD) {
-                        minD = d;
-                        closestIdx = i;
+                    // 4. 路径平滑处理，消除法向量计算放大的微小毛刺，让机器狗运动更丝滑。
+                    const SMOOTH_ITERATIONS = 8;
+                    for (let iter = 0; iter < SMOOTH_ITERATIONS; iter++) {
+                        let tempPath = [offsetPath[0]];
+                        for (let i = 1; i < offsetPath.length - 1; i++) {
+                            tempPath.push({
+                                x: (offsetPath[i - 1].x + offsetPath[i].x + offsetPath[i + 1].x) / 3.0,
+                                y: (offsetPath[i - 1].y + offsetPath[i].y + offsetPath[i + 1].y) / 3.0
+                            });
+                        }
+                        tempPath.push(offsetPath[offsetPath.length - 1]);
+                        offsetPath = tempPath;
                     }
-                }
 
-                if (closestIdx >= offsetPath.length - 1) {
-                    alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
-                    stopNav(false);
-                    return;
-                }
+                    window.offsetCablePath = offsetPath; // 存入全局供二分法与步进寻找使用
+                    offsetPathDists = [];
+                    bsLastProjectionS = null;
+                    bsPathAligning = false;
 
-                console.log(
-                    `📍 [寻找破损点] 并入索引: ${closestIdx}, 距离偏移路径: ${minD.toFixed(2)}m, ` +
-                    `搜索方向: ${searchInfo.isReversed ? "B→A/反向" : "A→B/正向"}`
-                );
+                    // === 柔性并入逻辑：从离机器狗最近的位置开始，沿“车头朝向对应的前方”搜索 ===
+                    console.log("✅ 启用按车头方向的柔性平行并入 (Heading-Based Flexible Parallel Merge)...");
+                    cableTrackingState = 'FOLLOWING';
 
-                navPath = offsetPath.slice(closestIdx);
-                startNav();
-            };
+                    let minD = Infinity;
+                    let closestIdx = 0;
+                    for (let i = 0; i < offsetPath.length; i++) {
+                        const d = Math.hypot(offsetPath[i].x - currentRobotPose.x, offsetPath[i].y - currentRobotPose.y);
+                        if (d < minD) {
+                            minD = d;
+                            closestIdx = i;
+                        }
+                    }
+
+                    if (closestIdx >= offsetPath.length - 1) {
+                        alert("⚠️ 当前机器狗朝向对应的电缆前方已经没有可搜索路径，请调整机器狗朝向后再开始寻找破损点。");
+                        stopNav(false);
+                        return;
+                    }
+
+                    console.log(
+                        `📍 [寻找破损点] 并入索引: ${closestIdx}, 距离偏移路径: ${minD.toFixed(2)}m, ` +
+                        `搜索方向: ${searchInfo.isReversed ? "B→A/反向" : "A→B/正向"}`
+                    );
+
+                    navPath = offsetPath.slice(closestIdx);
+                    startNav();
+                };
             }
         })();
 
@@ -14815,453 +15213,453 @@
             const result = { pointCloudDrawn: false };
 
             if (processPose) {
-            // ==========================================
-            // 🌟🌟🌟 新增：拦截解析 Python 传来的 RTK 数据
-            // ==========================================
-            if (data.rtk && data.rtk.lat && data.rtk.lon) {
-                // 1. 字符串清洗：去掉 "°N"、"°E" 等后缀，提取纯浮点数
-                const rawLat = parseGpsNumber(data.rtk.lat);
-                const rawLon = parseGpsNumber(data.rtk.lon);
+                // ==========================================
+                // 🌟🌟🌟 新增：拦截解析 Python 传来的 RTK 数据
+                // ==========================================
+                if (data.rtk && data.rtk.lat && data.rtk.lon) {
+                    // 1. 字符串清洗：去掉 "°N"、"°E" 等后缀，提取纯浮点数
+                    const rawLat = parseGpsNumber(data.rtk.lat);
+                    const rawLon = parseGpsNumber(data.rtk.lon);
 
-                // 2. 获取固定解状态
-                const status = data.rtk.status;
-                // 严格要求只有 "固定解" 才能用于标定基准 (如果不准可以放宽限制)
-                const isGoodSignal = (status === "固定解" || status === "4" || status === 4);
+                    // 2. 获取固定解状态
+                    const status = data.rtk.status;
+                    // 严格要求只有 "固定解" 才能用于标定基准 (如果不准可以放宽限制)
+                    const isGoodSignal = (status === "固定解" || status === "4" || status === 4);
 
-                // 更新全局 UI 状态
-                window.currentGps = { lat: rawLat, lon: rawLon, status: status };
+                    // 更新全局 UI 状态
+                    window.currentGps = { lat: rawLat, lon: rawLon, status: status };
 
-                // 👇==========================================👇
-                // 🌟 新增：实时更新左下角的 GPS 显示面板
-                const gpsTextEl = document.getElementById('realtimeGpsText');
-                if (gpsTextEl) {
-                    // 如果是固定解，状态文字标绿；如果是不稳定解，状态文字标橙
-                    const statusClass = isGoodSignal ? 'status-fixed' : 'status-float';
-                    // 左下角实时经纬度只显示 6 位小数；内部 GPS 数据仍保留原始精度，不影响标定和航点计算。
-                    gpsTextEl.innerHTML = `${rawLat.toFixed(6)}°, ${rawLon.toFixed(6)}° [<span class="${statusClass}">${status}</span>]`;
-                }
-                // 👆==========================================👆
-
-                // 3. ✅ 多点轨迹相似变换自动标定
-                // 不要求机器狗直线运动；适配 6 位经纬度，通过多点轨迹整体拟合 scale / rotation / translation。
-                if (isGoodSignal && !window.isGpsCalibrated && !window.geoTransform && pose && pose.x !== -999) {
-                    addGeoCalibrationSample(rawLat, rawLon, pose, status);
-                }
-            }
-            // ==========================================
-
-            if (pose) {
-                const scaleFactor = 1.0;
-                const px = pose.x * scaleFactor;
-                const py = pose.y * scaleFactor;
-                // ✅ 新增逻辑：提取真实的 Z 轴高度，减去 0.3m 的补偿值
-                const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
-
-                const isRTK = data.is_rtk === true;
-                if (typeof lastRTKStatus === 'undefined') {
-                    window.lastRTKStatus = null;
-                }
-
-                if (isRTK !== window.lastRTKStatus) {
-                    if (isRTK) {
-                        console.log('RTK Status: ACTIVE 🟢');
-                    } else {
-                        console.log('RTK Status: OFF (ODOM MODE) ⚠️');
+                    // 👇==========================================👇
+                    // 🌟 新增：实时更新左下角的 GPS 显示面板
+                    const gpsTextEl = document.getElementById('realtimeGpsText');
+                    if (gpsTextEl) {
+                        // 如果是固定解，状态文字标绿；如果是不稳定解，状态文字标橙
+                        const statusClass = isGoodSignal ? 'status-fixed' : 'status-float';
+                        // 左下角实时经纬度只显示 6 位小数；内部 GPS 数据仍保留原始精度，不影响标定和航点计算。
+                        gpsTextEl.innerHTML = `${rawLat.toFixed(6)}°, ${rawLon.toFixed(6)}° [<span class="${statusClass}">${status}</span>]`;
                     }
-                    window.lastRTKStatus = isRTK;
-                }
+                    // 👆==========================================👆
 
-                const receivedYaw = Number(pose.yaw);
-                currentRobotPose = {
-                    x: px,
-                    y: py,
-                    yaw: Number.isFinite(receivedYaw) ? receivedYaw : currentRobotPose.yaw,
-                    updatedAt: Date.now()
-                };
-                window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
-
-                updateNavLine();
-                updateDistanceUI();
-
-                if (isNavigating) {
-                    const len = activeNavTrail.length;
-                    if (len === 0) activeNavTrail.push({ x: px, y: py });
-                    else {
-                        const lastP = activeNavTrail[len - 1];
-                        if (Math.hypot(px - lastP.x, py - lastP.y) > 0.02) activeNavTrail.push({ x: px, y: py });
+                    // 3. ✅ 多点轨迹相似变换自动标定
+                    // 不要求机器狗直线运动；适配 6 位经纬度，通过多点轨迹整体拟合 scale / rotation / translation。
+                    if (isGoodSignal && !window.isGpsCalibrated && !window.geoTransform && pose && pose.x !== -999) {
+                        addGeoCalibrationSample(rawLat, rawLon, pose, status);
                     }
                 }
-
-                dogGroup.position.set(px, py, pz + SLAM_Z_OFFSET);
-                // ✅ 新增提取 pitch 角度，如果没有则默认为 0
-                const pitch = pose.pitch !== undefined ? pose.pitch : 0.0;
-
-                // ✅ 核心修改：同时设置 pitch(绕Y轴) 和 yaw(绕Z轴)
-                // 'ZYX' 是旋转顺序，必须指定，否则在同时有偏航和俯仰时模型会发生万向节死锁导致倾斜
-                dogGroup.rotation.set(0, 0, pose.yaw, 'ZYX');
-
                 // ==========================================
-                // ✅ [新增] 真实脚印记录与动态裁剪 (卷尺算法)
-                // ==========================================
-                if (isFaultFindingMode) {
-                    const currentPos2D = { x: px, y: py };
-                    if (bsFootprints.length === 0) {
-                        bsFootprints.push(currentPos2D);
-                    } else {
-                        // 1. 寻找当前物理位置在脚印数组中的最近点
-                        let closestIdx = 0;
-                        let minD = Infinity;
-                        for (let i = Math.max(0, bsFootprints.length - 100); i < bsFootprints.length; i++) {
-                            const d = Math.hypot(px - bsFootprints[i].x, py - bsFootprints[i].y);
-                            if (d < minD) { minD = d; closestIdx = i; }
-                        }
 
-                        // 2. 如果倒车退回去了（索引差距大于3，约15cm），剪掉多余的“未来”轨迹
-                        if (closestIdx < bsFootprints.length - 3) {
-                            bsFootprints.length = closestIdx + 1;
-                        }
+                if (pose) {
+                    const scaleFactor = 1.0;
+                    const px = pose.x * scaleFactor;
+                    const py = pose.y * scaleFactor;
+                    // ✅ 新增逻辑：提取真实的 Z 轴高度，减去 0.3m 的补偿值
+                    const pz = (pose.z !== undefined ? pose.z : 0.05) * scaleFactor;
 
-                        // 3. 只有离开最后一个点超过 5cm，才记录新脚印
-                        const lastP = bsFootprints[bsFootprints.length - 1];
-                        if (Math.hypot(px - lastP.x, py - lastP.y) > 0.05) {
+                    const isRTK = data.is_rtk === true;
+                    if (typeof lastRTKStatus === 'undefined') {
+                        window.lastRTKStatus = null;
+                    }
+
+                    if (isRTK !== window.lastRTKStatus) {
+                        if (isRTK) {
+                            console.log('RTK Status: ACTIVE 🟢');
+                        } else {
+                            console.log('RTK Status: OFF (ODOM MODE) ⚠️');
+                        }
+                        window.lastRTKStatus = isRTK;
+                    }
+
+                    const receivedYaw = Number(pose.yaw);
+                    currentRobotPose = {
+                        x: px,
+                        y: py,
+                        yaw: Number.isFinite(receivedYaw) ? receivedYaw : currentRobotPose.yaw,
+                        updatedAt: Date.now()
+                    };
+                    window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
+
+                    updateNavLine();
+                    updateDistanceUI();
+
+                    if (isNavigating) {
+                        const len = activeNavTrail.length;
+                        if (len === 0) activeNavTrail.push({ x: px, y: py });
+                        else {
+                            const lastP = activeNavTrail[len - 1];
+                            if (Math.hypot(px - lastP.x, py - lastP.y) > 0.02) activeNavTrail.push({ x: px, y: py });
+                        }
+                    }
+
+                    dogGroup.position.set(px, py, pz + SLAM_Z_OFFSET);
+                    // ✅ 新增提取 pitch 角度，如果没有则默认为 0
+                    const pitch = pose.pitch !== undefined ? pose.pitch : 0.0;
+
+                    // ✅ 核心修改：同时设置 pitch(绕Y轴) 和 yaw(绕Z轴)
+                    // 'ZYX' 是旋转顺序，必须指定，否则在同时有偏航和俯仰时模型会发生万向节死锁导致倾斜
+                    dogGroup.rotation.set(0, 0, pose.yaw, 'ZYX');
+
+                    // ==========================================
+                    // ✅ [新增] 真实脚印记录与动态裁剪 (卷尺算法)
+                    // ==========================================
+                    if (isFaultFindingMode) {
+                        const currentPos2D = { x: px, y: py };
+                        if (bsFootprints.length === 0) {
                             bsFootprints.push(currentPos2D);
+                        } else {
+                            // 1. 寻找当前物理位置在脚印数组中的最近点
+                            let closestIdx = 0;
+                            let minD = Infinity;
+                            for (let i = Math.max(0, bsFootprints.length - 100); i < bsFootprints.length; i++) {
+                                const d = Math.hypot(px - bsFootprints[i].x, py - bsFootprints[i].y);
+                                if (d < minD) { minD = d; closestIdx = i; }
+                            }
+
+                            // 2. 如果倒车退回去了（索引差距大于3，约15cm），剪掉多余的“未来”轨迹
+                            if (closestIdx < bsFootprints.length - 3) {
+                                bsFootprints.length = closestIdx + 1;
+                            }
+
+                            // 3. 只有离开最后一个点超过 5cm，才记录新脚印
+                            const lastP = bsFootprints[bsFootprints.length - 1];
+                            if (Math.hypot(px - lastP.x, py - lastP.y) > 0.05) {
+                                bsFootprints.push(currentPos2D);
+                            }
                         }
                     }
-                }
 
-                // 恢复 grid 与交互平面跟随机器狗平移的逻辑
-                if (typeof gridHelper !== 'undefined') {
-                    // 让网格的中心在 XY 平面上实时跟随机器狗
-                    gridHelper.position.set(px, py, 0);
-                    // 确保不可见的点击平面也同步跟随，否则“选点导航”等点击交互会发生严重偏移
-                    if (clickPlane) clickPlane.position.set(px, py, 0);
-                }
+                    // 恢复 grid 与交互平面跟随机器狗平移的逻辑
+                    if (typeof gridHelper !== 'undefined') {
+                        // 让网格的中心在 XY 平面上实时跟随机器狗
+                        gridHelper.position.set(px, py, 0);
+                        // 确保不可见的点击平面也同步跟随，否则“选点导航”等点击交互会发生严重偏移
+                        if (clickPlane) clickPlane.position.set(px, py, 0);
+                    }
 
-                if (isFirstFrame) {
-                    orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
-                    updateCamera();
-                    isFirstFrame = false;
-                }
+                    if (isFirstFrame) {
+                        orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
+                        updateCamera();
+                        isFirstFrame = false;
+                    }
 
-                const trailZOffset = -0.9;
-                const currentPos = new THREE.Vector3(px, py, pz + trailZOffset);
-                const isFault = window.g_isFaultDetected === true;
+                    const trailZOffset = -0.9;
+                    const currentPos = new THREE.Vector3(px, py, pz + trailZOffset);
+                    const isFault = window.g_isFaultDetected === true;
 
-                // =========================================================
-                // 🚀 [新] 连续破损区域追踪逻辑
-                // =========================================================
+                    // =========================================================
+                    // 🚀 [新] 连续破损区域追踪逻辑
+                    // =========================================================
 
-                // 定义全局变量 (放在 updateVis 函数外部，或者 initSlamVis 闭包顶部)
-                // 如果这些变量还没定义，请将被替换代码块上方的这两行声明移动到 initSlamVis 函数最开头：
-                // let lastFaultMarker = null;  // 记录上一个“临时红点”
-                // let lastFaultCablePos = null; // 记录上一个破损点的坐标（用于画线）
+                    // 定义全局变量 (放在 updateVis 函数外部，或者 initSlamVis 闭包顶部)
+                    // 如果这些变量还没定义，请将被替换代码块上方的这两行声明移动到 initSlamVis 函数最开头：
+                    // let lastFaultMarker = null;  // 记录上一个“临时红点”
+                    // let lastFaultCablePos = null; // 记录上一个破损点的坐标（用于画线）
 
-                if (isFault) {
-                    // 1. 检查是否存在电缆路径
-                    if (window.savedCablePath && window.savedCablePath.length > 0) {
+                    if (isFault) {
+                        // 1. 检查是否存在电缆路径
+                        if (window.savedCablePath && window.savedCablePath.length > 0) {
 
-                        // 2. 寻找机器狗在电缆上的高精度垂直投影点
-                        let minDistance = Infinity;
-                        let closestPoint = null;
-                        let closestIdx = -1;
+                            // 2. 寻找机器狗在电缆上的高精度垂直投影点
+                            let minDistance = Infinity;
+                            let closestPoint = null;
+                            let closestIdx = -1;
 
-                        // 遍历所有相邻点组成的线段
-                        for (let i = 0; i < window.savedCablePath.length - 1; i++) {
-                            const p1 = window.savedCablePath[i];
-                            const p2 = window.savedCablePath[i + 1];
+                            // 遍历所有相邻点组成的线段
+                            for (let i = 0; i < window.savedCablePath.length - 1; i++) {
+                                const p1 = window.savedCablePath[i];
+                                const p2 = window.savedCablePath[i + 1];
 
-                            // 计算线段的向量方向
-                            const dx = p2.x - p1.x;
-                            const dy = p2.y - p1.y;
-                            const dz = p2.z - p1.z;
-                            const segLenSq = dx * dx + dy * dy + dz * dz;
+                                // 计算线段的向量方向
+                                const dx = p2.x - p1.x;
+                                const dy = p2.y - p1.y;
+                                const dz = p2.z - p1.z;
+                                const segLenSq = dx * dx + dy * dy + dz * dz;
 
-                            let t = 0;
-                            if (segLenSq > 0) {
-                                // 计算机器狗坐标在当前线段上的投影比例 (0 ~ 1)
-                                const dot = ((currentPos.x - p1.x) * dx + (currentPos.y - p1.y) * dy + (currentPos.z - p1.z) * dz);
-                                t = Math.max(0, Math.min(1, dot / segLenSq));
-                            }
-
-                            // 计算出精确的 3D 垂足坐标
-                            const projX = p1.x + t * dx;
-                            const projY = p1.y + t * dy;
-                            const projZ = p1.z + t * dz;
-                            const projPt = new THREE.Vector3(projX, projY, projZ);
-
-                            // 计算机器狗真实位置到这个垂足的距离
-                            const dist = currentPos.distanceTo(projPt);
-
-                            if (dist < minDistance) {
-                                minDistance = dist;
-                                closestPoint = projPt; // 使用计算出的垂足，而不是死板的原始顶点
-                                closestIdx = i;        // 记录索引，用于“单向推进锁”防倒退
-                            }
-                        }
-
-                        if (closestPoint) {
-                            // 1. 判定当前是否处于“二分法精确回退/寻找”阶段
-                            const isBinaryRefining = (bsState === 'EVAL_WAIT' || bsState === 'MOVING');
-
-                            // 2. 将原始 savedCablePath 的索引换算为“本次搜索方向”上的进度索引。
-                            //    正向搜索时原索引越大表示越靠前；反向搜索时原索引越小才表示越靠前。
-                            const progressIdx = window.faultSearchReverse === true
-                                ? Math.max(0, (window.savedCablePath.length - 2) - closestIdx)
-                                : closestIdx;
-
-                            // 3. 如果是向前开荒，或者正在二分法精确定位，都允许画红点
-                            if (maxFaultIdx === -1 || progressIdx > maxFaultIdx || isBinaryRefining) {
-
-                                if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
-                                    if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
-                                    if (window.offsetCablePath) lastFaultRobotDist = getDistOnPath(currentPos, window.offsetCablePath);
+                                let t = 0;
+                                if (segLenSq > 0) {
+                                    // 计算机器狗坐标在当前线段上的投影比例 (0 ~ 1)
+                                    const dot = ((currentPos.x - p1.x) * dx + (currentPos.y - p1.y) * dy + (currentPos.z - p1.z) * dz);
+                                    t = Math.max(0, Math.min(1, dot / segLenSq));
                                 }
 
-                                // 距离去重，防止原地微小抖动频繁重绘
-                                if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.01) {
+                                // 计算出精确的 3D 垂足坐标
+                                const projX = p1.x + t * dx;
+                                const projY = p1.y + t * dy;
+                                const projZ = p1.z + t * dz;
+                                const projPt = new THREE.Vector3(projX, projY, projZ);
 
-                                    // --- A. 删除上一个临时点 ---
-                                    if (window.lastFaultMarker) { // 🌟 改为 window.
-                                        faultMarkerGroup.remove(window.lastFaultMarker); // 🌟 改为 window.
-                                        window.lastFaultMarker.traverse(child => { // 🌟 改为 window.
-                                            if (child.geometry) child.geometry.dispose();
-                                            if (child.material) {
-                                                if (child.material.map) child.material.map.dispose();
-                                                child.material.dispose();
-                                            }
-                                        });
-                                        window.lastFaultMarker = null; // 🌟 改为 window.
-                                    }
+                                // 计算机器狗真实位置到这个垂足的距离
+                                const dist = currentPos.distanceTo(projPt);
 
-                                    // --- B. 创建新的破损点组合 (红球 + 闪电标志) ---
-                                    const faultGroup = new THREE.Group();
-                                    faultGroup.position.copy(closestPoint);
-                                    // ✅ 新增：给每个破损点分配一个唯一的 ID，用于绑定抓拍图片
-                                    faultGroup.userData.faultId = 'fault_' + Date.now();
+                                if (dist < minDistance) {
+                                    minDistance = dist;
+                                    closestPoint = projPt; // 使用计算出的垂足，而不是死板的原始顶点
+                                    closestIdx = i;        // 记录索引，用于“单向推进锁”防倒退
+                                }
+                            }
 
-                                    const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
-                                    const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                                    const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
-                                    faultGroup.add(faultMesh);
+                            if (closestPoint) {
+                                // 1. 判定当前是否处于“二分法精确回退/寻找”阶段
+                                const isBinaryRefining = (bsState === 'EVAL_WAIT' || bsState === 'MOVING');
 
-                                    const canvas = document.createElement("canvas");
-                                    canvas.width = 128; canvas.height = 128;
-                                    const ctx = canvas.getContext("2d");
-                                    ctx.clearRect(0, 0, 128, 128);
-                                    ctx.font = "bold 90px Arial";
-                                    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-                                    ctx.fillStyle = "#ffdd00"; ctx.shadowColor = "#ff0000"; ctx.shadowBlur = 15;
-                                    ctx.fillText("⚡", 64, 64);
+                                // 2. 将原始 savedCablePath 的索引换算为“本次搜索方向”上的进度索引。
+                                //    正向搜索时原索引越大表示越靠前；反向搜索时原索引越小才表示越靠前。
+                                const progressIdx = window.faultSearchReverse === true
+                                    ? Math.max(0, (window.savedCablePath.length - 2) - closestIdx)
+                                    : closestIdx;
 
-                                    const texture = new THREE.CanvasTexture(canvas);
-                                    const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
-                                    const lightningSprite = new THREE.Sprite(spriteMat);
-                                    lightningSprite.scale.set(0.6, 0.6, 1);
-                                    lightningSprite.position.set(0, 0, 0.3);
-                                    faultGroup.add(lightningSprite);
-
-                                    faultMarkerGroup.add(faultGroup);
-                                    window.lastFaultMarker = faultGroup; // 🌟 改为 window.
-
-                                    // --- C. 绘制红色电缆段 ---
-                                    if (lastFaultCablePos) {
-                                        const segmentPath = [lastFaultCablePos, closestPoint];
-                                        const curve = new THREE.CatmullRomCurve3(segmentPath);
-                                        const tubeGeo = new THREE.TubeGeometry(curve, 1, 0.04, 8, false);
-                                        const tubeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-                                        const redSegment = new THREE.Mesh(tubeGeo, tubeMat);
-                                        redCableGroup.add(redSegment);
-                                    }
-
-                                    // --- D. 更新状态 ---
-                                    lastFaultCablePos = closestPoint.clone();
-                                    window.lastFaultCablePos = lastFaultCablePos; // 👈 新增这一行：将坐标暴露给全局 window
-
-                                    // 🌟 核心修改：如果是二分定位阶段，千万不要更新 maxFaultIdx，防止把向后的索引锁死
-                                    // 正向/反向搜索都统一使用 progressIdx，避免 B 点朝 A 点搜索时被原始绘制索引拦截。
-                                    if (!isBinaryRefining) {
-                                        maxFaultIdx = progressIdx;
-                                    }
+                                // 3. 如果是向前开荒，或者正在二分法精确定位，都允许画红点
+                                if (maxFaultIdx === -1 || progressIdx > maxFaultIdx || isBinaryRefining) {
 
                                     if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
-                                        console.log(`🔴 [追踪] 发现更前端的破损点，标志向前推进至:`, closestPoint);
-                                    } else {
-                                        console.log(`🎯 [二分定位] 边界扩大，标志刷新至最前端精确位置:`, closestPoint);
+                                        if (window.offsetCablePath && offsetPathDists.length === 0) computePathDists(window.offsetCablePath);
+                                        if (window.offsetCablePath) lastFaultRobotDist = getDistOnPath(currentPos, window.offsetCablePath);
+                                    }
+
+                                    // 距离去重，防止原地微小抖动频繁重绘
+                                    if (!lastFaultCablePos || closestPoint.distanceTo(lastFaultCablePos) > 0.01) {
+
+                                        // --- A. 删除上一个临时点 ---
+                                        if (window.lastFaultMarker) { // 🌟 改为 window.
+                                            faultMarkerGroup.remove(window.lastFaultMarker); // 🌟 改为 window.
+                                            window.lastFaultMarker.traverse(child => { // 🌟 改为 window.
+                                                if (child.geometry) child.geometry.dispose();
+                                                if (child.material) {
+                                                    if (child.material.map) child.material.map.dispose();
+                                                    child.material.dispose();
+                                                }
+                                            });
+                                            window.lastFaultMarker = null; // 🌟 改为 window.
+                                        }
+
+                                        // --- B. 创建新的破损点组合 (红球 + 闪电标志) ---
+                                        const faultGroup = new THREE.Group();
+                                        faultGroup.position.copy(closestPoint);
+                                        // ✅ 新增：给每个破损点分配一个唯一的 ID，用于绑定抓拍图片
+                                        faultGroup.userData.faultId = 'fault_' + Date.now();
+
+                                        const sphereGeo = new THREE.SphereGeometry(0.12, 16, 16);
+                                        const sphereMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                                        const faultMesh = new THREE.Mesh(sphereGeo, sphereMat);
+                                        faultGroup.add(faultMesh);
+
+                                        const canvas = document.createElement("canvas");
+                                        canvas.width = 128; canvas.height = 128;
+                                        const ctx = canvas.getContext("2d");
+                                        ctx.clearRect(0, 0, 128, 128);
+                                        ctx.font = "bold 90px Arial";
+                                        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                                        ctx.fillStyle = "#ffdd00"; ctx.shadowColor = "#ff0000"; ctx.shadowBlur = 15;
+                                        ctx.fillText("⚡", 64, 64);
+
+                                        const texture = new THREE.CanvasTexture(canvas);
+                                        const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+                                        const lightningSprite = new THREE.Sprite(spriteMat);
+                                        lightningSprite.scale.set(0.6, 0.6, 1);
+                                        lightningSprite.position.set(0, 0, 0.3);
+                                        faultGroup.add(lightningSprite);
+
+                                        faultMarkerGroup.add(faultGroup);
+                                        window.lastFaultMarker = faultGroup; // 🌟 改为 window.
+
+                                        // --- C. 绘制红色电缆段 ---
+                                        if (lastFaultCablePos) {
+                                            const segmentPath = [lastFaultCablePos, closestPoint];
+                                            const curve = new THREE.CatmullRomCurve3(segmentPath);
+                                            const tubeGeo = new THREE.TubeGeometry(curve, 1, 0.04, 8, false);
+                                            const tubeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                                            const redSegment = new THREE.Mesh(tubeGeo, tubeMat);
+                                            redCableGroup.add(redSegment);
+                                        }
+
+                                        // --- D. 更新状态 ---
+                                        lastFaultCablePos = closestPoint.clone();
+                                        window.lastFaultCablePos = lastFaultCablePos; // 👈 新增这一行：将坐标暴露给全局 window
+
+                                        // 🌟 核心修改：如果是二分定位阶段，千万不要更新 maxFaultIdx，防止把向后的索引锁死
+                                        // 正向/反向搜索都统一使用 progressIdx，避免 B 点朝 A 点搜索时被原始绘制索引拦截。
+                                        if (!isBinaryRefining) {
+                                            maxFaultIdx = progressIdx;
+                                        }
+
+                                        if (bsState === 'INACTIVE' || bsState === 'STEP_FORWARD' || bsState === 'STEP_WAIT') {
+                                            console.log(`🔴 [追踪] 发现更前端的破损点，标志向前推进至:`, closestPoint);
+                                        } else {
+                                            console.log(`🎯 [二分定位] 边界扩大，标志刷新至最前端精确位置:`, closestPoint);
+                                        }
                                     }
                                 }
                             }
                         }
+                    } else {
+                        // (可选) 如果你需要“断续”逻辑：
+                        // 当信号消失一段时间后，重置 lastFaultCablePos，
+                        // 这样下一次再检测到信号时，会视为一个新的独立破损区域的起点，而不会把两个很远的区域连起来。
+                        //
+                        // if (signalLostTimer > 2000ms) {
+                        //     lastFaultCablePos = null;
+                        //     lastFaultMarker = null; // 此时保留最后一个红点作为该区域终点
+                        // }
                     }
-                } else {
-                    // (可选) 如果你需要“断续”逻辑：
-                    // 当信号消失一段时间后，重置 lastFaultCablePos，
-                    // 这样下一次再检测到信号时，会视为一个新的独立破损区域的起点，而不会把两个很远的区域连起来。
-                    // 
-                    // if (signalLostTimer > 2000ms) { 
-                    //     lastFaultCablePos = null; 
-                    //     lastFaultMarker = null; // 此时保留最后一个红点作为该区域终点
-                    // }
-                }
 
-                // ✅✅✅ 修改：如果处于电缆跟踪模式，禁止绘制机器狗的蓝色轨迹
-                // 只有在【非手动绘制电缆】且【非自动跟踪】模式下，才绘制蓝色路径
-                if (!isCableTrackingMode && !isManualDrawingCable) {
-                    if (currentPos.distanceTo(lastTrailPos) > 0.05) {
-                        trailPoints.push(currentPos);
-                        lastTrailPos = currentPos;
-                        if (trailPoints.length > 3000) trailPoints.shift();
+                    // ✅✅✅ 修改：如果处于电缆跟踪模式，禁止绘制机器狗的蓝色轨迹
+                    // 只有在【非手动绘制电缆】且【非自动跟踪】模式下，才绘制蓝色路径
+                    if (!isCableTrackingMode && !isManualDrawingCable) {
+                        if (currentPos.distanceTo(lastTrailPos) > 0.05) {
+                            trailPoints.push(currentPos);
+                            lastTrailPos = currentPos;
+                            if (trailPoints.length > 3000) trailPoints.shift();
 
-                        if (trailPoints.length > 1) {
-                            if (currentTrailMesh) {
-                                trailGroup.remove(currentTrailMesh);
-                                currentTrailMesh.geometry.dispose();
-                                currentTrailMesh = null;
-                            }
-                            const visibleTrailPoints = liftPathDisplayPointsAboveGround(trailPoints, trailGroup.position.z);
-                            const curve = new THREE.CatmullRomCurve3(visibleTrailPoints);
-                            const tube = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
-                            currentTrailMesh = new THREE.Mesh(tube, trailMat);
-                            rememberPathGroundLiftState(currentTrailMesh, visibleTrailPoints);
-                            trailGroup.add(currentTrailMesh);
-                        }
-                    }
-                }
-
-                // =========================================================
-                // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
-                // =========================================================
-                // 增加判断条件：如果是手动绘制模式，则绕过信号特征检测，直接绘制
-                const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
-                const pipelinePrediction = window.g_pipelinePrediction || {};
-                let isFeaturePoint = false;
-
-                // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
-                if (sig === 0) {
-                    isFeaturePoint = true;
-                }
-                // 规则 2: 捕捉“跨越”时刻 (1 <-> 2)
-                else if ((lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1)) {
-                    isFeaturePoint = true;
-                    console.log("⚡ 捕捉到跨越点 (1 <-> 2)");
-                }
-                // 规则 3: 回归到“正上方” (Any -> 0)
-                else if (lastSignal !== 0 && sig === 0) {
-                    isFeaturePoint = true;
-                }
-
-                // 补点时不能直接记录机器狗中心点，否则小弧度直线段会被画成机器狗轨迹。
-                // 先用管线仪信号估计电缆相对机器狗的位置，再沿已知/预测电缆方向向前延伸。
-                const isCornerPredictionActive = !!(
-                    pipelinePrediction.cornerStrafeMode ||
-                    pipelinePrediction.cornerArea ||
-                    Number(pipelinePrediction.pathTurnDeg || 0) >= 24
-                );
-                const hasValidPipelineSignal = sig === 0 || sig === 1 || sig === 2;
-                const shouldDensifyCablePoint = isAutoTracking && isCornerPredictionActive && hasValidPipelineSignal;
-                const canGapFillCablePoint = isAutoTracking && hasValidPipelineSignal && !isFeaturePoint;
-
-                // =========================================================
-                // ✅✅✅ [修改] 电缆路径绘制逻辑 (兼容自动特征点与纯手动记录)
-                // =========================================================
-
-                // 触发条件 1：处于自动巡线模式，且检测到了管线仪特征点
-                const isAutoRecording = (isFeaturePoint || shouldDensifyCablePoint || canGapFillCablePoint) && isAutoTracking;
-
-                // 触发条件 2：用户开启了纯手动绘制模式
-                const isManualRecording = typeof isManualDrawingCable !== 'undefined' && isManualDrawingCable;
-
-                // 只要满足上述任意一种记录条件，且当前没有在执行跟踪或寻找任务
-                if ((isAutoRecording || isManualRecording) && !isCableTrackingMode && !isFaultFindingMode) {
-                    const autoRecordMode = isFeaturePoint ? "feature" : (shouldDensifyCablePoint ? "dense" : "gap");
-                    const candidateCablePt = isManualRecording && !isAutoRecording
-                        ? new THREE.Vector3(px, py, 0.08)
-                        : estimateCablePointFromRobotSignal(px, py, sig, pipelinePrediction, autoRecordMode);
-                    const dist = candidateCablePt.distanceTo(lastCablePos);
-                    const minCablePointDist = isFeaturePoint ? 0.1 : (shouldDensifyCablePoint ? 0.05 : 0.35);
-                    if (dist > minCablePointDist) {
-                        const cablePt = candidateCablePt;
-
-                        // 🛡️ 严格保留你原本的初始化方式，确保完美兼容你的“区间回溯绑定”逻辑
-                        cablePt.userData = {
-                            depth: null,
-                            source: isManualRecording && !isAutoRecording ? "manual" : autoRecordMode,
-                            signal: sig
-                        };
-
-                        cablePoints.push(cablePt);
-                        lastCablePos = cablePt;
-
-                        if (cablePoints.length > 2000) {
-                            cablePoints.shift();
-                            if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--;
-                        }
-
-                        if (cablePoints.length > 3) {
-                            if (currentCableMesh) {
-                                cableGroup.remove(currentCableMesh);
-                                currentCableMesh.geometry.dispose();
-                                currentCableMesh = null;
-                            }
-
-                            // 调用卡尔曼平滑 (你的原有代码完全不需要动)
-                            let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
-
-                            // 将原始点的深度属性同步给平滑后的显示点
-                            for (let i = 0; i < displayPoints.length; i++) {
-                                displayPoints[i].userData = {
-                                    depth: cablePoints[i].userData.depth,
-                                    source: cablePoints[i].userData.source,
-                                    signal: cablePoints[i].userData.signal
-                                };
-                            }
-
-                            window.savedCablePath = displayPoints;
-                            window.syncCablePathPrediction?.();
-
-                            // 绘制平滑曲线
-                            const visibleCablePoints = liftPathDisplayPointsAboveGround(displayPoints, cableGroup.position.z);
-                            const curve = new THREE.CatmullRomCurve3(visibleCablePoints, false, 'centripetal', 0.35);
-                            const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
-                            currentCableMesh = new THREE.Mesh(tube, cableMat);
-                            rememberPathGroundLiftState(currentCableMesh, visibleCablePoints);
-                            cableGroup.add(currentCableMesh);
-                        }
-                    }
-                }
-                lastSignal = sig;
-
-                // ==========================================
-                // 🌟 深度区间回溯绑定 (完全保留原有代码，不动)
-                // ==========================================
-                // ... (下方是你原本的 depth 绑定代码，直接原样保留即可)
-
-                // ==========================================
-                // 🌟 核心修改：接收到突变深度时，执行“区间回溯绑定”
-                // ==========================================
-                if (window.g_newDepthReceived !== null && window.g_newDepthReceived !== undefined) {
-                    let incomingDepth = window.g_newDepthReceived;
-                    window.g_newDepthReceived = null; // 消费掉该次深度数据，防止下一帧重复绑定
-
-                    if (cablePoints.length > 0) {
-                        // 1. 回溯绑定原始路径点 (从上一次游标位置，一直绑到当前最新位置)
-                        for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
-                            cablePoints[i].userData.depth = incomingDepth;
-                        }
-                        console.log(`📍 深度段落回溯绑定完成！区间: [${lastDepthUpdateIdx} ~ ${cablePoints.length - 1}], 深度值: ${incomingDepth}cm`);
-
-                        // 2. 同步更新已经卡尔曼平滑后的显示路径 (window.savedCablePath)
-                        // 以防用户恰好点中了平滑后的曲线段
-                        if (window.savedCablePath && window.savedCablePath.length === cablePoints.length) {
-                            for (let i = lastDepthUpdateIdx; i < window.savedCablePath.length; i++) {
-                                window.savedCablePath[i].userData.depth = incomingDepth;
+                            if (trailPoints.length > 1) {
+                                if (currentTrailMesh) {
+                                    trailGroup.remove(currentTrailMesh);
+                                    currentTrailMesh.geometry.dispose();
+                                    currentTrailMesh = null;
+                                }
+                                const visibleTrailPoints = liftPathDisplayPointsAboveGround(trailPoints, trailGroup.position.z);
+                                const curve = new THREE.CatmullRomCurve3(visibleTrailPoints);
+                                const tube = new THREE.TubeGeometry(curve, trailPoints.length * 3, 0.03, 6, false);
+                                currentTrailMesh = new THREE.Mesh(tube, trailMat);
+                                rememberPathGroundLiftState(currentTrailMesh, visibleTrailPoints);
+                                trailGroup.add(currentTrailMesh);
                             }
                         }
+                    }
 
-                        // 3. 更新游标！下一次上位机再发突变深度时，就会从这个位置开始往后绑
-                        lastDepthUpdateIdx = cablePoints.length;
+                    // =========================================================
+                    // ✅✅✅ [核心修改] 特征点提取 + 卡尔曼滤波平滑
+                    // =========================================================
+                    // 增加判断条件：如果是手动绘制模式，则绕过信号特征检测，直接绘制
+                    const sig = (typeof window.g_pipelineSignal !== 'undefined') ? window.g_pipelineSignal : -1;
+                    const pipelinePrediction = window.g_pipelinePrediction || {};
+                    let isFeaturePoint = false;
+
+                    // 规则 1: 捕捉“正上方”时刻 (Signal = 0)
+                    if (sig === 0) {
+                        isFeaturePoint = true;
+                    }
+                    // 规则 2: 捕捉“跨越”时刻 (1 <-> 2)
+                    else if ((lastSignal === 1 && sig === 2) || (lastSignal === 2 && sig === 1)) {
+                        isFeaturePoint = true;
+                        console.log("⚡ 捕捉到跨越点 (1 <-> 2)");
+                    }
+                    // 规则 3: 回归到“正上方” (Any -> 0)
+                    else if (lastSignal !== 0 && sig === 0) {
+                        isFeaturePoint = true;
+                    }
+
+                    // 补点时不能直接记录机器狗中心点，否则小弧度直线段会被画成机器狗轨迹。
+                    // 先用管线仪信号估计电缆相对机器狗的位置，再沿已知/预测电缆方向向前延伸。
+                    const isCornerPredictionActive = !!(
+                        pipelinePrediction.cornerStrafeMode ||
+                        pipelinePrediction.cornerArea ||
+                        Number(pipelinePrediction.pathTurnDeg || 0) >= 24
+                    );
+                    const hasValidPipelineSignal = sig === 0 || sig === 1 || sig === 2;
+                    const shouldDensifyCablePoint = isAutoTracking && isCornerPredictionActive && hasValidPipelineSignal;
+                    const canGapFillCablePoint = isAutoTracking && hasValidPipelineSignal && !isFeaturePoint;
+
+                    // =========================================================
+                    // ✅✅✅ [修改] 电缆路径绘制逻辑 (兼容自动特征点与纯手动记录)
+                    // =========================================================
+
+                    // 触发条件 1：处于自动巡线模式，且检测到了管线仪特征点
+                    const isAutoRecording = (isFeaturePoint || shouldDensifyCablePoint || canGapFillCablePoint) && isAutoTracking;
+
+                    // 触发条件 2：用户开启了纯手动绘制模式
+                    const isManualRecording = typeof isManualDrawingCable !== 'undefined' && isManualDrawingCable;
+
+                    // 只要满足上述任意一种记录条件，且当前没有在执行跟踪或寻找任务
+                    if ((isAutoRecording || isManualRecording) && !isCableTrackingMode && !isFaultFindingMode) {
+                        const autoRecordMode = isFeaturePoint ? "feature" : (shouldDensifyCablePoint ? "dense" : "gap");
+                        const candidateCablePt = isManualRecording && !isAutoRecording
+                            ? new THREE.Vector3(px, py, 0.08)
+                            : estimateCablePointFromRobotSignal(px, py, sig, pipelinePrediction, autoRecordMode);
+                        const dist = candidateCablePt.distanceTo(lastCablePos);
+                        const minCablePointDist = isFeaturePoint ? 0.1 : (shouldDensifyCablePoint ? 0.05 : 0.35);
+                        if (dist > minCablePointDist) {
+                            const cablePt = candidateCablePt;
+
+                            // 🛡️ 严格保留你原本的初始化方式，确保完美兼容你的“区间回溯绑定”逻辑
+                            cablePt.userData = {
+                                depth: null,
+                                source: isManualRecording && !isAutoRecording ? "manual" : autoRecordMode,
+                                signal: sig
+                            };
+
+                            cablePoints.push(cablePt);
+                            lastCablePos = cablePt;
+
+                            if (cablePoints.length > 2000) {
+                                cablePoints.shift();
+                                if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--;
+                            }
+
+                            if (cablePoints.length > 3) {
+                                if (currentCableMesh) {
+                                    cableGroup.remove(currentCableMesh);
+                                    currentCableMesh.geometry.dispose();
+                                    currentCableMesh = null;
+                                }
+
+                                // 调用卡尔曼平滑 (你的原有代码完全不需要动)
+                                let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
+
+                                // 将原始点的深度属性同步给平滑后的显示点
+                                for (let i = 0; i < displayPoints.length; i++) {
+                                    displayPoints[i].userData = {
+                                        depth: cablePoints[i].userData.depth,
+                                        source: cablePoints[i].userData.source,
+                                        signal: cablePoints[i].userData.signal
+                                    };
+                                }
+
+                                window.savedCablePath = displayPoints;
+                                window.syncCablePathPrediction?.();
+
+                                // 绘制平滑曲线
+                                const visibleCablePoints = liftPathDisplayPointsAboveGround(displayPoints, cableGroup.position.z);
+                                const curve = new THREE.CatmullRomCurve3(visibleCablePoints, false, 'centripetal', 0.35);
+                                const tube = new THREE.TubeGeometry(curve, displayPoints.length * 8, 0.03, 8, false);
+                                currentCableMesh = new THREE.Mesh(tube, cableMat);
+                                rememberPathGroundLiftState(currentCableMesh, visibleCablePoints);
+                                cableGroup.add(currentCableMesh);
+                            }
+                        }
+                    }
+                    lastSignal = sig;
+
+                    // ==========================================
+                    // 🌟 深度区间回溯绑定 (完全保留原有代码，不动)
+                    // ==========================================
+                    // ... (下方是你原本的 depth 绑定代码，直接原样保留即可)
+
+                    // ==========================================
+                    // 🌟 核心修改：接收到突变深度时，执行“区间回溯绑定”
+                    // ==========================================
+                    if (window.g_newDepthReceived !== null && window.g_newDepthReceived !== undefined) {
+                        let incomingDepth = window.g_newDepthReceived;
+                        window.g_newDepthReceived = null; // 消费掉该次深度数据，防止下一帧重复绑定
+
+                        if (cablePoints.length > 0) {
+                            // 1. 回溯绑定原始路径点 (从上一次游标位置，一直绑到当前最新位置)
+                            for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
+                                cablePoints[i].userData.depth = incomingDepth;
+                            }
+                            console.log(`📍 深度段落回溯绑定完成！区间: [${lastDepthUpdateIdx} ~ ${cablePoints.length - 1}], 深度值: ${incomingDepth}cm`);
+
+                            // 2. 同步更新已经卡尔曼平滑后的显示路径 (window.savedCablePath)
+                            // 以防用户恰好点中了平滑后的曲线段
+                            if (window.savedCablePath && window.savedCablePath.length === cablePoints.length) {
+                                for (let i = lastDepthUpdateIdx; i < window.savedCablePath.length; i++) {
+                                    window.savedCablePath[i].userData.depth = incomingDepth;
+                                }
+                            }
+
+                            // 3. 更新游标！下一次上位机再发突变深度时，就会从这个位置开始往后绑
+                            lastDepthUpdateIdx = cablePoints.length;
+                        }
                     }
                 }
-            }
             }
 
             if (!processScan) return result;
@@ -15310,6 +15708,10 @@
                         scanCol[d++] = b;
                     }
                 }
+
+                // 即使本帧因渲染节流未推入 GPU，也要立即更新规划器可读取的有效长度。
+                // 否则点数减少时，上一帧尾部残留点会继续被误判为当前障碍。
+                scanValidComponents = c;
 
                 // 👇 2. 新增：计算距离上次推入显存过了多少毫秒 (>60ms 即最高约 16 帧/秒)
                 const now = performance.now();
