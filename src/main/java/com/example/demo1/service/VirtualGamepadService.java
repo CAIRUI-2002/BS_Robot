@@ -65,7 +65,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private volatile long signalReversalEndTime = 0L;
 
     // 自动巡线参数，可由前端通过 setAutoSpeeds 动态修改
-    private volatile float autoForwardSpeed = 0.2f;
+    private volatile float autoForwardSpeed = 0.3f;
 
     // 普通左右跟线使用的固定偏航值，不再使用 S 型正弦摆动
     private volatile float normalTrackingYaw = 0.30f;
