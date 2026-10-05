@@ -1477,6 +1477,8 @@
         window.currentPcdMesh = null;
         window.currentPcdGroup = null;
         window.currentImportedInspectionMapGroup = null;
+        window.gprDataWorldGroup = null;
+        window.gprDepthDisplayScale = 1;
         window.gprHasInspectionMapLayerLoaded = false;
     }
 
@@ -3349,6 +3351,12 @@
         window.gprManualScanPickGroup = group;
     }
 
+    // 采集顺序视图仅镜像 WebGL 画面；点选时须把屏幕横坐标映回未镜像的相机坐标。
+    function getGprCanvasPointerNdcX(event, dom, rect = dom.getBoundingClientRect()) {
+        const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        return dom.dataset.gprMirroredView === "true" ? -ndcX : ndcX;
+    }
+
     function getSlamPointFromGprMouseEvent(event) {
         if (!window.gprRenderer || !window.gprCamera || typeof THREE === "undefined") return null;
 
@@ -3357,7 +3365,7 @@
         if (!rect.width || !rect.height) return null;
 
         const mouse = new THREE.Vector2(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            getGprCanvasPointerNdcX(event, dom, rect),
             -((event.clientY - rect.top) / rect.height) * 2 + 1
         );
 
@@ -4659,7 +4667,7 @@
 
         refreshCurrentMig2DCanvas();
         if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
-            render3DZigzagAll(gprResult, true);
+            render3DZigzagAll(gprResult);
         }
         setStatus("已清除当前 GPR 文件夹中的历史标注校准文件，当前显示已恢复为自动识别结果。", "success");
     }
@@ -4684,7 +4692,7 @@
     }
 
     function makeAutoMigAnnotationKey(blob) {
-        // detectBlobs 每次重新计算自动红圈，因此用中心和半径生成稳定 key 来“屏蔽”被手动删除的自动红圈。
+        // 用顶点中心和显示半径生成稳定 key，以便持久化“屏蔽”被手动删除的自动标注。
         return [
             Math.round(Number(blob.row) * 10) / 10,
             Math.round(Number(blob.col) * 10) / 10,
@@ -4705,12 +4713,40 @@
         };
     }
 
-    function getAutoMigAnnotationBlobs(seg, segIndex) {
+    function getAutoRawApexAnnotationBlobs(seg, segIndex) {
         const autoBlobs = [];
-        if (seg && seg.migratedData) {
+        if (seg && Array.isArray(seg.rawDetections)) {
             try {
                 const ignoredSet = getIgnoredAutoMigAnnotations(segIndex);
-                detectBlobs(seg.migratedData).forEach(blob => {
+                seg.rawDetections.forEach((detection, detectionIndex) => {
+                    if (detection.apexRow == null || detection.apexCol == null) return;
+                    const row = Number(detection.apexRow);
+                    const col = Number(detection.apexCol);
+                    if (!Number.isFinite(row) || !Number.isFinite(col)) return;
+
+                    const rows = seg.rawData?.length || 0;
+                    const cols = seg.rawData?.[0]?.length || 0;
+                    if (rows < 1 || cols < 1 || row < 0 || row >= rows || col < 0 || col >= cols) return;
+
+                    const width = Math.abs(Number(detection.x2) - Number(detection.x1));
+                    const height = Math.abs(Number(detection.y2) - Number(detection.y1));
+                    const finiteWidth = Number.isFinite(width) ? width : 0;
+                    const finiteHeight = Number.isFinite(height) ? height : 0;
+                    const radius = Math.max(
+                        CONFIG.minRadius + 1,
+                        Math.min(CONFIG.maxRadius - 1, Math.min(finiteWidth, finiteHeight) / 4 || CONFIG.minRadius + 1)
+                    );
+                    const blob = {
+                        row,
+                        col,
+                        radius,
+                        width: finiteWidth,
+                        height: finiteHeight,
+                        detectionIndex,
+                        confidence: Number(detection.confidence),
+                        apexScore: Number(detection.apexScore),
+                        apexMethod: detection.apexMethod || ""
+                    };
                     const autoKey = makeAutoMigAnnotationKey(blob);
                     if (!ignoredSet.has(autoKey)) {
                         autoBlobs.push({
@@ -4722,14 +4758,14 @@
                     }
                 });
             } catch (e) {
-                console.warn("自动识别红圈失败：", e);
+                console.warn("原始剖面波形顶点转换为三维标注失败：", e);
             }
         }
         return autoBlobs;
     }
 
     function getSegmentAnnotationBlobs(seg, segIndex, includeAuto = true) {
-        const autoBlobs = includeAuto ? getAutoMigAnnotationBlobs(seg, segIndex) : [];
+        const autoBlobs = includeAuto ? getAutoRawApexAnnotationBlobs(seg, segIndex) : [];
 
         const manualBlobs = getManualMigAnnotations(segIndex)
             .map((item, idx) => cloneManualMigAnnotation(item, idx))
@@ -4793,7 +4829,8 @@
 
         annotation3DGroups.forEach(g => g.visible = showAnnotation);
         if (window.gprSlicesGroup) {
-            window.gprSlicesGroup.visible = !showAnnotation;
+            // 原始剖面上的识别框和顶点始终可见；按钮只控制管线连接标注。
+            window.gprSlicesGroup.visible = true;
         }
     }
 
@@ -4867,7 +4904,7 @@
 
             // 结束标注后，立即重建 3D 红圈与相邻剖面管道连接。
             if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
-                render3DZigzagAll(gprResult, true);
+                render3DZigzagAll(gprResult);
                 saveGprAnnotationCalibration("manual-finish");
                 const totalManual = Array.from(manualMigAnnotationsBySegment.values()).reduce((sum, arr) => sum + arr.length, 0);
                 console.log("[GPR标注] 手动标注结束，当前手动红圈 " + totalManual + " 个");
@@ -4909,7 +4946,7 @@
         } else {
             refreshCurrentMig2DCanvas();
             if (gprResult && Array.isArray(gprResult.segments) && gprResult.segments.length) {
-                render3DZigzagAll(gprResult, true);
+                render3DZigzagAll(gprResult);
                 saveGprAnnotationCalibration("forced-pipe-finish");
                 console.log("[GPR标注] 倾斜管道标注结束，当前彩色圆圈 " + getTotalForcedPipeAnnotationCount() + " 个");
             }
@@ -5985,9 +6022,9 @@
                 // 控制 3D 管道、红圈连线的显示状态 (ON时显示)
                 annotation3DGroups.forEach(g => g.visible = showAnnotation);
 
-                // ✅ 新增：控制雷达二维剖面的显示状态 (ON时隐藏，OFF时显示)
+                // 原始三维剖面及其识别框/顶点始终显示；按钮只切换红圈与管线连接。
                 if (window.gprSlicesGroup) {
-                    window.gprSlicesGroup.visible = !showAnnotation;
+                    window.gprSlicesGroup.visible = true;
                 }
             });
         }
@@ -6810,6 +6847,375 @@
         return rawU.map(u => ((u - uMin) / span) * lineLength);
     }
 
+    function hasActiveGpsSlamTransform() {
+        return !!(
+            window.geoTransform ||
+            (window.isGpsCalibrated && window.gpsAnchor && window.slamAnchor)
+        );
+    }
+
+    function hasUsableRtkSegmentGeometry(seg, mat) {
+        const geo = seg?.geometry;
+        const cols = mat?.[0]?.length || 0;
+        if (!geo?.rtkPositioned || cols < 2) return false;
+        const localX = geo.traceX;
+        const localY = geo.traceY;
+        return Array.isArray(localX) && Array.isArray(localY) &&
+            localX.length === cols && localY.length === cols &&
+            localX.every(v => Number.isFinite(Number(v))) &&
+            localY.every(v => Number.isFinite(Number(v)));
+    }
+
+    function medianGprNumber(values) {
+        const sorted = (values || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+        if (!sorted.length) return NaN;
+        const middle = Math.floor(sorted.length / 2);
+        return sorted.length % 2
+            ? sorted[middle]
+            : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+
+    function fitGprRtkLine(samples) {
+        if (!Array.isArray(samples) || samples.length < 2) return null;
+        const centerX = samples.reduce((sum, item) => sum + item.x, 0) / samples.length;
+        const centerY = samples.reduce((sum, item) => sum + item.y, 0) / samples.length;
+        let covarianceXX = 0;
+        let covarianceXY = 0;
+        let covarianceYY = 0;
+        samples.forEach(item => {
+            const dx = item.x - centerX;
+            const dy = item.y - centerY;
+            covarianceXX += dx * dx;
+            covarianceXY += dx * dy;
+            covarianceYY += dy * dy;
+        });
+        if (covarianceXX + covarianceYY <= 1e-12) return null;
+        const angle = 0.5 * Math.atan2(2 * covarianceXY, covarianceXX - covarianceYY);
+        return { centerX, centerY, directionX: Math.cos(angle), directionY: Math.sin(angle) };
+    }
+
+    /**
+     * RTK只拟合整张剖面的中心和方向。返回的每一道坐标严格按DZT道间距均匀排列，
+     * 因此单个RTK点的横向抖动不会再把剖面网格拉弯。
+     */
+    function fitRigidGprProfileFromRtk(sampleX, sampleY, traceCount, traceSpacingM) {
+        const samples = [];
+        for (let i = 0; i < Math.min(sampleX?.length || 0, sampleY?.length || 0); i++) {
+            const x = Number(sampleX[i]);
+            const y = Number(sampleY[i]);
+            if (Number.isFinite(x) && Number.isFinite(y)) samples.push({ order: i, x, y });
+        }
+        if (samples.length < 2 || traceCount < 2 || !(traceSpacingM > 0)) return null;
+
+        const initial = fitGprRtkLine(samples);
+        if (!initial) return null;
+        const residualFor = (sample, line) => Math.abs(
+            -line.directionY * (sample.x - line.centerX) +
+            line.directionX * (sample.y - line.centerY)
+        );
+        const residuals = samples.map(sample => residualFor(sample, initial));
+        const residualMedian = medianGprNumber(residuals);
+        const mad = medianGprNumber(residuals.map(value => Math.abs(value - residualMedian)));
+        const threshold = residualMedian + Math.max(0.05, 4 * 1.4826 * (Number.isFinite(mad) ? mad : 0));
+        let inliers = samples.filter((sample, index) => residuals[index] <= threshold);
+        if (inliers.length < Math.max(2, Math.ceil(samples.length * 0.5))) inliers = samples;
+
+        const fitted = fitGprRtkLine(inliers);
+        if (!fitted) return null;
+        let directionX = fitted.directionX;
+        let directionY = fitted.directionY;
+
+        const windowSize = Math.max(1, Math.min(10, Math.floor(samples.length / 10) || 1));
+        const first = samples.slice(0, windowSize);
+        const last = samples.slice(-windowSize);
+        const orderedX = medianGprNumber(last.map(item => item.x)) - medianGprNumber(first.map(item => item.x));
+        const orderedY = medianGprNumber(last.map(item => item.y)) - medianGprNumber(first.map(item => item.y));
+        if (directionX * orderedX + directionY * orderedY < 0) {
+            directionX = -directionX;
+            directionY = -directionY;
+        }
+
+        const centerColumn = (traceCount - 1) / 2;
+        const traceX = new Array(traceCount);
+        const traceY = new Array(traceCount);
+        for (let c = 0; c < traceCount; c++) {
+            const along = (c - centerColumn) * traceSpacingM;
+            traceX[c] = fitted.centerX + along * directionX;
+            traceY[c] = fitted.centerY + along * directionY;
+        }
+        const squaredResidualSum = inliers.reduce((sum, sample) => {
+            const residual = Math.abs(
+                -directionY * (sample.x - fitted.centerX) +
+                directionX * (sample.y - fitted.centerY)
+            );
+            return sum + residual * residual;
+        }, 0);
+
+        return {
+            traceX,
+            traceY,
+            phiRad: Math.atan2(directionY, directionX),
+            length: (traceCount - 1) * traceSpacingM,
+            inlierCount: inliers.length,
+            sampleCount: samples.length,
+            rmseM: Math.sqrt(squaredResidualSum / inliers.length)
+        };
+    }
+
+    /**
+     * 计算“原始二维矩阵比例”所需的深度显示倍率。
+     * 水平方向每列按DZT道间距显示；纵向每行乘以该倍率后，单个矩阵单元近似为正方形。
+     * 这只是显示倍率，Depth刻度和弹窗仍换算回真实米数。
+     */
+    function computeGprMatrixAspectDepthScale(segments, geometries) {
+        const scales = [];
+        (Array.isArray(segments) ? segments : []).forEach((segment, index) => {
+            const matrix = segment?.rawData;
+            const geometry = geometries?.[index];
+            const rows = matrix?.length || 0;
+            const cols = matrix?.[0]?.length || 0;
+            const zAxis = geometry?.zAxis;
+            if (rows < 2 || cols < 2 || !Array.isArray(zAxis) || zAxis.length !== rows) return;
+
+            const depthSpan = Math.abs(Number(zAxis[rows - 1]) - Number(zAxis[0]));
+            const depthStep = depthSpan / (rows - 1);
+            let horizontalStep = Number(geometry?.dztTraceSpacingM);
+            if (!(horizontalStep > 0)) {
+                const uAxis = geometry?.uAxis;
+                if (Array.isArray(uAxis) && uAxis.length === cols) {
+                    horizontalStep = Math.abs(Number(uAxis[cols - 1]) - Number(uAxis[0])) / (cols - 1);
+                }
+            }
+
+            const scale = horizontalStep / depthStep;
+            if (Number.isFinite(scale) && scale >= 0.25 && scale <= 4) scales.push(scale);
+        });
+
+        const scale = medianGprNumber(scales);
+        return Number.isFinite(scale) ? scale : 1;
+    }
+
+    /**
+     * 将后端返回的RTK测点拟合为整张剖面的刚体位姿。
+     * 已加载GPS/SLAM标定时先映射到全局地图再拟合；否则使用后端局部米制拟合结果。
+     */
+    function createRtkSegmentGeometry(seg, mat) {
+        if (!hasUsableRtkSegmentGeometry(seg, mat)) return null;
+
+        const source = seg.geometry || {};
+        const rows = mat.length;
+        const cols = mat[0].length;
+        let rtkSampleX = source.traceX.map(Number);
+        let rtkSampleY = source.traceY.map(Number);
+        let projectedToSlam = false;
+
+        const latitude = source.traceLatitudeDeg;
+        const longitude = source.traceLongitudeDeg;
+        if (
+            hasActiveGpsSlamTransform() &&
+            Array.isArray(latitude) && Array.isArray(longitude) &&
+            latitude.length === cols && longitude.length === cols &&
+            typeof window.gpsToSlam === "function"
+        ) {
+            const mappedX = [];
+            const mappedY = [];
+            let mappingValid = true;
+            for (let c = 0; c < cols; c++) {
+                const slam = window.gpsToSlam(Number(latitude[c]), Number(longitude[c]));
+                if (!slam || !Number.isFinite(Number(slam.x)) || !Number.isFinite(Number(slam.y))) {
+                    mappingValid = false;
+                    break;
+                }
+                const point = slamPointToGprVector({ x: Number(slam.x), y: Number(slam.y), z: 0 });
+                mappedX.push(point.x);
+                mappedY.push(point.z);
+            }
+            if (mappingValid && mappedX.length === cols) {
+                rtkSampleX = mappedX;
+                rtkSampleY = mappedY;
+                projectedToSlam = true;
+            }
+        }
+
+        const configuredSpacing = Number(source.dztTraceSpacingM);
+        const traceSpacingM = Number.isFinite(configuredSpacing) && configuredSpacing > 0
+            ? configuredSpacing
+            : 0.01;
+        const rigidFit = fitRigidGprProfileFromRtk(rtkSampleX, rtkSampleY, cols, traceSpacingM);
+        if (!rigidFit || rigidFit.length <= 1e-6) return null;
+        const uAxis = Array.from({ length: cols }, (_, c) => c * traceSpacingM);
+        const backendFitRmse = Number(source.rtkFitRmseM);
+        const fitRmseM = projectedToSlam || !Number.isFinite(backendFitRmse)
+            ? rigidFit.rmseM
+            : backendFitRmse;
+
+        return {
+            ...source,
+            startX: rigidFit.traceX[0],
+            startY: rigidFit.traceY[0],
+            phiRad: rigidFit.phiRad,
+            length: rigidFit.length,
+            uAxis,
+            zAxis: cloneNumberArray(source.zAxis, rows, 0.02),
+            traceX: rigidFit.traceX,
+            traceY: rigidFit.traceY,
+            _fromRtk: true,
+            _rtkProjectedToSlam: projectedToSlam,
+            _rtkRigidProfile: true,
+            _rtkFitInlierCount: rigidFit.inlierCount,
+            _rtkFitSampleCount: rigidFit.sampleCount,
+            _rtkFitRmseM: fitRmseM
+        };
+    }
+
+    function getGprTraceHorizontalPoint(geometry, column, cols) {
+        const c = Math.min(Math.max(0, Math.round(Number(column) || 0)), Math.max(0, cols - 1));
+        const traceX = geometry?.traceX;
+        const traceY = geometry?.traceY;
+        if (
+            Array.isArray(traceX) && Array.isArray(traceY) &&
+            traceX.length === cols && traceY.length === cols &&
+            Number.isFinite(Number(traceX[c])) && Number.isFinite(Number(traceY[c]))
+        ) {
+            let left = Math.max(0, c - 1);
+            let right = Math.min(cols - 1, c + 1);
+            while (left > 0 && Math.hypot(
+                Number(traceX[right]) - Number(traceX[left]),
+                Number(traceY[right]) - Number(traceY[left])
+            ) < 1e-8) left--;
+            while (right < cols - 1 && Math.hypot(
+                Number(traceX[right]) - Number(traceX[left]),
+                Number(traceY[right]) - Number(traceY[left])
+            ) < 1e-8) right++;
+            const phi = Math.atan2(
+                Number(traceY[right]) - Number(traceY[left]),
+                Number(traceX[right]) - Number(traceX[left])
+            );
+            return { x: Number(traceX[c]), z: Number(traceY[c]), phi };
+        }
+
+        const uAxis = (Array.isArray(geometry?.uAxis) && geometry.uAxis.length === cols)
+            ? geometry.uAxis
+            : Array.from({ length: cols }, (_, i) => i);
+        const phi = Number(geometry?.phiRad) || 0;
+        const u = Number(uAxis[c]) || 0;
+        const startX = Number(geometry?.startX) || 0;
+        const startY = Number(geometry?.startY) || 0;
+        return {
+            x: startX + u * Math.cos(phi),
+            z: startY + u * Math.sin(phi),
+            phi
+        };
+    }
+
+    function interpolateGprAxisValue(axis, index, expectedLength, fallbackStep) {
+        const safeIndex = Math.max(0, Math.min(expectedLength - 1, Number(index) || 0));
+        if (!Array.isArray(axis) || axis.length !== expectedLength) return safeIndex * fallbackStep;
+        const lower = Math.floor(safeIndex);
+        const upper = Math.min(expectedLength - 1, Math.ceil(safeIndex));
+        const fraction = safeIndex - lower;
+        const lowerValue = Number(axis[lower]);
+        const upperValue = Number(axis[upper]);
+        if (!Number.isFinite(lowerValue) || !Number.isFinite(upperValue)) return safeIndex * fallbackStep;
+        return lowerValue + fraction * (upperValue - lowerValue);
+    }
+
+    function getGprProfileWorldPoint(geometry, column, row, rows, cols, groundY, normalOffset = 0.006) {
+        const safeColumn = Math.max(0, Math.min(cols - 1, Number(column) || 0));
+        const leftColumn = Math.floor(safeColumn);
+        const rightColumn = Math.min(cols - 1, Math.ceil(safeColumn));
+        const fraction = safeColumn - leftColumn;
+        const left = getGprTraceHorizontalPoint(geometry, leftColumn, cols);
+        const right = getGprTraceHorizontalPoint(geometry, rightColumn, cols);
+        const phi = Number.isFinite(Number(geometry?.phiRad)) ? Number(geometry.phiRad) : left.phi;
+        const depth = interpolateGprAxisValue(geometry?.zAxis, row, rows, 0.02);
+        const x = left.x + fraction * (right.x - left.x) - Math.sin(phi) * normalOffset;
+        const z = left.z + fraction * (right.z - left.z) + Math.cos(phi) * normalOffset;
+        return new THREE.Vector3(x, groundY - depth, z);
+    }
+
+    /** 在原始剖面曲面上直接绘制YOLO识别框和波形顶点。 */
+    function createGprRawDetectionOverlay(seg, geometry, groundY) {
+        const group = new THREE.Group();
+        group.name = "GPR原始剖面识别框与顶点";
+        const matrix = seg?.rawData;
+        const detections = Array.isArray(seg?.rawDetections) ? seg.rawDetections : [];
+        const rows = matrix?.length || 0;
+        const cols = matrix?.[0]?.length || 0;
+        if (rows < 1 || cols < 1 || !detections.length) return group;
+
+        const boxMaterial = new THREE.LineBasicMaterial({
+            color: 0xff2b2b,
+            // 使用正常深度测试：后方剖面的识别框应被前方剖面遮挡。
+            depthTest: true,
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.95
+        });
+        const profileLength = Number(geometry?.length) || ((cols - 1) * 0.01);
+        const markerSize = Math.max(0.018, Math.min(0.05, profileLength * 0.008));
+
+        detections.forEach((detection, detectionIndex) => {
+            const x1 = Math.max(0, Math.min(cols - 1, Number(detection.x1)));
+            const x2 = Math.max(0, Math.min(cols - 1, Number(detection.x2)));
+            const y1 = Math.max(0, Math.min(rows - 1, Number(detection.y1)));
+            const y2 = Math.max(0, Math.min(rows - 1, Number(detection.y2)));
+            if (![x1, x2, y1, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return;
+
+            const boxPoints = [
+                getGprProfileWorldPoint(geometry, x1, y1, rows, cols, groundY),
+                getGprProfileWorldPoint(geometry, x2, y1, rows, cols, groundY),
+                getGprProfileWorldPoint(geometry, x2, y2, rows, cols, groundY),
+                getGprProfileWorldPoint(geometry, x1, y2, rows, cols, groundY)
+            ];
+            const box = new THREE.LineLoop(
+                new THREE.BufferGeometry().setFromPoints(boxPoints),
+                boxMaterial
+            );
+            box.renderOrder = 20;
+            box.userData.gprDetectionIndex = detectionIndex;
+            group.add(box);
+
+            if (detection.apexCol == null || detection.apexRow == null) return;
+            const apexCol = Number(detection.apexCol);
+            const apexRow = Number(detection.apexRow);
+            if (!Number.isFinite(apexCol) || !Number.isFinite(apexRow)) return;
+
+            const center = getGprProfileWorldPoint(geometry, apexCol, apexRow, rows, cols, groundY, 0.009);
+            const phi = Number(geometry?.phiRad) || 0;
+            const tangent = new THREE.Vector3(Math.cos(phi), 0, Math.sin(phi));
+            const vertical = new THREE.Vector3(0, 1, 0);
+            const apexColor = detection.apexMethod === "singleWing" ? 0xffd64a : 0x00ffff;
+            const crossMaterial = new THREE.LineBasicMaterial({
+                color: apexColor,
+                depthTest: true,
+                depthWrite: false
+            });
+            const cross = new THREE.LineSegments(
+                new THREE.BufferGeometry().setFromPoints([
+                    center.clone().addScaledVector(tangent, -markerSize),
+                    center.clone().addScaledVector(tangent, markerSize),
+                    center.clone().addScaledVector(vertical, -markerSize),
+                    center.clone().addScaledVector(vertical, markerSize)
+                ]),
+                crossMaterial
+            );
+            cross.renderOrder = 21;
+            group.add(cross);
+
+            const vertex = new THREE.Mesh(
+                new THREE.SphereGeometry(markerSize * 0.28, 10, 10),
+                new THREE.MeshBasicMaterial({ color: apexColor, depthTest: true, depthWrite: false })
+            );
+            vertex.position.copy(center);
+            vertex.renderOrder = 22;
+            vertex.userData.gprDetectionIndex = detectionIndex;
+            group.add(vertex);
+        });
+
+        return group;
+    }
+
     function createPlannedSegmentGeometry(seg, segIndex, mat) {
         if (!hasUsableGprScanPlanForFusion()) return null;
 
@@ -6838,6 +7244,8 @@
             phiRad: phiRad,
             uAxis: rescaleUAxisToLineLength(srcGeo.uAxis, cols, lineLength),
             zAxis: cloneNumberArray(srcGeo.zAxis, rows, 0.02),
+            traceX: null,
+            traceY: null,
             _fromPlannedScanPath: true,
             _plannedLegIndex: segIndex,
             _plannedLegLength: lineLength
@@ -6845,8 +7253,8 @@
     }
 
     function getLoadedSurfaceCablePathForGprAlignment() {
-        // 没有扫描路径融合时，GPR 后端局部坐标尚未落到点云地图世界坐标，不能安全吸附。
-        if (!hasUsableGprScanPlanForFusion()) return [];
+        // 规划路径或RTK经GPS/SLAM标定投影到地图后，才允许做地表电缆路径校正。
+        if (!hasUsableGprScanPlanForFusion() && !window.gprRtkProjectedToSlamForCurrentRender) return [];
 
         let plainPath = [];
 
@@ -7380,21 +7788,35 @@
 
         // 初次展示由 renderGprResults 统一记录完成日志，避免 showSegment 重复写入。
         showSegment(0, false);
-        render3DZigzagAll(result, true);
+        render3DZigzagAll(result);
 
         const totalYoloDetections = result.segments.reduce(
             (sum, seg) => sum + (Array.isArray(seg.rawDetections) ? seg.rawDetections.length : 0),
             0
         );
+        const totalLocatedApexes = result.segments.reduce(
+            (sum, seg) => sum + (Array.isArray(seg.rawDetections)
+                ? seg.rawDetections.filter(detection =>
+                    detection.apexCol != null && detection.apexRow != null &&
+                    Number.isFinite(Number(detection.apexCol)) && Number.isFinite(Number(detection.apexRow))
+                ).length
+                : 0),
+            0
+        );
+        const placementSummary = window.gprUsingRtkLayoutInCurrentRender
+            ? "剖面内部按DZT固定道间距拼接，RTK仅校准整张剖面的位置和方向"
+            : "剖面内部按DZT固定道间距拼接";
+        const sourceSummary = "三维视图已使用原始二维剖面，显示 " + totalYoloDetections +
+            " 个识别框和 " + totalLocatedApexes + " 个有效波形顶点；" + placementSummary;
 
         if (calibrationLoadInfo && calibrationLoadInfo.reason === "signature-mismatch") {
             setStatus(
-                "处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线。历史校准与当前剖面不一致，未加载该校准。",
+                "处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线；" + sourceSummary + "。历史校准与当前剖面不一致，未加载该校准。",
                 "error"
             );
         } else {
-            setStatus("处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线。", "success");
-            addSystemMessage("地下环境渲染及 YOLO 识别完成，共标注 " + totalYoloDetections + " 个目标。", "success");
+            setStatus("处理完成，YOLO 共识别到 " + totalYoloDetections + " 个管道双曲线；" + sourceSummary + "。", "success");
+            addSystemMessage("地下环境已用原始剖面重建：识别 " + totalYoloDetections + " 个目标，定位 " + totalLocatedApexes + " 个有效波形顶点。", "success");
         }
     }
 
@@ -7415,8 +7837,11 @@
 
         if (showStatus) {
             const detectionCount = Array.isArray(seg.rawDetections) ? seg.rawDetections.length : 0;
+            const apexCount = Array.isArray(seg.rawDetections)
+                ? seg.rawDetections.filter(detection => detection.apexCol != null && detection.apexRow != null).length
+                : 0;
             setStatus(
-                "处理完成。当前显示第 " + (index + 1) + " 段 B 扫结果，YOLO 识别到 " + detectionCount + " 个管道双曲线。",
+                "处理完成。当前显示第 " + (index + 1) + " 段 B 扫结果，YOLO 识别到 " + detectionCount + " 个管道双曲线，定位到 " + apexCount + " 个波形顶点。",
                 "success"
             );
         }
@@ -7770,14 +8195,25 @@
 
         selectedGprPipeObject = obj;
         const centerline = obj.userData.gprCenterlinePoints || [];
-        const closest = findClosestPointOnPolyline(intersection.point, centerline);
+        // 管线中心点以GPR局部世界坐标保存；原始矩阵比例模式会缩放整个GPR组的Y轴，
+        // 因此点选时先应用该组矩阵，再与射线命中的真实世界坐标比较。
+        const gprWorld = window.gprDataWorldGroup;
+        let centerlineForPick = centerline;
+        if (gprWorld && gprWorld.scale && Math.abs(Number(gprWorld.scale.y) - 1) > 1e-9) {
+            gprWorld.updateMatrixWorld(true);
+            centerlineForPick = centerline.map(point => point.clone().applyMatrix4(gprWorld.matrixWorld));
+        }
+        const closest = findClosestPointOnPolyline(intersection.point, centerlineForPick);
         const slam = gprWorldPointToSlam(closest);
         // GPR 剖面/管道现在会按点云地面高度 groundY 对齐，
         // 因此深度不能再简单使用 -Y，而要以当前地下环境顶面作为 0m 基准。
         const groundY = Number.isFinite(Number(window.gprGroundYForDepthReference))
             ? Number(window.gprGroundYForDepthReference)
             : 0;
-        const depth = Math.max(0, groundY - closest.y);
+        const depthDisplayScale = Number.isFinite(Number(window.gprDepthDisplayScale)) && Number(window.gprDepthDisplayScale) > 0
+            ? Number(window.gprDepthDisplayScale)
+            : 1;
+        const depth = Math.max(0, (groundY - closest.y) / depthDisplayScale);
 
         let gpsText = "GPS未标定";
         if (typeof window.slamToGps === "function") {
@@ -7825,7 +8261,8 @@
         const domRect = dom.getBoundingClientRect();
         const parent = popup.offsetParent || popup.parentElement || document.body;
         const parentRect = parent.getBoundingClientRect();
-        const x = domRect.left + (vector.x * 0.5 + 0.5) * domRect.width - parentRect.left;
+        const screenX = dom.dataset.gprMirroredView === "true" ? -vector.x : vector.x;
+        const x = domRect.left + (screenX * 0.5 + 0.5) * domRect.width - parentRect.left;
         const y = domRect.top + (-vector.y * 0.5 + 0.5) * domRect.height - parentRect.top;
 
         const margin = 10;
@@ -7845,7 +8282,7 @@
         if (!rect.width || !rect.height) return null;
 
         const mouse = new THREE.Vector2(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            getGprCanvasPointerNdcX(event, dom, rect),
             -((event.clientY - rect.top) / rect.height) * 2 + 1
         );
 
@@ -7901,8 +8338,9 @@
         return showGprPipeInfoPopupFromHit(hit);
     }
 
-    // Z 字型三维拼接
-    function render3DZigzagAll(result, useMigrated) {
+    // 三维拼接固定使用完成波形识别和顶点定位的原始二维剖面；
+    // 空间位置以同名CSV逐道RTK为优先，规划Z字路径和后端旧几何作为回退。
+    function render3DZigzagAll(result) {
         const container = $("threeContainer");
         if (!container) return;
 
@@ -7915,7 +8353,13 @@
         const segments = result.segments || [];
         if (!segments.length) return;
 
-        const usePlannedLayout = hasUsableGprScanPlanForFusion();
+        const hasRtkLayout = segments.some(seg => {
+            return hasUsableRtkSegmentGeometry(seg, seg.rawData);
+        });
+        // RTK是实测位置，优先级高于人工规划的Z字路径；只有没有可用RTK时才走旧逻辑。
+        const usePlannedLayout = !hasRtkLayout && hasUsableGprScanPlanForFusion();
+        window.gprUsingRtkLayoutInCurrentRender = hasRtkLayout;
+        window.gprRtkProjectedToSlamForCurrentRender = hasRtkLayout && hasActiveGpsSlamTransform();
         const plannedLegCount = getGprPlanLegCount();
         if (usePlannedLayout && plannedLegCount !== segments.length) {
             console.warn(`⚠️ GPR剖面数量(${segments.length})与规划Z字路径线段数量(${plannedLegCount})不一致，超出部分将保持后端原始geometry。`);
@@ -7942,9 +8386,12 @@
         window.currentPcdMesh = null;
         window.currentPcdGroup = null;
         window.currentImportedInspectionMapGroup = null;
+        window.gprDataWorldGroup = null;
+        window.gprDepthDisplayScale = 1;
         // GPR 处理会重建 WebGL 场景，旧的规划线对象已经不属于当前 scene。
         // 先清空引用，避免后续隐藏规划线时误处理旧场景对象。
         window.gprScanPlanGroup = null;
+        window.gprZPathLine = null;
         // 注意：不要在这里清空 gprHasInspectionMapLayerLoaded。
         // 如果本次处理前已经加载过当前点云地图，下面会在新场景中自动重新加载并融合显示。
         window.gprCamera = null;
@@ -7953,11 +8400,15 @@
         // 记录每个剖面的标注圆心和半径，用于后续用圆柱连接
         const segmentAnnoCenters = [];
         const allCenters = [];
+        const renderedSegmentGeometries = [];
+        let rtkPositionedSegmentCount = 0;
+        let rtkProjectedSegmentCount = 0;
+        const rtkFitRmseValues = [];
         let globalCenterId = 0;
 
         // 1. 使用全部剖面的 95.5% 分位数统一色标，使浅层抑制前后的中层对比度保持稳定。
         const displayMatrices = segments
-            .map(seg => useMigrated ? seg.migratedData : seg.rawData)
+            .map(seg => seg.rawData)
             .filter(Boolean);
         const cLimit = computeRobustGprAbsLimit(displayMatrices);
         let vMin = -cLimit;  // 注意这里是用 let，因为后面在 buildSegmentMesh 会作为参数传入
@@ -7992,12 +8443,13 @@
         // 所有剖面和路径统一放在 world 组里
         const world = new THREE.Group();
         scene.add(world);
+        window.gprDataWorldGroup = world;
+        window.gprDepthDisplayScale = 1;
 
         // ✅ 新增：创建一个专门用于存放雷达二维剖面的分组，方便一键隐藏
         window.gprSlicesGroup = new THREE.Group();
-        // ✅ 修复：render3DZigzagAll 会重建 gprSlicesGroup，默认 visible=true。
-        // 当“显示标注”为 ON 时，重建后必须立刻继续隐藏剖面，只显示红圈/管道连接。
-        window.gprSlicesGroup.visible = !showAnnotation;
+        // 原始剖面、识别框和顶点始终保留；“显示标注”只控制红圈和管线连接。
+        window.gprSlicesGroup.visible = true;
         world.add(window.gprSlicesGroup);
 
         // 3. 计算几何包围盒 + 最大深度（单位：m）
@@ -8024,12 +8476,23 @@
         );
         console.log("✅ GPR地下环境地面高度基准 groundY =", Number(gprGroundY.toFixed(4)));
 
-        // 3.1 逐段构建 Z 字平面
+        // 3.1 逐段构建剖面：DZT固定道间距成直线，RTK只校准整张剖面的中心和方向。
         segments.forEach((seg, segIndex) => {
-            const mat = useMigrated ? seg.migratedData : seg.rawData;
-            const plannedGeo = createPlannedSegmentGeometry(seg, segIndex, mat);
-            const geo = plannedGeo || seg.geometry || {};
+            const mat = seg.rawData;
+            const rtkGeo = createRtkSegmentGeometry(seg, mat);
+            const plannedGeo = (!rtkGeo && usePlannedLayout)
+                ? createPlannedSegmentGeometry(seg, segIndex, mat)
+                : null;
+            const geo = rtkGeo || plannedGeo || seg.geometry || {};
             if (!mat || !geo) return;
+            renderedSegmentGeometries[segIndex] = geo;
+            if (rtkGeo) {
+                rtkPositionedSegmentCount++;
+                if (rtkGeo._rtkProjectedToSlam) rtkProjectedSegmentCount++;
+                if (Number.isFinite(Number(rtkGeo._rtkFitRmseM))) {
+                    rtkFitRmseValues.push(Number(rtkGeo._rtkFitRmseM));
+                }
+            }
 
             // 记录该段最大深度
             if (geo.zAxis && geo.zAxis.length > 0) {
@@ -8040,9 +8503,13 @@
             const mesh = buildSegmentMesh(mat, geo, vMin, vMax, bounds, gprGroundY);
             // ✅ 修改：将切片网格添加到我们的专属分组中
             window.gprSlicesGroup.add(mesh);
+            const rawDetectionOverlay = createGprRawDetectionOverlay(seg, geo, gprGroundY);
+            if (rawDetectionOverlay.children.length > 0) {
+                window.gprSlicesGroup.add(rawDetectionOverlay);
+            }
 
             // ✅ 3D 标注圆环 + 记录圆心和半径
-            if (useMigrated && seg.migratedData) {
+            if (seg.rawData) {
                 const normalBlobs = getSegmentAnnotationBlobs(seg, segIndex, true).map(blob => ({
                     ...blob,
                     linkMode: "normal",
@@ -8058,14 +8525,8 @@
                 const blobs = normalBlobs.concat(forcedBlobs);
                 const annoGroup = new THREE.Group();
 
-                const phi = geo.phiRad || 0.0;
-                const startX = geo.startX || 0.0;
-                const startY = geo.startY || 0.0;
-                const cosPhi = Math.cos(phi);
-                const sinPhi = Math.sin(phi);
-
-                const rows = seg.migratedData.length;
-                const cols = seg.migratedData[0].length;
+                const rows = seg.rawData.length;
+                const cols = seg.rawData[0].length;
 
                 // 1. 获取或计算坐标轴数据
                 const zAxis = (geo.zAxis && geo.zAxis.length === rows)
@@ -8094,10 +8555,9 @@
                     const depth = zAxis[rIdx];   // z 轴上的物理坐标 (m, down)
 
                     const cIdx = Math.min(Math.max(0, Math.round(blob.col)), cols - 1);
-                    const uVal = uAxis[cIdx];
-
-                    const worldX = startX + uVal * cosPhi;
-                    const worldZ = startY + uVal * sinPhi; // 注意：这里在 addAxes 里被解释为 y(m)
+                    const horizontal = getGprTraceHorizontalPoint(geo, cIdx, cols);
+                    const worldX = horizontal.x;
+                    const worldZ = horizontal.z;
                     const worldY = gprGroundY - depth;     // 以点云地面 groundY 为 Depth=0，深度向下为负
 
                     // --- B. 半径动态计算 ---
@@ -8115,7 +8575,7 @@
 
                     // --- C. 姿态与定位 ---
                     ring.position.set(worldX, worldY, worldZ);
-                    ring.rotation.y = -phi;
+                    ring.rotation.y = -horizontal.phi;
 
                     annoGroup.add(ring);
 
@@ -8534,49 +8994,111 @@
             selectBestGprPipeCableAlignment([]);
         }
 
-        // 3.3 路径折线（放在底部）
-        const plannedPathPoints = getPlannedGprPathBottomPoints(maxDepth, gprGroundY);
-        const bottomPathPoints = [];
+        // 3.3 路径折线（放在底部）。RTK测线分别绘制，避免在相邻测线之间制造虚假的直线连接。
+        const pathGroup = new THREE.Group();
+        const pathMat = new THREE.LineBasicMaterial({ color: 0xffffff });
 
-        if (plannedPathPoints && plannedPathPoints.length >= 2) {
-            bottomPathPoints.push(...plannedPathPoints);
-        } else if (Array.isArray(result.pathX) && Array.isArray(result.pathY) &&
-            result.pathX.length === result.pathY.length) {
+        if (rtkPositionedSegmentCount > 0) {
+            renderedSegmentGeometries.forEach(geo => {
+                if (!geo?._fromRtk || !Array.isArray(geo.traceX) || !Array.isArray(geo.traceY)) return;
+                const points = [];
+                for (let c = 0; c < Math.min(geo.traceX.length, geo.traceY.length); c++) {
+                    const x = Number(geo.traceX[c]);
+                    const z = Number(geo.traceY[c]);
+                    if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+                    const previous = points[points.length - 1];
+                    if (!previous || Math.hypot(x - previous.x, z - previous.z) > 1e-6) {
+                        points.push(new THREE.Vector3(x, gprGroundY - maxDepth, z));
+                    }
+                }
+                if (points.length >= 2) {
+                    pathGroup.add(new THREE.Line(
+                        new THREE.BufferGeometry().setFromPoints(points),
+                        pathMat
+                    ));
+                }
+            });
+        } else {
+            const plannedPathPoints = usePlannedLayout
+                ? getPlannedGprPathBottomPoints(maxDepth, gprGroundY)
+                : null;
+            const bottomPathPoints = [];
 
-            const n = result.pathX.length;
-            for (let i = 0; i < n; i++) {
-                const x = result.pathX[i];  // x 方向（m）
-                const z = result.pathY[i];  // 横向（m）
-                const y = gprGroundY - maxDepth; // 底部（最大深度处）
-                bottomPathPoints.push(new THREE.Vector3(x, y, z));
+            if (plannedPathPoints && plannedPathPoints.length >= 2) {
+                bottomPathPoints.push(...plannedPathPoints);
+            } else if (Array.isArray(result.pathX) && Array.isArray(result.pathY) &&
+                result.pathX.length === result.pathY.length) {
+                for (let i = 0; i < result.pathX.length; i++) {
+                    bottomPathPoints.push(new THREE.Vector3(
+                        result.pathX[i],
+                        gprGroundY - maxDepth,
+                        result.pathY[i]
+                    ));
+                }
+            }
+
+            if (bottomPathPoints.length >= 2) {
+                pathGroup.add(new THREE.Line(
+                    new THREE.BufferGeometry().setFromPoints(bottomPathPoints),
+                    pathMat
+                ));
             }
         }
 
-        if (bottomPathPoints.length >= 2) {
-            const pathGeom = new THREE.BufferGeometry().setFromPoints(bottomPathPoints);
-            const pathMat = new THREE.LineBasicMaterial({ color: 0xffffff });
-
-            // 👇==================== 🌟 修改开始 ====================👇
-            // 1. 将直接 add 改为先赋值给常量 pathLine
-            const pathLine = new THREE.Line(pathGeom, pathMat);
-            world.add(pathLine);
-
-            // 2. 将线条对象挂载到 window 全局变量，方便按钮控制
-            window.gprZPathLine = pathLine;
-
-            // 3. 初始渲染时，如果用户之前已经点击了隐藏，新生成的线条也直接隐藏
-            if (window.isGridVisible === false) {
-                pathLine.visible = false;
-            }
-            // 👆==================== 🌟 修改结束 ====================👆
+        if (pathGroup.children.length > 0) {
+            world.add(pathGroup);
+            window.gprZPathLine = pathGroup;
+            pathGroup.visible = window.isGridVisible !== false;
         }
+
+        // RTK三维拼接保持水平位置和长度不变，只放大深度的显示尺度，使剖面网格
+        // 与原始二维图一样按矩阵单元比例显示。以groundY为不动的Depth=0基准。
+        const depthDisplayScale = rtkPositionedSegmentCount > 0
+            ? computeGprMatrixAspectDepthScale(segments, renderedSegmentGeometries)
+            : 1;
+        const displayedMaxDepth = maxDepth * depthDisplayScale;
+        world.scale.y = depthDisplayScale;
+        world.position.y = gprGroundY * (1 - depthDisplayScale);
+        world.userData.depthDisplayScale = depthDisplayScale;
+        window.gprDepthDisplayScale = depthDisplayScale;
+        if (Number.isFinite(bounds.minY) && Number.isFinite(bounds.maxY)) {
+            bounds.minY = gprGroundY - (gprGroundY - bounds.minY) * depthDisplayScale;
+            bounds.maxY = gprGroundY - (gprGroundY - bounds.maxY) * depthDisplayScale;
+        }
+        console.log(
+            `✅ 三维剖面按原始二维矩阵比例显示：深度显示倍率 ×${depthDisplayScale.toFixed(3)}，Depth刻度仍为真实米数。`
+        );
 
         // 3.4 画三维坐标轴 / 地下环境长方体。
-        // 有点云地图扫描规划时，使用“扫描矩形有方向长方体”；没有规划时保留原来的全局轴对齐显示。
+        // 只有多张剖面构成平行测线时，才让横向 Distance 轴与第一张剖面平行；
+        // 规划路径或后端旧几何形成的 Z 字布局继续使用原有坐标框，避免错误旋转。
+        const isParallelProfileLayout = maxDepth > 0 && !usePlannedLayout &&
+            areGprProfilesParallel(renderedSegmentGeometries);
+        const validRenderedGeometries = renderedSegmentGeometries.filter(Boolean);
+        const firstRenderedGeometry = validRenderedGeometries[0] || null;
+        let depthAxisCameraDirection = null;
+        let mirrorHorizontalView = false;
         if (maxDepth > 0) {
-            const usedOrientedBox = usePlannedLayout && addOrientedAxesFromScanPlan(scene, bounds, maxDepth, gprGroundY);
-            if (!usedOrientedBox) {
-                addAxes(scene, bounds, maxDepth, gprGroundY);
+            const usedFirstProfileBox = isParallelProfileLayout
+                ? addAxesAlignedToFirstProfile(
+                    scene,
+                    renderedSegmentGeometries,
+                    maxDepth,
+                    gprGroundY,
+                    depthDisplayScale
+                )
+                : false;
+            if (usedFirstProfileBox && firstRenderedGeometry?._fromRtk) {
+                const cameraDirection = window.gprAxesGroup?.userData?.depthAxisCameraDirection;
+                if (cameraDirection && Number.isFinite(cameraDirection.x) && Number.isFinite(cameraDirection.z)) {
+                    depthAxisCameraDirection = cameraDirection;
+                    mirrorHorizontalView = window.gprAxesGroup.userData.mirrorHorizontalView === true;
+                }
+            }
+            const usedOrientedBox = !usedFirstProfileBox && usePlannedLayout &&
+                addOrientedAxesFromScanPlan(scene, bounds, maxDepth, gprGroundY);
+            if (!usedFirstProfileBox && !usedOrientedBox) {
+                addAxes(scene, bounds, displayedMaxDepth, gprGroundY, maxDepth);
             }
         }
 
@@ -8601,8 +9123,19 @@
         let controlSpan = span;
 
         let radius = Math.max(span * 2.0, 3.0);
-        let theta = Math.PI / 4;
+        // 平行RTK布局从首张剖面所在一侧观察。需要从局部反侧观察时，
+        // 仅水平镜像画面，使首张采集道序仍显示为从左到右。
+        const initialCameraTheta = depthAxisCameraDirection
+            ? Math.atan2(depthAxisCameraDirection.z, depthAxisCameraDirection.x)
+            : Math.PI / 4;
+        let theta = initialCameraTheta;
         let phi = Math.PI / 3.5;
+
+        if (depthAxisCameraDirection) {
+            console.log(
+                `✅ 平行RTK剖面已从首张所在侧观察：theta=${(initialCameraTheta * 180 / Math.PI).toFixed(2)}°，水平镜像视图=${mirrorHorizontalView}。`
+            );
+        }
 
         function updateCamera() {
             // 路径查找页是 Z 轴向上；三维重建页是 Y 轴向上。
@@ -8624,26 +9157,68 @@
             const newSpan = Math.max(size.x, size.y, size.z, 1.0);
             controlSpan = newSpan;
             radius = Math.max(newSpan * 1.8, 3.0);
-            theta = Math.PI / 4;
+            theta = initialCameraTheta;
             phi = Math.PI / 3.5;
             updateCamera();
         };
 
         updateCamera();
 
-        if (usePlannedLayout) {
+        window.gprRtkProjectedToSlamForCurrentRender = rtkProjectedSegmentCount > 0;
+        const locatedApexCount = segments.reduce(
+            (sum, seg) => sum + (Array.isArray(seg.rawDetections)
+                ? seg.rawDetections.filter(detection => detection.apexCol != null && detection.apexRow != null).length
+                : 0),
+            0
+        );
+        const rawProfileText = `三维曲面使用原始二维剖面，自动标注采用${locatedApexCount}个有效波形顶点；`;
+        if (rtkPositionedSegmentCount > 0) {
+            const coordinateText = rtkProjectedSegmentCount === rtkPositionedSegmentCount
+                ? "已通过GPS/SLAM标定落到当前点云地图坐标"
+                : "使用统一RTK局部米制坐标显示（未与点云地图标定坐标对齐）";
+            const fallbackCount = segments.length - rtkPositionedSegmentCount;
+            const fallbackText = fallbackCount > 0
+                ? `；另有${fallbackCount}个剖面缺少有效同名CSV，已回退旧几何`
+                : "";
+            const fitRmseText = rtkFitRmseValues.length
+                ? `，RTK直线拟合平均横向残差${(rtkFitRmseValues.reduce((sum, value) => sum + value, 0) / rtkFitRmseValues.length).toFixed(3)}m`
+                : "";
+            const aspectText = Math.abs(depthDisplayScale - 1) > 1e-3
+                ? `；三维剖面按原始二维矩阵比例显示（深度显示×${depthDisplayScale.toFixed(2)}，刻度仍为真实米数）`
+                : "";
+            setStatus(
+                `✅ ${rawProfileText}GPR剖面内部按DZT固定道间距拼接，RTK仅用于整剖面位置与方向校准：${rtkPositionedSegmentCount}/${segments.length}个剖面，${coordinateText}${fitRmseText}${fallbackText}${aspectText}。`,
+                fallbackCount > 0 ? "warning" : "success"
+            );
+        } else if (usePlannedLayout) {
             reloadInspectionMapAndScanPlanAfterGprRender(true);
             const usedLegs = Math.min(segments.length, plannedLegCount);
             const alignmentStats = window.gprCablePathAlignmentStats;
             const alignmentText = alignmentStats?.applied
                 ? ` 地下电缆已按黄色路径校正（原中位水平偏差 ${alignmentStats.medianOffsetM.toFixed(2)}m），埋深保持 GPR 测量值。`
                 : " 未找到可安全对应的黄色路径/地下管道，未执行路径校正。";
-            setStatus(`✅ GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。${alignmentText}`, "success");
+            setStatus(`✅ ${rawProfileText}GPR剖面已按点云地图中规划的Z字扫描路径融合显示：已匹配${usedLegs}/${segments.length}个剖面。${alignmentText}`, "success");
         }
 
         // ========== 交互：左键旋转，中键/右键平移，滚轮缩放 ==========
 
         const dom = renderer.domElement;
+        dom.dataset.gprMirroredView = mirrorHorizontalView ? "true" : "false";
+        if (mirrorHorizontalView) {
+            dom.style.transform = "scaleX(-1)";
+        }
+        if (mirrorHorizontalView || Math.abs(depthDisplayScale - 1) > 1e-3) {
+            const displayModeNote = document.createElement("div");
+            displayModeNote.className = "gpr-display-mode-note";
+            const modeParts = [];
+            if (Math.abs(depthDisplayScale - 1) > 1e-3) {
+                modeParts.push(`原始剖面比例 · 深度显示×${depthDisplayScale.toFixed(2)}`);
+            }
+            if (mirrorHorizontalView) modeParts.push("水平镜像");
+            modeParts.push("RTK坐标未变");
+            displayModeNote.textContent = modeParts.join(" · ");
+            container.appendChild(displayModeNote);
+        }
         let isRotating = false;
         let isPanning = false;
         let prevPos = { x: 0, y: 0 };
@@ -8664,7 +9239,7 @@
                 return;
             }
 
-            prevPos = { x: e.offsetX, y: e.offsetY };
+            prevPos = { x: e.clientX, y: e.clientY };
             clickStartX = e.clientX;
             clickStartY = e.clientY;
             hasDraggedForView = false;
@@ -8683,9 +9258,10 @@
         });
 
         dom.addEventListener("mousemove", e => {
-            const dx = e.offsetX - prevPos.x;
-            const dy = e.offsetY - prevPos.y;
-            prevPos = { x: e.offsetX, y: e.offsetY };
+            const dx = e.clientX - prevPos.x;
+            const dy = e.clientY - prevPos.y;
+            const horizontalDrag = mirrorHorizontalView ? -dx : dx;
+            prevPos = { x: e.clientX, y: e.clientY };
 
             if (Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY) > 4) {
                 hasDraggedForView = true;
@@ -8693,7 +9269,7 @@
 
             if (isRotating) {
                 // 与路径查找页保持一致：左右拖动改变水平角，上下拖动改变俯仰角。
-                theta += dx * 0.01;
+                theta += horizontalDrag * 0.01;
                 phi -= dy * 0.01;
                 phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
                 updateCamera();
@@ -8712,12 +9288,12 @@
                 const forwardXZ = new THREE.Vector3(forward.x, 0, forward.z);
                 if (forwardXZ.lengthSq() > 1e-8) {
                     forwardXZ.normalize();
-                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(right, -horizontalDrag * speed);
                     orbitTarget.addScaledVector(forwardXZ, dy * speed);
                 } else {
                     // 极端俯视角兜底：仍然只做水平面平移，避免 orbitTarget 高度漂移。
                     const fallbackForward = new THREE.Vector3(Math.cos(theta), 0, Math.sin(theta)).normalize();
-                    orbitTarget.addScaledVector(right, -dx * speed);
+                    orbitTarget.addScaledVector(right, -horizontalDrag * speed);
                     orbitTarget.addScaledVector(fallbackForward, dy * speed);
                 }
 
@@ -8769,27 +9345,44 @@
             if (window.currentActivePanel !== 'gpr') return;
 
             // ✅ 动态智能显隐（视角自适应）逻辑
-            // 保持原代码的侧面网格视角隐藏逻辑：
-            // 仅根据相机在全局 X/Y/Z 方向相对 boxCenter 的位置切换各侧面网格显隐。
+            // 坐标框若已与第一张剖面对齐，则先把相机位置变换到坐标框局部坐标，
+            // 再判断应显示哪一个侧面；未旋转的旧坐标框仍沿用世界坐标判断。
             if (window.boxFaces && window.boxCenter && camera) {
-                const camX = camera.position.x;
-                const camY = camera.position.y;
-                const camZ = camera.position.z;
+                let camX = camera.position.x;
+                let camY = camera.position.y;
+                let camZ = camera.position.z;
+                let centerXForFaces = window.boxCenter.x;
+                let centerYForFaces = window.boxCenter.y;
+                let centerZForFaces = window.boxCenter.z;
+
+                const axesGroup = window.gprAxesGroup;
+                if (axesGroup?.userData?.faceVisibilityInLocalAxes && axesGroup.userData.boxCenterLocal) {
+                    axesGroup.updateMatrixWorld(true);
+                    const localCamera = axesGroup.worldToLocal(camera.position.clone());
+                    const localCenter = axesGroup.userData.boxCenterLocal;
+                    camX = localCamera.x;
+                    camY = localCamera.y;
+                    camZ = localCamera.z;
+                    centerXForFaces = localCenter.x;
+                    centerYForFaces = localCenter.y;
+                    centerZForFaces = localCenter.z;
+                }
 
                 // X轴：如果你在右边看，就隐藏右侧网格，把左侧网格当背景
-                window.boxFaces.right.visible = (camX < window.boxCenter.x);
-                window.boxFaces.left.visible = (camX >= window.boxCenter.x);
+                window.boxFaces.right.visible = (camX < centerXForFaces);
+                window.boxFaces.left.visible = (camX >= centerXForFaces);
 
                 // Y轴：地下场景保持“开顶”显示，顶面网格永远不渲染，只保留底面作为地板。
                 window.boxFaces.top.visible = false;
-                window.boxFaces.bottom.visible = (camY >= window.boxCenter.y);
+                window.boxFaces.bottom.visible = (camY >= centerYForFaces);
 
                 // Z轴：如果你在前面看，就隐藏前面网格，把后面当背景
-                window.boxFaces.front.visible = (camZ < window.boxCenter.z);
-                window.boxFaces.back.visible = (camZ >= window.boxCenter.z);
+                window.boxFaces.front.visible = (camZ < centerZForFaces);
+                window.boxFaces.back.visible = (camZ >= centerZForFaces);
             }
 
             updateGprAxisLabelSprites(camera, renderer);
+            if (mirrorHorizontalView) keepGprSceneSpritesReadableInMirror(scene);
 
             renderer.render(scene, camera);
 
@@ -8919,6 +9512,12 @@
         const phi = geometry.phiRad || 0.0;
         const startX = geometry.startX || 0.0;
         const startY = geometry.startY || 0.0;
+        const traceX = geometry.traceX;
+        const traceY = geometry.traceY;
+        const useTracePositions = Array.isArray(traceX) && Array.isArray(traceY) &&
+            traceX.length === cols && traceY.length === cols &&
+            traceX.every(v => Number.isFinite(Number(v))) &&
+            traceY.every(v => Number.isFinite(Number(v)));
 
         const cosPhi = Math.cos(phi);
         const sinPhi = Math.sin(phi);
@@ -8936,9 +9535,9 @@
             for (let c = 0; c < cols; c++) {
                 const u = uAxis[c];
 
-                // 沿着 Z 字路径的水平位置
-                const xHoriz = startX + u * cosPhi;
-                const yHoriz = startY + u * sinPhi;
+                // RTK剖面使用整剖面刚体拟合后的均匀道位置；否则回退到直线参数几何。
+                const xHoriz = useTracePositions ? Number(traceX[c]) : startX + u * cosPhi;
+                const yHoriz = useTracePositions ? Number(traceY[c]) : startY + u * sinPhi;
 
                 const worldX = xHoriz;
                 const worldZ = yHoriz;
@@ -9004,7 +9603,12 @@
             vertexColors: true,
             side: THREE.DoubleSide,
             fog: false,
-            toneMapped: false
+            toneMapped: false,
+            // 将剖面自身的深度值轻微后移，避免与贴在同一平面上的识别框发生Z-fighting；
+            // 不关闭深度测试，因此更靠近相机的其他剖面仍会正常遮挡这些标注。
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
         });
 
         const mesh = new THREE.Mesh(geom, material);
@@ -9292,11 +9896,206 @@
         return true;
     }
 
+    function getGprProfileHorizontalDirection(geometry) {
+        if (!geometry) return null;
+
+        const traceX = geometry.traceX;
+        const traceY = geometry.traceY;
+        let dx = 0;
+        let dz = 0;
+        if (
+            Array.isArray(traceX) && Array.isArray(traceY) &&
+            traceX.length >= 2 && traceY.length === traceX.length
+        ) {
+            dx = Number(traceX[traceX.length - 1]) - Number(traceX[0]);
+            dz = Number(traceY[traceY.length - 1]) - Number(traceY[0]);
+        }
+
+        if (!Number.isFinite(dx) || !Number.isFinite(dz) || Math.hypot(dx, dz) < 1e-8) {
+            const phi = Number(geometry.phiRad);
+            if (!Number.isFinite(phi)) return null;
+            dx = Math.cos(phi);
+            dz = Math.sin(phi);
+        }
+
+        const length = Math.hypot(dx, dz);
+        if (!(length > 1e-8)) return null;
+        return { x: dx / length, z: dz / length };
+    }
+
+    function getGprProfileHorizontalCenter(geometry) {
+        if (!geometry) return null;
+
+        const traceX = geometry.traceX;
+        const traceY = geometry.traceY;
+        if (
+            Array.isArray(traceX) && Array.isArray(traceY) &&
+            traceX.length >= 2 && traceY.length === traceX.length
+        ) {
+            const firstX = Number(traceX[0]);
+            const firstZ = Number(traceY[0]);
+            const lastX = Number(traceX[traceX.length - 1]);
+            const lastZ = Number(traceY[traceY.length - 1]);
+            if ([firstX, firstZ, lastX, lastZ].every(Number.isFinite)) {
+                return { x: (firstX + lastX) / 2, z: (firstZ + lastZ) / 2 };
+            }
+        }
+
+        const startX = Number(geometry.startX);
+        const startZ = Number(geometry.startY);
+        const length = Number(geometry.length);
+        const direction = getGprProfileHorizontalDirection(geometry);
+        if (![startX, startZ, length].every(Number.isFinite) || !direction) return null;
+        return {
+            x: startX + direction.x * length / 2,
+            z: startZ + direction.z * length / 2
+        };
+    }
+
+    /**
+     * 判断当前是否为“多张平行剖面”布局。
+     * 方向比较忽略采集正反向，但只要出现明显转角（Z字折线）就不视为平行布局。
+     */
+    function areGprProfilesParallel(geometries, toleranceDeg = 8) {
+        const validGeometries = (Array.isArray(geometries) ? geometries : []).filter(Boolean);
+        if (validGeometries.length < 2) return false;
+
+        // 上位机规划路径明确属于Z字扫描，不参与第一剖面坐标轴对齐。
+        if (validGeometries.some(geometry => geometry._fromPlannedScanPath)) return false;
+
+        const directions = validGeometries.map(getGprProfileHorizontalDirection);
+        if (directions.some(direction => !direction)) return false;
+
+        const reference = directions[0];
+        const minimumParallelDot = Math.cos(Math.max(0, toleranceDeg) * Math.PI / 180);
+        const allParallel = directions.slice(1).every(direction => {
+            const absoluteDot = Math.abs(reference.x * direction.x + reference.z * direction.z);
+            return absoluteDot >= minimumParallelDot;
+        });
+
+        if (!allParallel) {
+            console.log("ℹ️ 当前剖面包含明显转角，判定为Z字/非平行拼接，坐标轴不跟随第一张剖面旋转。");
+        }
+        return allParallel;
+    }
+
+    /**
+     * 以第一张剖面的道方向作为局部横轴，将全部剖面投影到该坐标系后生成包围盒。
+     * 调用方必须先确认是多张平行剖面；本函数只调整坐标框朝向，不改动任何剖面或RTK位置。
+     */
+    function addAxesAlignedToFirstProfile(scene, geometries, maxDepth, groundY = 0, depthDisplayScale = 1) {
+        const validGeometries = (Array.isArray(geometries) ? geometries : []).filter(Boolean);
+        if (!scene || validGeometries.length < 2 || !(maxDepth > 0)) return false;
+
+        const reference = validGeometries[0];
+        const referenceDirection = getGprProfileHorizontalDirection(reference);
+        if (!referenceDirection) return false;
+        // 局部 +X 始终沿首张剖面的 RTK 道序，不移动或反转任何雷达数据。
+        const xDirX = referenceDirection.x;
+        const xDirZ = referenceDirection.z;
+        const firstCenter = reference._fromRtk ? getGprProfileHorizontalCenter(reference) : null;
+        const lastCenter = reference._fromRtk
+            ? getGprProfileHorizontalCenter(validGeometries[validGeometries.length - 1])
+            : null;
+        const firstToLastAcross = firstCenter && lastCenter
+            ? (lastCenter.x - firstCenter.x) * -xDirZ + (lastCenter.z - firstCenter.z) * xDirX
+            : 0;
+        // 若后续测线位于默认 +Z 侧，改从 -Z 侧观察，确保首张在前。
+        // 此时屏幕横向需要镜像，才能同时让采集方向从左到右；镜像仅作用于视图。
+        const mirrorHorizontalView = firstToLastAcross > 0;
+        const zDirX = mirrorHorizontalView ? xDirZ : -xDirZ;
+        const zDirZ = mirrorHorizontalView ? -xDirX : xDirX;
+        const phi = Math.atan2(xDirZ, xDirX);
+
+        const horizontalPoints = [];
+        validGeometries.forEach(geometry => {
+            const traceX = geometry.traceX;
+            const traceY = geometry.traceY;
+            if (
+                Array.isArray(traceX) && Array.isArray(traceY) &&
+                traceX.length >= 2 && traceY.length === traceX.length
+            ) {
+                for (let i = 0; i < traceX.length; i++) {
+                    const x = Number(traceX[i]);
+                    const z = Number(traceY[i]);
+                    if (Number.isFinite(x) && Number.isFinite(z)) horizontalPoints.push({ x, z });
+                }
+                return;
+            }
+
+            const startX = Number(geometry.startX);
+            const startZ = Number(geometry.startY);
+            const length = Number(geometry.length);
+            const geometryPhi = Number(geometry.phiRad);
+            if (![startX, startZ, length, geometryPhi].every(Number.isFinite)) return;
+            horizontalPoints.push({ x: startX, z: startZ });
+            horizontalPoints.push({
+                x: startX + length * Math.cos(geometryPhi),
+                z: startZ + length * Math.sin(geometryPhi)
+            });
+        });
+        if (horizontalPoints.length < 2) return false;
+
+        let minAlong = Infinity;
+        let maxAlong = -Infinity;
+        let minAcross = Infinity;
+        let maxAcross = -Infinity;
+        horizontalPoints.forEach(point => {
+            const along = point.x * xDirX + point.z * xDirZ;
+            const across = point.x * zDirX + point.z * zDirZ;
+            minAlong = Math.min(minAlong, along);
+            maxAlong = Math.max(maxAlong, along);
+            minAcross = Math.min(minAcross, across);
+            maxAcross = Math.max(maxAcross, across);
+        });
+        if (![minAlong, maxAlong, minAcross, maxAcross].every(Number.isFinite)) return false;
+
+        const horizontalSpan = Math.max(maxAlong - minAlong, maxAcross - minAcross, 0.01);
+        const margin = Math.max(0.02, horizontalSpan * 0.015);
+        const safeDepthDisplayScale = Number.isFinite(Number(depthDisplayScale)) && Number(depthDisplayScale) > 0
+            ? Number(depthDisplayScale)
+            : 1;
+        const displayedMaxDepth = maxDepth * safeDepthDisplayScale;
+        const localBounds = {
+            minX: minAlong - margin,
+            maxX: maxAlong + margin,
+            minY: groundY - displayedMaxDepth,
+            maxY: groundY,
+            minZ: minAcross - margin,
+            maxZ: maxAcross + margin
+        };
+
+        addAxes(scene, localBounds, displayedMaxDepth, groundY, maxDepth);
+        const axisGroup = window.gprAxesGroup;
+        if (!axisGroup || !window.boxCenter) return false;
+
+        const localCenter = window.boxCenter.clone();
+        axisGroup.rotation.y = -phi;
+        // 坐标框自身允许镜像横向法线，使 Depth 刻度仍在靠近相机的一侧；
+        // 所有 GPR 网格及 RTK 世界坐标不属于此组，保持原样。
+        axisGroup.scale.z = mirrorHorizontalView ? -1 : 1;
+        axisGroup.name = "横轴与第一张GPR剖面平行的地下环境坐标框";
+        axisGroup.userData.faceVisibilityInLocalAxes = true;
+        axisGroup.userData.boxCenterLocal = localCenter;
+        axisGroup.userData.referenceProfilePhiRad = phi;
+        axisGroup.userData.depthAxisCameraDirection = { x: zDirX, z: zDirZ };
+        axisGroup.userData.mirrorHorizontalView = mirrorHorizontalView;
+        axisGroup.updateMatrixWorld(true);
+        window.boxCenter = localCenter.clone().applyMatrix4(axisGroup.matrixWorld);
+        window.gprAxesReferencePhiRad = phi;
+
+        console.log(`✅ 三维横轴正向已与第一张剖面的RTK采集方向一致：方位角 ${(phi * 180 / Math.PI).toFixed(2)}°`);
+        return true;
+    }
+
     // 在场景中添加一个三维包围盒和彩色网格（适配深色主题）
-    function addAxes(scene, bounds, maxDepth, groundY = 0) {
+    function addAxes(scene, bounds, maxDepth, groundY = 0, depthLabelMax = maxDepth) {
         if (!isFinite(maxDepth) || maxDepth <= 0) return;
         const topY = Number.isFinite(Number(groundY)) ? Number(groundY) : 0;
         const bottomY = topY - maxDepth;
+        const physicalDepthMax = Number.isFinite(Number(depthLabelMax)) && Number(depthLabelMax) > 0
+            ? Number(depthLabelMax)
+            : maxDepth;
 
         const axisGroup = new THREE.Group();
         scene.add(axisGroup);
@@ -9486,7 +10285,8 @@
             const d = (yLen / nTicks) * i;
             const pos = originTopLeft.clone().add(new THREE.Vector3(0, -d, 0));
             axisGroup.add(axisLine(pos, pos.clone().add(new THREE.Vector3(-tickSize, 0, 0))));
-            const label = makeTextSprite(d.toFixed(1), "#ffffff");
+            const depthValue = (physicalDepthMax / nTicks) * i;
+            const label = makeTextSprite(depthValue.toFixed(1), "#ffffff");
             label.scale.set(labelSize, labelSize, 1);
             label.position.copy(pos).add(new THREE.Vector3(-tickSize * 1.35, 0, 0));
             axisGroup.add(label);
@@ -9554,6 +10354,21 @@
         sprite.userData.aspectRatio = canvas.width / canvas.height;
 
         return sprite;
+    }
+
+    // WebGL 画布水平镜像后，补偿 Sprite 贴图自身的镜像，保持刻度和地图文字可读。
+    // 地图/标注 Sprite 可能在场景建成后加入，因此每帧只处理新出现的贴图。
+    function keepGprSceneSpritesReadableInMirror(scene) {
+        scene.traverse(object => {
+            if (!object.isSprite || !object.material?.map) return;
+            const texture = object.material.map;
+            texture.userData ||= {};
+            if (texture.userData.gprMirrorTextCorrected) return;
+            texture.repeat.x = -texture.repeat.x;
+            texture.offset.x = 1 - texture.offset.x;
+            texture.userData.gprMirrorTextCorrected = true;
+            texture.needsUpdate = true;
+        });
     }
 
     // 根据相机距离动态调整坐标轴文字的世界尺寸，使它在屏幕上保持稳定像素大小。

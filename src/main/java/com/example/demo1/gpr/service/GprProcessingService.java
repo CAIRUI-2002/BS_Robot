@@ -28,6 +28,8 @@ import com.example.demo1.gpr.service.FftUtils.Complex;
 @Service
 public class GprProcessingService {
 
+    private static final double EARTH_RADIUS_M = 6_371_008.8;
+
     private final GprYoloDetectionService gprYoloDetectionService;
 
     public GprProcessingService(GprYoloDetectionService gprYoloDetectionService) {
@@ -86,6 +88,7 @@ public class GprProcessingService {
         double vDepth = cfg.getVDepthMPerNs();
 
         double[] vOptList = new double[N];
+        double[] rtkOriginLatLon = new double[]{Double.NaN, Double.NaN};
 
         System.out.println("共发现 " + N + " 个 .dzt 文件，开始顺序处理……");
 
@@ -109,12 +112,27 @@ public class GprProcessingService {
             // === 1. 读取 DZT 完整数据 (1 到 totalTraces) ===
             DztReadResult read = readDztUint16(file, cfg, 1, totalTraces);
             double[][] data = read.data; // [ns x nr]
+
+            GprRtkCsvReader.RtkTracePath rtkPath = null;
+            try {
+                rtkPath = GprRtkCsvReader.read(file, totalTraces).orElse(null);
+            } catch (IOException csvError) {
+                System.err.println("读取同名RTK CSV失败，将回退旧几何: " +
+                        file.getFileName() + " | " + csvError.getMessage());
+            }
+
+            if (rtkPath != null) {
+                data = selectTraceColumns(data, rtkPath.traceIndices1Based);
+            }
+
             int nz = data.length;
             int nu = data[0].length;
             reportFileProgress(progressListener, currentFileIndex, N, 0.08);
 
-            // 水平翻转 (使用全局索引)
-            if (flipLR[globalIndex]) {
+            // 有RTK时保持DZT与CSV的原始采集顺序，不执行偶数剖面翻转；
+            // 只有缺少有效RTK时，才保留旧版的隔张左右翻转回退逻辑。
+            boolean flipped = rtkPath == null && flipLR[globalIndex];
+            if (flipped) {
                 data = flipLeftRight(data);
             }
 
@@ -155,24 +173,67 @@ public class GprProcessingService {
             );
             reportFileProgress(progressListener, currentFileIndex, N, 0.98);
 
-            // === 6. Z 字几何计算 ===
-            double phi = phiCable + dirs[globalIndex] * theta;
+            // === 6. 几何计算：同名CSV的逐道RTK优先，旧Z字参数仅作为回退 ===
+            double phi;
+            double length;
+            double startX;
+            double startY;
+            double[] uAxis = new double[nu];
+            double[] traceX = null;
+            double[] traceY = null;
+            GprRtkProfilePose.RigidPath rtkRigidPath = null;
+
+            if (rtkPath != null && rtkPath.latitudeDeg.length == nu) {
+                if (!Double.isFinite(rtkOriginLatLon[0]) || !Double.isFinite(rtkOriginLatLon[1])) {
+                    rtkOriginLatLon[0] = rtkPath.latitudeDeg[0];
+                    rtkOriginLatLon[1] = rtkPath.longitudeDeg[0];
+                }
+
+                double[] rtkSampleX = new double[nu];
+                double[] rtkSampleY = new double[nu];
+                for (int c = 0; c < nu; c++) {
+                    double[] xy = gpsToLocalMeters(
+                            rtkPath.latitudeDeg[c],
+                            rtkPath.longitudeDeg[c],
+                            rtkOriginLatLon[0],
+                            rtkOriginLatLon[1]
+                    );
+                    rtkSampleX[c] = xy[0];
+                    rtkSampleY[c] = xy[1];
+                }
+
+                rtkRigidPath = GprRtkProfilePose.fit(rtkSampleX, rtkSampleY, nu, cfg.getDxM());
+            }
+
+            if (rtkRigidPath != null) {
+                traceX = rtkRigidPath.traceX();
+                traceY = rtkRigidPath.traceY();
+                for (int c = 0; c < nu; c++) uAxis[c] = c * cfg.getDxM();
+                startX = traceX[0];
+                startY = traceY[0];
+                phi = rtkRigidPath.phiRad();
+                length = rtkRigidPath.length();
+            } else {
+                phi = phiCable + dirs[globalIndex] * theta;
+                length = (nu - 1) * cfg.getDxM();
+                startX = segStartXY[globalIndex][0];
+                startY = segStartXY[globalIndex][1];
+                for (int c = 0; c < nu; c++) {
+                    uAxis[c] = c * cfg.getDxM();
+                }
+
+                if (globalIndex < N) {
+                    double dxSeg = length * Math.cos(phi);
+                    double dySeg = length * Math.sin(phi);
+                    segStartXY[globalIndex + 1][0] = startX + dxSeg;
+                    segStartXY[globalIndex + 1][1] = startY + dySeg;
+                }
+            }
+
             segPhi[globalIndex] = phi;
-            double length = (nu - 1) * cfg.getDxM();
             segLen[globalIndex] = length;
 
-            if (globalIndex < N) {
-                double dxSeg = length * Math.cos(phi);
-                double dySeg = length * Math.sin(phi);
-                segStartXY[globalIndex + 1][0] = segStartXY[globalIndex][0] + dxSeg;
-                segStartXY[globalIndex + 1][1] = segStartXY[globalIndex][1] + dySeg;
-            }
-
-            // === 7. 计算该段 u / z 轴 ===
-            double[] uAxis = new double[nu];
-            for (int c = 0; c < nu; c++) {
-                uAxis[c] = c * cfg.getDxM();
-            }
+            // === 7. 计算该段深度轴 ===
             double[] zAxis = new double[nz];
             for (int r = 0; r < nz; r++) {
                 double tNs = r * cfg.getDtNs();
@@ -182,10 +243,27 @@ public class GprProcessingService {
             SegmentGeometry geo = new SegmentGeometry();
             geo.setPhiRad(phi);
             geo.setLength(length);
-            geo.setStartX(segStartXY[globalIndex][0]);
-            geo.setStartY(segStartXY[globalIndex][1]);
+            geo.setStartX(startX);
+            geo.setStartY(startY);
             geo.setUAxis(uAxis);
             geo.setZAxis(zAxis);
+            geo.setDztTraceSpacingM(cfg.getDxM());
+            if (rtkPath != null && rtkRigidPath != null && traceX != null && traceY != null) {
+                geo.setRtkPositioned(true);
+                geo.setRtkLayoutMethod("rtk_csv_rigid_profile_fit");
+                geo.setRtkCsvFileName(rtkPath.csvPath.getFileName().toString());
+                geo.setRtkSourceRowCount(rtkPath.sourceRowCount);
+                geo.setRtkValidCoordinateCount(rtkPath.validCoordinateCount);
+                geo.setRtkOriginLatitudeDeg(rtkOriginLatLon[0]);
+                geo.setRtkOriginLongitudeDeg(rtkOriginLatLon[1]);
+                geo.setTraceLatitudeDeg(rtkPath.latitudeDeg);
+                geo.setTraceLongitudeDeg(rtkPath.longitudeDeg);
+                geo.setTraceX(traceX);
+                geo.setTraceY(traceY);
+                geo.setRtkFitInlierCount(rtkRigidPath.inlierCount());
+                geo.setRtkFitSampleCount(rtkRigidPath.sampleCount());
+                geo.setRtkFitRmseM(rtkRigidPath.rmseM());
+            }
 
             BScanResult segResult = new BScanResult();
             // 修改：直接使用文件名作为标识，不再附加道号后缀
@@ -203,9 +281,9 @@ public class GprProcessingService {
             reportFileProgress(progressListener, currentFileIndex, N, 1.0);
 
             System.out.printf(
-                    "  [%2d/%2d] %s | traces=%d dir=%+d flip=%b | v* = %.5f m/ns%n",
+                    "  [%2d/%2d] %s | traces=%d dir=%+d flip=%b rtk=%b | v* = %.5f m/ns%n",
                     globalIndex + 1, N, file.getFileName(), nu, 
-                    dirs[globalIndex], flipLR[globalIndex], vBest
+                    dirs[globalIndex], flipped, rtkPath != null, vBest
             );
 
             globalIndex++; // 全局索引递增
@@ -407,6 +485,38 @@ public class GprProcessingService {
         res.data = A;
         res.nr = nr;
         return res;
+    }
+
+    /**
+     * 按CSV给出的1-based DZT道号抽取列，并保持CSV/B-scan顺序。
+     */
+    private double[][] selectTraceColumns(double[][] data, int[] traceIndices1Based) {
+        if (data == null || data.length == 0 || traceIndices1Based == null || traceIndices1Based.length == 0) {
+            throw new IllegalArgumentException("RTK道号映射为空");
+        }
+        int sourceColumns = data[0].length;
+        double[][] selected = new double[data.length][traceIndices1Based.length];
+        for (int c = 0; c < traceIndices1Based.length; c++) {
+            int sourceColumn = traceIndices1Based[c] - 1;
+            if (sourceColumn < 0 || sourceColumn >= sourceColumns) {
+                throw new IllegalArgumentException("CSV中的DZT道号超出范围: " + traceIndices1Based[c]);
+            }
+            for (int r = 0; r < data.length; r++) {
+                selected[r][c] = data[r][sourceColumn];
+            }
+        }
+        return selected;
+    }
+
+    /**
+     * 小范围测区采用局部等距近似，将WGS84经纬度转换为相对原点的East/North米制坐标。
+     */
+    private double[] gpsToLocalMeters(double latitude, double longitude, double originLat, double originLon) {
+        double east = EARTH_RADIUS_M
+                * Math.toRadians(longitude - originLon)
+                * Math.cos(Math.toRadians(originLat));
+        double north = EARTH_RADIUS_M * Math.toRadians(latitude - originLat);
+        return new double[]{east, north};
     }
 
     // ========================= 基础矩阵操作 =============================
