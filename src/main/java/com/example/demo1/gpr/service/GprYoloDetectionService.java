@@ -95,7 +95,13 @@ public class GprYoloDetectionService implements DisposableBean {
                     if (result.size() == 0) {
                         return List.of();
                     }
-                    return decodeOutput(result.get(0).getValue(), input);
+                    List<GprDetection> detections = decodeOutput(result.get(0).getValue(), input);
+                    try {
+                        GprApexLocator.locateAll(rawData, detections);
+                    } catch (RuntimeException apexError) {
+                        LOGGER.warn("GPR 顶点定位失败，保留 YOLO 检测框: {}", apexError.getMessage());
+                    }
+                    return detections;
                 }
             }
         } catch (Exception ex) {

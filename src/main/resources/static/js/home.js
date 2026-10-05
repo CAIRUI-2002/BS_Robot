@@ -7560,6 +7560,32 @@
                 ctx.fillText(text, x1 + 3, labelY + 2);
                 ctx.fillStyle = "#ff2b2b";
                 ctx.shadowBlur = 4;
+
+                // 后端在原始矩阵中拟合出的波形顶点；低质量框不返回顶点。
+                if (detection.apexCol != null && detection.apexRow != null) {
+                    const apexX = Number(detection.apexCol) / stepX;
+                    const apexY = Number(detection.apexRow) / stepY;
+                    if (Number.isFinite(apexX) && Number.isFinite(apexY)
+                        && apexX >= 0 && apexX < w && apexY >= 0 && apexY < h) {
+                        ctx.save();
+                        ctx.shadowBlur = 0;
+                        const apexColor = detection.apexMethod === "singleWing" ? "#ffd64a" : "#00ffff";
+                        ctx.strokeStyle = apexColor;
+                        ctx.fillStyle = apexColor;
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(apexX, apexY, 4, 0, 2 * Math.PI);
+                        ctx.moveTo(apexX - 8, apexY);
+                        ctx.lineTo(apexX + 8, apexY);
+                        ctx.moveTo(apexX, apexY - 8);
+                        ctx.lineTo(apexX, apexY + 8);
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.arc(apexX, apexY, 2, 0, 2 * Math.PI);
+                        ctx.fill();
+                        ctx.restore();
+                    }
+                }
             });
             ctx.restore();
         }
