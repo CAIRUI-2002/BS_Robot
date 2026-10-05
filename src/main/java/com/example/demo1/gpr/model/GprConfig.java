@@ -29,6 +29,7 @@ public class GprConfig {
     private final double cLight = 0.3; // 光速 (m/ns)
 
     // ==================== 速度参数（分离偏移速度和深度换算速度）====================
+    private boolean migrationEnabled = false; // 偏移成像总开关；默认关闭，保留算法供需要时启用
     private double vMigMPerNs = 0.07; // 偏移聚焦速度 - 仅用于F-K算法
     private boolean autoVSearch = true; // 是否自动搜索最优偏移速度
     private double vSearchMin = 0.05; // 最小搜索速度

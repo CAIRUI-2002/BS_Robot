@@ -3052,6 +3052,15 @@ input[type="range"]::-webkit-slider-thumb {
     display: none;
 }
 
+/* 偏移成像关闭时不保留空白列，原始二维剖面与三维视图按 1:2 排列。 */
+#mig2dView[hidden] {
+    display: none !important;
+}
+
+.gpr-views.migration-disabled:not(.hide-2d) {
+    grid-template-columns: 1fr 2fr;
+}
+
 /* ==========================================
    新增：悬浮履带小车摇杆 UI
    ========================================== */

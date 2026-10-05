@@ -7,7 +7,7 @@ import lombok.Data;
 /**
  * 每个 .dzt B 扫对应的结果：
  * - 预处理后的原始数据（rawData）
- * - 在最优速度下的偏移结果（migratedData）
+ * - 可选的偏移结果（migratedData；偏移开关关闭时为 null）
  * - 对应几何信息以及最优速度、熵值
  */
 @Data

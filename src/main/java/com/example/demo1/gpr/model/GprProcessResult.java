@@ -11,7 +11,8 @@ import java.util.List;
 public class GprProcessResult {
 
     private List<BScanResult> segments;   // 每个 .dzt 文件对应一段
-    private double[] vBestStats;          // [min, median, max]
+    private boolean migrationEnabled;     // 本次处理是否执行了偏移成像
+    private double[] vBestStats;          // [min, median, max]；未偏移时为配置的固定偏移速度
 
     // 整条 Z 字路径（折线），方便前端绘制
     private double[] pathX;

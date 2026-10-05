@@ -145,32 +145,45 @@ public class GprProcessingService {
             }
             reportFileProgress(progressListener, currentFileIndex, N, 0.12);
 
-            // === 4. 斐波那契搜索，最小化偏移图像熵 ===
-            final int entropyEvaluationCount = Math.max(3, cfg.getFibIters());
-            FibResult fib = fibonacciMinEntropy(
-                    data,
-                    cfg.getDtNs(),
-                    cfg.getDxM(),
-                    cfg.getVSearchMin(),
-                    cfg.getVSearchMax(),
-                    cfg.getFibIters(),
-                    cfg.getEntropyBins(),
-                    completedEvaluations -> {
-                        double fraction = 0.12 + 0.78 * completedEvaluations / entropyEvaluationCount;
-                        reportFileProgress(progressListener, currentFileIndex, N, fraction);
-                    }
-            );
-            double vBest = fib.vBest;
-            double hBest = fib.hBest;
-            vOptList[globalIndex] = vBest;
+            // === 4～5. 可选的偏移成像 ===
+            // 当前主流程直接在偏移前剖面上识别双曲线及其顶点，因此默认跳过速度搜索和
+            // Stolt F-K 偏移。算法实现保留在本类中，前端开启“偏移成像”后才执行。
+            double vBest = cfg.getVMigMPerNs();
+            double hBest = 0.0;
+            double[][] migrated = null;
 
-            // === 5. 在最优速度处做一次 Stolt F-K 偏移 ===
-            double[][] migrated = stoltFkMigration(
-                    data,
-                    cfg.getDtNs(),
-                    cfg.getDxM(),
-                    vBest
-            );
+            if (cfg.isMigrationEnabled()) {
+                if (cfg.isAutoVSearch()) {
+                    final int entropyEvaluationCount = Math.max(3, cfg.getFibIters());
+                    FibResult fib = fibonacciMinEntropy(
+                            data,
+                            cfg.getDtNs(),
+                            cfg.getDxM(),
+                            cfg.getVSearchMin(),
+                            cfg.getVSearchMax(),
+                            cfg.getFibIters(),
+                            cfg.getEntropyBins(),
+                            completedEvaluations -> {
+                                double fraction = 0.12 + 0.78 * completedEvaluations / entropyEvaluationCount;
+                                reportFileProgress(progressListener, currentFileIndex, N, fraction);
+                            }
+                    );
+                    vBest = fib.vBest;
+                    hBest = fib.hBest;
+                } else {
+                    reportFileProgress(progressListener, currentFileIndex, N, 0.90);
+                }
+
+                migrated = stoltFkMigration(
+                        data,
+                        cfg.getDtNs(),
+                        cfg.getDxM(),
+                        vBest
+                );
+            } else {
+                reportFileProgress(progressListener, currentFileIndex, N, 0.90);
+            }
+            vOptList[globalIndex] = vBest;
             reportFileProgress(progressListener, currentFileIndex, N, 0.98);
 
             // === 6. 几何计算：同名CSV的逐道RTK优先，旧Z字参数仅作为回退 ===
@@ -305,6 +318,7 @@ public class GprProcessingService {
 
         GprProcessResult out = new GprProcessResult();
         out.setSegments(results);
+        out.setMigrationEnabled(cfg.isMigrationEnabled());
         out.setPathX(pathX);
         out.setPathY(pathY);
         out.setVBestStats(new double[]{vMin, vMed, vMax});

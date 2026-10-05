@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <title>巡检机器人作业平台</title>
-    <link rel="stylesheet" href="/css/home.css?v=20261005-gpr-profile-aspect" />
+    <link rel="stylesheet" href="/css/home.css?v=20261005-gpr-migration-toggle" />
 </head>
 
 <body>
@@ -174,6 +174,8 @@
                         </select>
 
                         <button id="btnStartGpr">开始处理</button>
+                        <button id="btnToggleMigration" class="action-btn-small" aria-pressed="false"
+                            title="控制下一次GPR处理是否执行速度搜索和 Stolt F-K 偏移；默认关闭">偏移成像: OFF</button>
                         <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
                         <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
 
@@ -189,9 +191,9 @@
                             <h3>原始二维剖面</h3>
                             <canvas id="raw2dCanvas"></canvas>
                         </div>
-                        <div class="gpr-view gpr-view-2d" id="mig2dView">
+                        <div class="gpr-view gpr-view-2d" id="mig2dView" hidden>
                             <div class="gpr-view-header">
-                                <h3>偏移后二维剖面</h3>
+                                <h3 id="mig2dTitle">偏移后二维剖面</h3>
                                 <button id="btnManualMigAnnotation" hidden
                                     class="action-btn-small manual-anno-btn">标注</button>
                                 <button id="btnForcedPipeAnnotation" hidden
@@ -960,7 +962,7 @@
     <script src="/js/stomp.min.js"></script>
     <script src="/js/reader.js"></script>
     <script src="/js/fisheye-webgl.js"></script>
-    <script src="/js/home.js?v=20261005-gpr-overlay-occlusion"></script>
+    <script src="/js/home.js?v=20261005-gpr-migration-toggle-apex-pipes"></script>
 </body>
 
 </html>

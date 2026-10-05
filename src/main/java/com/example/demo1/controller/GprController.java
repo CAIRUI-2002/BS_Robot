@@ -46,6 +46,7 @@ public class GprController {
      *
      * body（可选 JSON）：
      *   {
+     *     "migrationEnabled": false,
      *     "ns": 512,
      *     "dtNs": 0.1,
      *     "dxM": 0.02,
