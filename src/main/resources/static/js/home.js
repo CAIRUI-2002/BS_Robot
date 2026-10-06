@@ -160,6 +160,9 @@
     let annotation3DGroups = [];     // 存储 3D 标注对象
     let gprResult = null;            // 缓存 GPR 结果
     let gprPipePopup3DPos = null;    // 三维重建页地下管道点击弹窗对应的世界坐标
+    // 现场直管对照表明反向采集的偶数剖面在三维拼接中整体向右偏约0.8m。
+    // 仅在三维RTK几何中沿第一张剖面的Distance负方向平移，不修改原始DZT/CSV或二维剖面。
+    const GPR_EVEN_PROFILE_LEFT_SHIFT_M = 0.8;
 
     // ✅ GPR 标注校准持久化状态
     // 说明：以“GPR 数据文件夹路径”为依据，把人工校准和彩色倾斜管道标注保存到机器狗主机的 GPR 数据文件夹中。
@@ -6880,6 +6883,58 @@
         };
     }
 
+    /**
+     * 将偶数编号RTK剖面沿三维Distance轴左移固定距离。
+     * referenceDirection取第一张RTK剖面的正向，因此“左移”始终对应Distance减小，
+     * 不会因偶数剖面的采集方向与奇数剖面相反而改变符号。
+     */
+    function applyEvenGprProfileLeftShift(geometry, segmentIndex, referenceDirection) {
+        const profileNumber = segmentIndex + 1;
+        if (
+            !geometry ||
+            profileNumber % 2 !== 0 ||
+            !(GPR_EVEN_PROFILE_LEFT_SHIFT_M > 0) ||
+            !referenceDirection ||
+            !Number.isFinite(Number(referenceDirection.x)) ||
+            !Number.isFinite(Number(referenceDirection.z))
+        ) {
+            return geometry;
+        }
+
+        const directionLength = Math.hypot(
+            Number(referenceDirection.x),
+            Number(referenceDirection.z)
+        );
+        if (!(directionLength > 1e-8)) return geometry;
+
+        const directionX = Number(referenceDirection.x) / directionLength;
+        const directionZ = Number(referenceDirection.z) / directionLength;
+        const shiftX = -GPR_EVEN_PROFILE_LEFT_SHIFT_M * directionX;
+        const shiftZ = -GPR_EVEN_PROFILE_LEFT_SHIFT_M * directionZ;
+        const traceX = Array.isArray(geometry.traceX)
+            ? geometry.traceX.map(value => Number(value) + shiftX)
+            : geometry.traceX;
+        const traceY = Array.isArray(geometry.traceY)
+            ? geometry.traceY.map(value => Number(value) + shiftZ)
+            : geometry.traceY;
+
+        console.log(
+            `✅ 第${profileNumber}张GPR剖面已在三维视图中向左平移` +
+            `${GPR_EVEN_PROFILE_LEFT_SHIFT_M.toFixed(2)}m。`
+        );
+
+        return {
+            ...geometry,
+            startX: Number(geometry.startX) + shiftX,
+            startY: Number(geometry.startY) + shiftZ,
+            traceX,
+            traceY,
+            _evenProfileLeftShiftM: GPR_EVEN_PROFILE_LEFT_SHIFT_M,
+            _evenProfileLeftShiftX: shiftX,
+            _evenProfileLeftShiftZ: shiftZ
+        };
+    }
+
     function getGprTraceHorizontalPoint(geometry, column, cols) {
         const c = Math.min(Math.max(0, Math.round(Number(column) || 0)), Math.max(0, cols - 1));
         const traceX = geometry?.traceX;
@@ -8219,6 +8274,8 @@
         const renderedSegmentGeometries = [];
         let rtkPositionedSegmentCount = 0;
         let rtkProjectedSegmentCount = 0;
+        let evenProfileShiftedSegmentCount = 0;
+        let firstRtkProfileDirection = null;
         const rtkFitRmseValues = [];
         let globalCenterId = 0;
 
@@ -8299,16 +8356,28 @@
             const plannedGeo = (!rtkGeo && usePlannedLayout)
                 ? createPlannedSegmentGeometry(seg, segIndex, mat)
                 : null;
-            const geo = rtkGeo || plannedGeo || seg.geometry || {};
+            let geo = rtkGeo || plannedGeo || seg.geometry || {};
             if (!mat || !geo) return;
-            renderedSegmentGeometries[segIndex] = geo;
             if (rtkGeo) {
+                if (!firstRtkProfileDirection) {
+                    firstRtkProfileDirection = getGprProfileHorizontalDirection(rtkGeo);
+                }
+                const shiftedGeo = applyEvenGprProfileLeftShift(
+                    rtkGeo,
+                    segIndex,
+                    firstRtkProfileDirection
+                );
+                if (shiftedGeo !== rtkGeo) {
+                    geo = shiftedGeo;
+                    evenProfileShiftedSegmentCount++;
+                }
                 rtkPositionedSegmentCount++;
                 if (rtkGeo._rtkProjectedToSlam) rtkProjectedSegmentCount++;
                 if (Number.isFinite(Number(rtkGeo._rtkFitRmseM))) {
                     rtkFitRmseValues.push(Number(rtkGeo._rtkFitRmseM));
                 }
             }
+            renderedSegmentGeometries[segIndex] = geo;
 
             // 记录该段最大深度
             if (geo.zAxis && geo.zAxis.length > 0) {
@@ -9004,8 +9073,11 @@
             const aspectText = Math.abs(depthDisplayScale - 1) > 1e-3
                 ? `；三维剖面按原始二维矩阵比例显示（深度显示×${depthDisplayScale.toFixed(2)}，刻度仍为真实米数）`
                 : "";
+            const evenShiftText = evenProfileShiftedSegmentCount > 0
+                ? `；第2、4、6等偶数剖面已向左平移${GPR_EVEN_PROFILE_LEFT_SHIFT_M.toFixed(2)}m`
+                : "";
             setStatus(
-                `✅ ${rawProfileText}GPR剖面内部按DZT固定道间距拼接，RTK仅用于整剖面位置与方向校准：${rtkPositionedSegmentCount}/${segments.length}个剖面，${coordinateText}${fitRmseText}${fallbackText}${aspectText}。`,
+                `✅ ${rawProfileText}GPR剖面内部按DZT固定道间距拼接，RTK仅用于整剖面位置与方向校准：${rtkPositionedSegmentCount}/${segments.length}个剖面，${coordinateText}${fitRmseText}${fallbackText}${aspectText}${evenShiftText}。`,
                 fallbackCount > 0 ? "warning" : "success"
             );
         } else if (usePlannedLayout) {
