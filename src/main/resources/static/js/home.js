@@ -262,10 +262,36 @@
         radiusPadding: 6    //会在算出的真实亮斑半径基础上加上这个数值
     };
 
-    // 管道连接配置
-    const LINK_CONFIG = {
-        maxZDiff: 0.15,
-        maxYDiff: 0.4
+    // 管道连接配置：所有自动/人工/彩色顶点统一参与，不再按颜色或 groupId 分组。
+    // 先在相邻剖面之间进行一对一匹配，连续覆盖 2 个剖面即可形成管线。
+    const PIPE_TRACK_CONFIG = {
+        minTrackPoints: 2,
+        maxProfileGap: 1,                 // 只连接严格相邻剖面，不跨过漏检剖面
+        dedupeHorizontalM: 0.10,
+        dedupeDepthM: 0.10,
+        maxDepthStepM: 0.22,
+        maxAlongStepM: 1.20,
+        maxPredictionErrorM: 0.45,
+        maxDepthPredictionErrorM: 0.22,
+        maxTurnAngleDeg: 45,
+        minBendRadiusM: 0.45,
+        straightPlanRmseM: 0.12,
+        straightDepthRmseM: 0.10,
+        straightMaxTurnAngleDeg: 8,
+        monotonicShiftM: 0.08,
+        maxRadiusRatio: 4.0,
+        maxQuadraticCorrectionM: 0.35,
+        unmatchedCost: 1.05,
+        // 特殊情况：两个相邻的双剖面短管段可能因边界剖面左右定位偏差而断开。
+        // 仅在剖面连续、同深度、横向距离和方向差均较小时进行一对一二次合并。
+        fragmentMergeMinPoints: 2,
+        fragmentMergeMaxEndpointDepthDiffM: 0.16,
+        fragmentMergeMaxMeanDepthDiffM: 0.12,
+        fragmentMergeMaxAlongGapM: 0.80,
+        fragmentMergeMaxSlopeDiff: 0.45,
+        fragmentMergeMaxRadiusRatio: 2.5,
+        fragmentMergeStraightPlanRmseM: 0.22,
+        fragmentMergeStraightDepthRmseM: 0.12
     };
 
     // ✅ 管道三维连接平滑配置
@@ -5815,6 +5841,19 @@
             btnAnno.addEventListener("click", function () {
                 const nextShow = !showAnnotation;
                 setAnnotationButtonState(nextShow);
+                if (nextShow && window.gprPipeTrackingStats) {
+                    const stats = window.gprPipeTrackingStats;
+                    if (stats.trackCount > 0) {
+                        setStatus(
+                            `已显示标注并连接 ${stats.trackCount} 条管线` +
+                            `（直线/斜管 ${stats.straightCount} 条，弯曲管线 ${stats.curvedCount} 条` +
+                            `${stats.fragmentMergeCount > 0 ? `，短管段合并 ${stats.fragmentMergeCount} 处` : ""}）。`,
+                            "success"
+                        );
+                    } else {
+                        setStatus("已显示顶点标注；未找到跨越至少 2 张相邻剖面的连续管线。", "warning");
+                    }
+                }
                 if (!nextShow) {
                     if (manualMigAnnotationMode) {
                         manualMigAnnotationMode = false;
@@ -8209,6 +8248,661 @@
         return showGprPipeInfoPopupFromHit(hit);
     }
 
+    function buildGprPipeTrackingFrame(segmentAnnoCenters, renderedSegmentGeometries, groundY = 0) {
+        const geometries = (Array.isArray(renderedSegmentGeometries) ? renderedSegmentGeometries : []).filter(Boolean);
+        const referenceGeometry = geometries[0] || null;
+        const referenceDirection = getGprProfileHorizontalDirection(referenceGeometry) || { x: 1, z: 0 };
+        const directionLength = Math.hypot(referenceDirection.x, referenceDirection.z) || 1;
+        const along = {
+            x: referenceDirection.x / directionLength,
+            z: referenceDirection.z / directionLength
+        };
+        let across = { x: -along.z, z: along.x };
+
+        const allPoints = [];
+        (Array.isArray(segmentAnnoCenters) ? segmentAnnoCenters : []).forEach(layer => {
+            (Array.isArray(layer) ? layer : []).forEach(item => {
+                if (item && item.center) allPoints.push(item.center);
+            });
+        });
+
+        const firstCenter = getGprProfileHorizontalCenter(geometries[0]) ||
+            (allPoints[0] ? { x: allPoints[0].x, z: allPoints[0].z } : { x: 0, z: 0 });
+        const lastCenter = getGprProfileHorizontalCenter(geometries[geometries.length - 1]);
+        if (lastCenter) {
+            const acrossProgress =
+                (lastCenter.x - firstCenter.x) * across.x +
+                (lastCenter.z - firstCenter.z) * across.z;
+            if (acrossProgress < 0) across = { x: -across.x, z: -across.z };
+        }
+
+        const origin = { x: Number(firstCenter.x) || 0, z: Number(firstCenter.z) || 0 };
+        return {
+            origin,
+            along,
+            across,
+            groundY: Number.isFinite(Number(groundY)) ? Number(groundY) : 0,
+            project(center, depth) {
+                const dx = Number(center.x) - origin.x;
+                const dz = Number(center.z) - origin.z;
+                return {
+                    s: dx * along.x + dz * along.z,
+                    t: dx * across.x + dz * across.z,
+                    depth: Number(depth)
+                };
+            },
+            toWorld(s, t, depth) {
+                return new THREE.Vector3(
+                    origin.x + along.x * s + across.x * t,
+                    this.groundY - depth,
+                    origin.z + along.z * s + across.z * t
+                );
+            }
+        };
+    }
+
+    function prepareUnifiedGprPipeTrackingLayers(segmentAnnoCenters, frame) {
+        const sourceLayers = Array.isArray(segmentAnnoCenters) ? segmentAnnoCenters : [];
+        const maxSegIndex = sourceLayers.reduce((maxValue, layer, layerIndex) => {
+            const items = Array.isArray(layer) ? layer : [];
+            return items.reduce((innerMax, item) => {
+                const segIndex = Number.isInteger(item?.segIndex) ? item.segIndex : layerIndex;
+                return Math.max(innerMax, segIndex);
+            }, maxValue);
+        }, Math.max(0, sourceLayers.length - 1));
+        const layers = Array.from({ length: maxSegIndex + 1 }, () => []);
+        let inputPointCount = 0;
+
+        sourceLayers.forEach((layer, layerIndex) => {
+            (Array.isArray(layer) ? layer : []).forEach(item => {
+                if (!item || !item.center) return;
+                const segIndex = Number.isInteger(item.segIndex) ? item.segIndex : layerIndex;
+                const projected = frame.project(item.center, item.zCoord);
+                if (![projected.s, projected.t, projected.depth].every(Number.isFinite)) return;
+                inputPointCount++;
+                layers[segIndex].push({
+                    ...item,
+                    segIndex,
+                    trackS: projected.s,
+                    trackT: projected.t,
+                    trackDepth: projected.depth
+                });
+            });
+        });
+
+        const deduplicatedLayers = layers.map(layer => {
+            // 人工彩色顶点与自动顶点重合时只保留一个，人工点优先；颜色不参与连接判断。
+            const sorted = layer.slice().sort((a, b) => {
+                const forcedDiff = Number(b.linkMode === "forced") - Number(a.linkMode === "forced");
+                if (forcedDiff !== 0) return forcedDiff;
+                return (Number(b.radius) || 0) - (Number(a.radius) || 0);
+            });
+            const kept = [];
+            sorted.forEach(item => {
+                const duplicate = kept.some(existing => {
+                    const horizontal = Math.hypot(
+                        item.trackS - existing.trackS,
+                        item.trackT - existing.trackT
+                    );
+                    const depthDiff = Math.abs(item.trackDepth - existing.trackDepth);
+                    return horizontal <= PIPE_TRACK_CONFIG.dedupeHorizontalM &&
+                        depthDiff <= PIPE_TRACK_CONFIG.dedupeDepthM;
+                });
+                if (!duplicate) kept.push(item);
+            });
+            return kept;
+        });
+
+        return {
+            layers: deduplicatedLayers,
+            inputPointCount,
+            deduplicatedPointCount: deduplicatedLayers.reduce((sum, layer) => sum + layer.length, 0)
+        };
+    }
+
+    function getGprPipeTrackTurnAngleDeg(a, b, c) {
+        const v1s = b.trackS - a.trackS;
+        const v1t = b.trackT - a.trackT;
+        const v2s = c.trackS - b.trackS;
+        const v2t = c.trackT - b.trackT;
+        const len1 = Math.hypot(v1s, v1t);
+        const len2 = Math.hypot(v2s, v2t);
+        if (!(len1 > 1e-8) || !(len2 > 1e-8)) return 0;
+        const cosine = Math.max(-1, Math.min(1, (v1s * v2s + v1t * v2t) / (len1 * len2)));
+        return Math.acos(cosine) * 180 / Math.PI;
+    }
+
+    function getGprPipeTrackBendRadiusM(a, b, c) {
+        const ab = Math.hypot(b.trackS - a.trackS, b.trackT - a.trackT);
+        const bc = Math.hypot(c.trackS - b.trackS, c.trackT - b.trackT);
+        const ca = Math.hypot(a.trackS - c.trackS, a.trackT - c.trackT);
+        const twiceArea = Math.abs(
+            (b.trackS - a.trackS) * (c.trackT - a.trackT) -
+            (b.trackT - a.trackT) * (c.trackS - a.trackS)
+        );
+        if (!(twiceArea > 1e-8)) return Infinity;
+        return (ab * bc * ca) / (2 * twiceArea);
+    }
+
+    function predictGprPipeTrackValue(points, key, targetT) {
+        const count = points.length;
+        if (!count) return NaN;
+        const last = points[count - 1];
+        if (count === 1) return Number(last[key]);
+
+        const previous = points[count - 2];
+        const dt = last.trackT - previous.trackT;
+        const linearPrediction = Math.abs(dt) > 1e-8
+            ? Number(last[key]) + (targetT - last.trackT) * (Number(last[key]) - Number(previous[key])) / dt
+            : Number(last[key]);
+        if (count < 3) return linearPrediction;
+
+        const p0 = points[count - 3];
+        const p1 = previous;
+        const p2 = last;
+        const t0 = p0.trackT;
+        const t1 = p1.trackT;
+        const t2 = p2.trackT;
+        const d0 = (t0 - t1) * (t0 - t2);
+        const d1 = (t1 - t0) * (t1 - t2);
+        const d2 = (t2 - t0) * (t2 - t1);
+        if ([d0, d1, d2].some(value => Math.abs(value) <= 1e-8)) return linearPrediction;
+
+        const quadraticPrediction =
+            Number(p0[key]) * (targetT - t1) * (targetT - t2) / d0 +
+            Number(p1[key]) * (targetT - t0) * (targetT - t2) / d1 +
+            Number(p2[key]) * (targetT - t0) * (targetT - t1) / d2;
+        if (!Number.isFinite(quadraticPrediction)) return linearPrediction;
+
+        // 二阶预测只描述局部缓弯，限制相对线性外推的修正量，防止噪点导致抛物线发散。
+        const correction = Math.max(
+            -PIPE_TRACK_CONFIG.maxQuadraticCorrectionM,
+            Math.min(PIPE_TRACK_CONFIG.maxQuadraticCorrectionM, quadraticPrediction - linearPrediction)
+        );
+        return linearPrediction + correction;
+    }
+
+    function scoreGprPipeTrackCandidate(track, point) {
+        const points = track.points;
+        const last = points[points.length - 1];
+        const profileGap = point.segIndex - last.segIndex;
+        if (profileGap < 1 || profileGap > PIPE_TRACK_CONFIG.maxProfileGap) return null;
+
+        const gapScale = Math.sqrt(profileGap);
+        const depthStep = Math.abs(point.trackDepth - last.trackDepth);
+        const alongStep = Math.abs(point.trackS - last.trackS);
+        if (depthStep > PIPE_TRACK_CONFIG.maxDepthStepM * gapScale) return null;
+        if (alongStep > PIPE_TRACK_CONFIG.maxAlongStepM * profileGap) return null;
+
+        const radiusA = Math.max(1e-6, Number(last.radius) || 0.02);
+        const radiusB = Math.max(1e-6, Number(point.radius) || 0.02);
+        const radiusRatio = Math.max(radiusA, radiusB) / Math.min(radiusA, radiusB);
+        if (radiusRatio > PIPE_TRACK_CONFIG.maxRadiusRatio) return null;
+        const radiusPenalty = Math.min(1, Math.abs(Math.log(radiusRatio)) / Math.log(PIPE_TRACK_CONFIG.maxRadiusRatio));
+
+        if (points.length === 1) {
+            return 0.60 * (alongStep / (PIPE_TRACK_CONFIG.maxAlongStepM * profileGap)) +
+                0.35 * (depthStep / (PIPE_TRACK_CONFIG.maxDepthStepM * gapScale)) +
+                0.05 * radiusPenalty;
+        }
+
+        const predictedS = predictGprPipeTrackValue(points, "trackS", point.trackT);
+        const predictedDepth = predictGprPipeTrackValue(points, "trackDepth", point.trackT);
+        const positionError = Math.abs(point.trackS - predictedS);
+        const depthPredictionError = Math.abs(point.trackDepth - predictedDepth);
+        const positionLimit = PIPE_TRACK_CONFIG.maxPredictionErrorM * gapScale;
+        const depthPredictionLimit = PIPE_TRACK_CONFIG.maxDepthPredictionErrorM * gapScale;
+        if (positionError > positionLimit || depthPredictionError > depthPredictionLimit) return null;
+
+        const previous = points[points.length - 2];
+        const turnAngleDeg = getGprPipeTrackTurnAngleDeg(previous, last, point);
+        if (turnAngleDeg > PIPE_TRACK_CONFIG.maxTurnAngleDeg) return null;
+        const bendRadius = getGprPipeTrackBendRadiusM(previous, last, point);
+        if (
+            turnAngleDeg > PIPE_TRACK_CONFIG.straightMaxTurnAngleDeg &&
+            Number.isFinite(bendRadius) &&
+            bendRadius < PIPE_TRACK_CONFIG.minBendRadiusM
+        ) {
+            return null;
+        }
+
+        return 0.45 * (positionError / positionLimit) +
+            0.25 * (depthPredictionError / depthPredictionLimit) +
+            0.20 * (turnAngleDeg / PIPE_TRACK_CONFIG.maxTurnAngleDeg) +
+            0.10 * radiusPenalty;
+    }
+
+    // Hungarian 最小费用分配：每个顶点最多属于一条轨迹，每条轨迹在同一剖面最多取一个顶点。
+    function solveGprPipeMinimumCostAssignment(costMatrix) {
+        const rowCount = Array.isArray(costMatrix) ? costMatrix.length : 0;
+        const colCount = rowCount && Array.isArray(costMatrix[0]) ? costMatrix[0].length : 0;
+        if (!rowCount || !colCount) return [];
+        const u = new Array(rowCount + 1).fill(0);
+        const v = new Array(colCount + 1).fill(0);
+        const p = new Array(colCount + 1).fill(0);
+        const way = new Array(colCount + 1).fill(0);
+
+        for (let i = 1; i <= rowCount; i++) {
+            p[0] = i;
+            let j0 = 0;
+            const minv = new Array(colCount + 1).fill(Infinity);
+            const used = new Array(colCount + 1).fill(false);
+            do {
+                used[j0] = true;
+                const i0 = p[j0];
+                let delta = Infinity;
+                let j1 = 0;
+                for (let j = 1; j <= colCount; j++) {
+                    if (used[j]) continue;
+                    const current = costMatrix[i0 - 1][j - 1] - u[i0] - v[j];
+                    if (current < minv[j]) {
+                        minv[j] = current;
+                        way[j] = j0;
+                    }
+                    if (minv[j] < delta) {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
+                for (let j = 0; j <= colCount; j++) {
+                    if (used[j]) {
+                        u[p[j]] += delta;
+                        v[j] -= delta;
+                    } else {
+                        minv[j] -= delta;
+                    }
+                }
+                j0 = j1;
+            } while (p[j0] !== 0);
+
+            do {
+                const j1 = way[j0];
+                p[j0] = p[j1];
+                j0 = j1;
+            } while (j0 !== 0);
+        }
+
+        const assignment = new Array(rowCount).fill(-1);
+        for (let j = 1; j <= colCount; j++) {
+            if (p[j] > 0) assignment[p[j] - 1] = j - 1;
+        }
+        return assignment;
+    }
+
+    function assignGprPipeTracksToLayer(activeTracks, layerPoints) {
+        if (!activeTracks.length || !layerPoints.length) return [];
+        const trackCount = activeTracks.length;
+        const pointCount = layerPoints.length;
+        const size = trackCount + pointCount;
+        const invalidCost = 1e6;
+        const costs = Array.from({ length: size }, () => new Array(size).fill(0));
+        const candidateScores = Array.from({ length: trackCount }, () => new Array(pointCount).fill(null));
+
+        for (let i = 0; i < trackCount; i++) {
+            for (let j = 0; j < pointCount; j++) {
+                const score = scoreGprPipeTrackCandidate(activeTracks[i], layerPoints[j]);
+                candidateScores[i][j] = score;
+                costs[i][j] = score == null ? invalidCost : score;
+            }
+            for (let j = pointCount; j < size; j++) {
+                costs[i][j] = PIPE_TRACK_CONFIG.unmatchedCost;
+            }
+        }
+        // 虚拟轨迹吸收未匹配的新顶点，费用为 0；其后会为这些点建立新轨迹。
+        for (let i = trackCount; i < size; i++) {
+            for (let j = 0; j < size; j++) costs[i][j] = 0;
+        }
+
+        const assignment = solveGprPipeMinimumCostAssignment(costs);
+        const matches = [];
+        for (let i = 0; i < trackCount; i++) {
+            const pointIndex = assignment[i];
+            if (pointIndex < 0 || pointIndex >= pointCount) continue;
+            const score = candidateScores[i][pointIndex];
+            if (score == null || score >= PIPE_TRACK_CONFIG.unmatchedCost) continue;
+            matches.push({ track: activeTracks[i], point: layerPoints[pointIndex], pointIndex, score });
+        }
+        return matches;
+    }
+
+    function fitGprPipeTrackLine(points, valueKey) {
+        const valid = points.filter(point => Number.isFinite(point.trackT) && Number.isFinite(point[valueKey]));
+        if (!valid.length) return { intercept: 0, slope: 0, rmse: Infinity };
+        const meanT = valid.reduce((sum, point) => sum + point.trackT, 0) / valid.length;
+        const meanValue = valid.reduce((sum, point) => sum + point[valueKey], 0) / valid.length;
+        let numerator = 0;
+        let denominator = 0;
+        valid.forEach(point => {
+            const dt = point.trackT - meanT;
+            numerator += dt * (point[valueKey] - meanValue);
+            denominator += dt * dt;
+        });
+        const slope = denominator > 1e-10 ? numerator / denominator : 0;
+        const intercept = meanValue - slope * meanT;
+        const mse = valid.reduce((sum, point) => {
+            const residual = point[valueKey] - (intercept + slope * point.trackT);
+            return sum + residual * residual;
+        }, 0) / valid.length;
+        return { intercept, slope, rmse: Math.sqrt(mse) };
+    }
+
+    function scoreGprPipeTrackFragmentMerge(leftTrack, rightTrack) {
+        const leftPoints = leftTrack.points.slice().sort((a, b) => a.segIndex - b.segIndex);
+        const rightPoints = rightTrack.points.slice().sort((a, b) => a.segIndex - b.segIndex);
+        if (
+            leftPoints.length < PIPE_TRACK_CONFIG.fragmentMergeMinPoints ||
+            rightPoints.length < PIPE_TRACK_CONFIG.fragmentMergeMinPoints
+        ) {
+            return null;
+        }
+
+        const leftEnd = leftPoints[leftPoints.length - 1];
+        const rightStart = rightPoints[0];
+        // 这里只允许第 i 张末端与第 i+1 张起点合并，绝不跨过空白/漏检剖面。
+        if (rightStart.segIndex - leftEnd.segIndex !== 1) return null;
+
+        const endpointDepthDiff = Math.abs(leftEnd.trackDepth - rightStart.trackDepth);
+        if (endpointDepthDiff > PIPE_TRACK_CONFIG.fragmentMergeMaxEndpointDepthDiffM) return null;
+        const leftMeanDepth = leftPoints.reduce((sum, point) => sum + point.trackDepth, 0) / leftPoints.length;
+        const rightMeanDepth = rightPoints.reduce((sum, point) => sum + point.trackDepth, 0) / rightPoints.length;
+        const meanDepthDiff = Math.abs(leftMeanDepth - rightMeanDepth);
+        if (meanDepthDiff > PIPE_TRACK_CONFIG.fragmentMergeMaxMeanDepthDiffM) return null;
+
+        const alongGap = Math.abs(rightStart.trackS - leftEnd.trackS);
+        if (alongGap > PIPE_TRACK_CONFIG.fragmentMergeMaxAlongGapM) return null;
+
+        const leftFit = fitGprPipeTrackLine(leftPoints, "trackS");
+        const rightFit = fitGprPipeTrackLine(rightPoints, "trackS");
+        const slopeDiff = Math.abs(leftFit.slope - rightFit.slope);
+        if (slopeDiff > PIPE_TRACK_CONFIG.fragmentMergeMaxSlopeDiff) return null;
+
+        const leftRadius = leftPoints.reduce((sum, point) => sum + Math.max(1e-6, Number(point.radius) || 0.02), 0) / leftPoints.length;
+        const rightRadius = rightPoints.reduce((sum, point) => sum + Math.max(1e-6, Number(point.radius) || 0.02), 0) / rightPoints.length;
+        const radiusRatio = Math.max(leftRadius, rightRadius) / Math.min(leftRadius, rightRadius);
+        if (radiusRatio > PIPE_TRACK_CONFIG.fragmentMergeMaxRadiusRatio) return null;
+
+        return 0.50 * (alongGap / PIPE_TRACK_CONFIG.fragmentMergeMaxAlongGapM) +
+            0.30 * (meanDepthDiff / PIPE_TRACK_CONFIG.fragmentMergeMaxMeanDepthDiffM) +
+            0.15 * (slopeDiff / PIPE_TRACK_CONFIG.fragmentMergeMaxSlopeDiff) +
+            0.05 * Math.min(1, Math.abs(Math.log(radiusRatio)) / Math.log(PIPE_TRACK_CONFIG.fragmentMergeMaxRadiusRatio));
+    }
+
+    function mergeAdjacentGprPipeTrackFragments(sourceTracks) {
+        let tracks = sourceTracks.map(track => ({ ...track, points: track.points.slice() }));
+        let mergeCount = 0;
+
+        // 每轮只执行互不冲突的一对一合并；合并后的长轨迹可在下一轮继续与后续相邻片段检查。
+        while (tracks.length >= 2) {
+            const candidates = [];
+            for (let i = 0; i < tracks.length; i++) {
+                for (let j = 0; j < tracks.length; j++) {
+                    if (i === j) continue;
+                    const score = scoreGprPipeTrackFragmentMerge(tracks[i], tracks[j]);
+                    if (score == null) continue;
+                    candidates.push({ leftIndex: i, rightIndex: j, score });
+                }
+            }
+            candidates.sort((a, b) => a.score - b.score);
+            if (!candidates.length) break;
+
+            const usedIndexes = new Set();
+            const mergedTracks = [];
+            candidates.forEach(candidate => {
+                if (usedIndexes.has(candidate.leftIndex) || usedIndexes.has(candidate.rightIndex)) return;
+                const left = tracks[candidate.leftIndex];
+                const right = tracks[candidate.rightIndex];
+                usedIndexes.add(candidate.leftIndex);
+                usedIndexes.add(candidate.rightIndex);
+                mergedTracks.push({
+                    id: left.id,
+                    points: left.points.concat(right.points).sort((a, b) => a.segIndex - b.segIndex),
+                    cost: Number(left.cost || 0) + Number(right.cost || 0) + candidate.score,
+                    specialFragmentMerge: true,
+                    fragmentMergeCount: Number(left.fragmentMergeCount || 0) +
+                        Number(right.fragmentMergeCount || 0) + 1
+                });
+                mergeCount++;
+            });
+
+            if (!mergedTracks.length) break;
+            tracks.forEach((track, index) => {
+                if (!usedIndexes.has(index)) mergedTracks.push(track);
+            });
+            tracks = mergedTracks.sort((a, b) => {
+                const aStart = a.points[0]?.segIndex ?? 0;
+                const bStart = b.points[0]?.segIndex ?? 0;
+                return aStart - bStart;
+            });
+        }
+
+        return { tracks, mergeCount };
+    }
+
+    function classifyGprPipeTrack(track) {
+        const points = track.points.slice().sort((a, b) => a.segIndex - b.segIndex);
+        if (points.length < PIPE_TRACK_CONFIG.minTrackPoints) return null;
+        const planFit = fitGprPipeTrackLine(points, "trackS");
+        const depthFit = fitGprPipeTrackLine(points, "trackDepth");
+        let maxTurnAngleDeg = 0;
+        let minBendRadiusM = Infinity;
+        let monotonicTripleCount = 0;
+
+        for (let i = 1; i < points.length - 1; i++) {
+            const previous = points[i - 1];
+            const current = points[i];
+            const next = points[i + 1];
+            const turnAngleDeg = getGprPipeTrackTurnAngleDeg(previous, current, next);
+            maxTurnAngleDeg = Math.max(maxTurnAngleDeg, turnAngleDeg);
+            const bendRadiusM = getGprPipeTrackBendRadiusM(previous, current, next);
+            if (Number.isFinite(bendRadiusM)) minBendRadiusM = Math.min(minBendRadiusM, bendRadiusM);
+
+            const delta1 = current.trackS - previous.trackS;
+            const delta2 = next.trackS - current.trackS;
+            if (
+                Math.abs(delta1) >= PIPE_TRACK_CONFIG.monotonicShiftM &&
+                Math.abs(delta2) >= PIPE_TRACK_CONFIG.monotonicShiftM &&
+                Math.sign(delta1) === Math.sign(delta2)
+            ) {
+                monotonicTripleCount++;
+            }
+        }
+
+        const isNormallyStraight =
+            planFit.rmse <= PIPE_TRACK_CONFIG.straightPlanRmseM &&
+            depthFit.rmse <= PIPE_TRACK_CONFIG.straightDepthRmseM &&
+            maxTurnAngleDeg <= PIPE_TRACK_CONFIG.straightMaxTurnAngleDeg;
+        // 两段同深度短管因边界剖面定位偏差而合并后，用放宽的整体拟合消除中间横向跳变。
+        const isMergedFragmentStraight = !!track.specialFragmentMerge &&
+            planFit.rmse <= PIPE_TRACK_CONFIG.fragmentMergeStraightPlanRmseM &&
+            depthFit.rmse <= PIPE_TRACK_CONFIG.fragmentMergeStraightDepthRmseM;
+        const isStraight = isNormallyStraight || isMergedFragmentStraight;
+        const isSmoothCurve =
+            maxTurnAngleDeg <= PIPE_TRACK_CONFIG.maxTurnAngleDeg &&
+            (!Number.isFinite(minBendRadiusM) || minBendRadiusM >= PIPE_TRACK_CONFIG.minBendRadiusM);
+
+        // 三点非直线轨迹必须呈连续同向横移；四点以上则允许电缆在局部改变弯曲方向。
+        if (!isStraight && (!isSmoothCurve || (points.length === 3 && monotonicTripleCount === 0))) return null;
+
+        return {
+            ...track,
+            points,
+            trajectoryType: isStraight ? "straight" : "curved",
+            isOblique: isStraight && Math.abs(planFit.slope) >= Math.tan(8 * Math.PI / 180),
+            planFit,
+            depthFit,
+            maxTurnAngleDeg,
+            minBendRadiusM,
+            monotonicTripleCount,
+            specialFragmentMerge: !!track.specialFragmentMerge,
+            fragmentMergeCount: Number(track.fragmentMergeCount || 0)
+        };
+    }
+
+    function buildUnifiedGprPipeTracks(layers) {
+        const tracks = [];
+        let nextTrackId = 1;
+
+        layers.forEach((layerPoints, layerIndex) => {
+            if (!layerPoints.length) return;
+            const activeTracks = tracks.filter(track => {
+                const last = track.points[track.points.length - 1];
+                const gap = layerIndex - last.segIndex;
+                return gap >= 1 && gap <= PIPE_TRACK_CONFIG.maxProfileGap;
+            });
+            const matches = assignGprPipeTracksToLayer(activeTracks, layerPoints);
+            const matchedPointIndexes = new Set();
+            matches.forEach(match => {
+                match.track.points.push(match.point);
+                match.track.cost += match.score;
+                matchedPointIndexes.add(match.pointIndex);
+            });
+
+            layerPoints.forEach((point, pointIndex) => {
+                if (matchedPointIndexes.has(pointIndex)) return;
+                tracks.push({ id: nextTrackId++, points: [point], cost: 0 });
+            });
+        });
+
+        const merged = mergeAdjacentGprPipeTrackFragments(tracks);
+        return {
+            tracks: merged.tracks.map(classifyGprPipeTrack).filter(Boolean),
+            fragmentMergeCount: merged.mergeCount
+        };
+    }
+
+    function getGprPipeTrackRenderPoints(track, frame) {
+        if (track.trajectoryType !== "straight") {
+            return track.points.map(item => item.center.clone());
+        }
+        return track.points.map(item => {
+            const fittedS = track.planFit.intercept + track.planFit.slope * item.trackT;
+            const fittedDepth = track.depthFit.intercept + track.depthFit.slope * item.trackT;
+            return frame.toWorld(fittedS, item.trackT, fittedDepth);
+        });
+    }
+
+    function renderUnifiedGprPipeTracks(segmentAnnoCenters, renderedSegmentGeometries, world, groundY) {
+        const frame = buildGprPipeTrackingFrame(segmentAnnoCenters, renderedSegmentGeometries, groundY);
+        const prepared = prepareUnifiedGprPipeTrackingLayers(segmentAnnoCenters, frame);
+        const trackingResult = buildUnifiedGprPipeTracks(prepared.layers);
+        const tracks = trackingResult.tracks;
+        const pipelineEntries = tracks.map(track => {
+            const centers = track.points;
+            const colorKey = makeGprPipeColorKeyFromCenters(centers, { source: "unified" });
+            const legacyColorKey = makeGprPipeLegacyColorKeyFromCenters(centers, { source: "unified" });
+            return {
+                root: `unified-${track.id}`,
+                track,
+                centers,
+                colorKey,
+                legacyColorKey,
+                assignment: getGprPipeAssignmentByKey(colorKey, [legacyColorKey])
+            };
+        });
+        const selectedCableAlignment = selectBestGprPipeCableAlignment(pipelineEntries);
+        const connectionGroup = new THREE.Group();
+        let renderedTrackCount = 0;
+        let straightCount = 0;
+        let curvedCount = 0;
+
+        pipelineEntries.forEach((entry, index) => {
+            const track = entry.track;
+            const defaultColor = new THREE.Color();
+            if (pipelineEntries.length === 1) {
+                defaultColor.setHex(GPR_PIPE_DEFAULT_COLOR_HEX);
+            } else {
+                defaultColor.setHSL(index / pipelineEntries.length, 0.8, 0.5);
+            }
+            const defaultColorHex = defaultColor.getHex();
+            const renderColorHex = resolveGprPipeColorHexByKey(
+                entry.colorKey,
+                defaultColorHex,
+                [entry.legacyColorKey]
+            );
+            const cableAlignment = selectedCableAlignment && selectedCableAlignment.root === entry.root
+                ? selectedCableAlignment.alignment
+                : null;
+            const centerlinePoints = cableAlignment
+                ? cableAlignment.alignedPoints
+                : getGprPipeTrackRenderPoints(track, frame);
+            const averageRadius = track.points.reduce((sum, item) => sum + item.radius, 0) / track.points.length;
+            const pipeGroup = new THREE.Group();
+            let mesh = createSmoothTubeThroughPoints(centerlinePoints, averageRadius, renderColorHex);
+
+            if (mesh) {
+                const trajectoryName = cableAlignment
+                    ? "黄色路径校正地下电缆"
+                    : track.trajectoryType === "curved"
+                        ? "自动识别弯曲管道/电缆"
+                        : track.isOblique
+                            ? "自动识别斜向直管"
+                            : "自动识别直管";
+                registerGprPipePickMesh(mesh, centerlinePoints, {
+                    source: "unified",
+                    name: trajectoryName,
+                    trajectoryType: track.trajectoryType,
+                    isOblique: track.isOblique,
+                    colorHex: defaultColorHex,
+                    colorKey: entry.colorKey,
+                    legacyColorKey: entry.legacyColorKey,
+                    alignedToSurfaceCable: !!cableAlignment,
+                    alignmentMedianOffsetM: cableAlignment?.medianDistance ?? null,
+                    alignmentMeanOffsetM: cableAlignment?.meanDistance ?? null
+                });
+                pipeGroup.add(mesh);
+            }
+
+            // TubeGeometry 极端情况下创建失败时，逐段圆柱兜底，保证已确认轨迹仍可见。
+            if (pipeGroup.children.length === 0) {
+                for (let i = 0; i < centerlinePoints.length - 1; i++) {
+                    mesh = createHollowCylinderBetween(centerlinePoints[i], centerlinePoints[i + 1], averageRadius);
+                    if (!mesh) continue;
+                    if (mesh.material?.color) mesh.material.color.setHex(renderColorHex);
+                    registerGprPipePickMesh(mesh, [centerlinePoints[i], centerlinePoints[i + 1]], {
+                        source: "unified",
+                        name: track.trajectoryType === "curved" ? "自动识别弯曲管道/电缆" : "自动识别直管",
+                        trajectoryType: track.trajectoryType,
+                        colorHex: defaultColorHex,
+                        colorKey: entry.colorKey,
+                        legacyColorKey: entry.legacyColorKey
+                    });
+                    pipeGroup.add(mesh);
+                }
+            }
+
+            if (pipeGroup.children.length > 0) {
+                connectionGroup.add(pipeGroup);
+                renderedTrackCount++;
+                if (track.trajectoryType === "curved") curvedCount++;
+                else straightCount++;
+            }
+        });
+
+        if (connectionGroup.children.length > 0) {
+            connectionGroup.visible = showAnnotation;
+            world.add(connectionGroup);
+            annotation3DGroups.push(connectionGroup);
+        }
+
+        const stats = {
+            inputPointCount: prepared.inputPointCount,
+            deduplicatedPointCount: prepared.deduplicatedPointCount,
+            trackCount: renderedTrackCount,
+            straightCount,
+            curvedCount,
+            monotonicTrackCount: tracks.filter(track => track.monotonicTripleCount > 0).length,
+            fragmentMergeCount: trackingResult.fragmentMergeCount
+        };
+        window.gprPipeTrackingStats = stats;
+        console.log(
+            `✅ GPR统一管线追踪完成：${prepared.inputPointCount} 个顶点，` +
+            `去重后 ${prepared.deduplicatedPointCount} 个，连接 ${renderedTrackCount} 条` +
+            `（直线/斜管 ${straightCount}，弯曲管线 ${curvedCount}，` +
+            `短管段合并 ${trackingResult.fragmentMergeCount} 处）。`
+        );
+        return stats;
+    }
+
     // 三维拼接固定使用完成波形识别和顶点定位的原始二维剖面；
     // 空间位置以同名CSV逐道RTK为优先，规划Z字路径和后端旧几何作为回退。
     function render3DZigzagAll(result) {
@@ -8259,6 +8953,7 @@
         window.currentImportedInspectionMapGroup = null;
         window.gprDataWorldGroup = null;
         window.gprDepthDisplayScale = 1;
+        window.gprPipeTrackingStats = null;
         // GPR 处理会重建 WebGL 场景，旧的规划线对象已经不属于当前 scene。
         // 先清空引用，避免后续隐藏规划线时误处理旧场景对象。
         window.gprScanPlanGroup = null;
@@ -8512,8 +9207,20 @@
             }
         });
 
+        // ================= 3.2 统一顶点轨迹连接 =================
+        // 所有颜色和来源的顶点统一进入同一套一对一轨迹匹配；显示标注按钮负责切换本组可见性。
+        renderUnifiedGprPipeTracks(
+            segmentAnnoCenters,
+            renderedSegmentGeometries,
+            world,
+            gprGroundY
+        );
+
+        // 保留旧代码用于历史数据结构兼容排查，但禁止普通/彩色两套逻辑重复生成管线。
+        const useLegacyColorGroupedPipeLinking = false;
+
         // ================= 3.2 剖面之间的圆柱连接（按管道分组、不同颜色） =================
-        if (segmentAnnoCenters.length >= 3) { // ✅ 修改：至少需要 3 个剖面才可能形成三层跨越
+        if (useLegacyColorGroupedPipeLinking && segmentAnnoCenters.length >= 3) { // ✅ 修改：至少需要 3 个剖面才可能形成三层跨越
             const edges = [];
             const potentialLinks = []; // 用于暂存两两相邻剖面之间的候选连线
 
@@ -8744,7 +9451,7 @@
 
         // ================= 3.2b 倾斜/交叉管道彩色强制连接 =================
         // 同一标注批次（同色/同 groupId）的圆圈在相邻剖面之间强制连接，不再受 maxZDiff / maxYDiff 限制。
-        if (segmentAnnoCenters.length >= 2) {
+        if (useLegacyColorGroupedPipeLinking && segmentAnnoCenters.length >= 2) {
             const forcedPipeMap = new Map(); // pipeGroupId -> {colorHex, bySegment: Map(segIndex -> [centerObj])}
 
             segmentAnnoCenters.forEach((centers, segIndex) => {
