@@ -9665,13 +9665,15 @@
 
         // 3.4 画三维坐标轴 / 地下环境长方体。
         // 只有多张剖面构成平行测线时，才让横向 Distance 轴与第一张剖面平行；
-        // 规划路径或后端旧几何形成的 Z 字布局继续使用原有坐标框，避免错误旋转。
+        // Z 字布局使用全部剖面的最小面积旋转包围矩形，观察侧、初始相机和
+        // 水平镜像补偿仍与平行剖面共用同一套方向标定。
         const isParallelProfileLayout = maxDepth > 0 && !usePlannedLayout &&
             areGprProfilesParallel(renderedSegmentGeometries);
         const validRenderedGeometries = renderedSegmentGeometries.filter(Boolean);
         const firstRenderedGeometry = validRenderedGeometries[0] || null;
-        let depthAxisCameraDirection = null;
-        let mirrorHorizontalView = false;
+        const profileViewCalibration = getGprProfileViewCalibration(renderedSegmentGeometries);
+        let depthAxisCameraDirection = profileViewCalibration?.cameraDirection || null;
+        let mirrorHorizontalView = profileViewCalibration?.mirrorHorizontalView === true;
         if (maxDepth > 0) {
             const usedFirstProfileBox = isParallelProfileLayout
                 ? addAxesAlignedToFirstProfile(
@@ -9679,7 +9681,8 @@
                     renderedSegmentGeometries,
                     maxDepth,
                     gprGroundY,
-                    depthDisplayScale
+                    depthDisplayScale,
+                    profileViewCalibration
                 )
                 : false;
             if (usedFirstProfileBox && firstRenderedGeometry?._fromRtk) {
@@ -9689,9 +9692,17 @@
                     mirrorHorizontalView = window.gprAxesGroup.userData.mirrorHorizontalView === true;
                 }
             }
-            const usedOrientedBox = !usedFirstProfileBox && usePlannedLayout &&
+            const usedMinimumProfileBox = !usedFirstProfileBox &&
+                addMinimumBoundingAxesFromProfiles(
+                    scene,
+                    renderedSegmentGeometries,
+                    maxDepth,
+                    gprGroundY,
+                    depthDisplayScale
+                );
+            const usedOrientedBox = !usedFirstProfileBox && !usedMinimumProfileBox && usePlannedLayout &&
                 addOrientedAxesFromScanPlan(scene, bounds, maxDepth, gprGroundY);
-            if (!usedFirstProfileBox && !usedOrientedBox) {
+            if (!usedFirstProfileBox && !usedMinimumProfileBox && !usedOrientedBox) {
                 addAxes(scene, bounds, displayedMaxDepth, gprGroundY, maxDepth);
             }
         }
@@ -9717,8 +9728,8 @@
         let controlSpan = span;
 
         let radius = Math.max(span * 2.0, 3.0);
-        // 平行RTK布局从首张剖面所在一侧观察。需要从局部反侧观察时，
-        // 仅水平镜像画面，使首张采集道序仍显示为从左到右。
+        // 平行剖面和 Z 字剖面都从首张剖面所在一侧观察。需要从局部反侧观察时，
+        // 仅水平镜像画面，使首张采集道序仍显示为从左到右，不改动任何剖面或RTK坐标。
         const initialCameraTheta = depthAxisCameraDirection
             ? Math.atan2(depthAxisCameraDirection.z, depthAxisCameraDirection.x)
             : Math.PI / 4;
@@ -9726,8 +9737,11 @@
         let phi = Math.PI / 3.5;
 
         if (depthAxisCameraDirection) {
+            const layoutLabel = isParallelProfileLayout ? "平行剖面" : "Z字剖面";
             console.log(
-                `✅ 平行RTK剖面已从首张所在侧观察：theta=${(initialCameraTheta * 180 / Math.PI).toFixed(2)}°，水平镜像视图=${mirrorHorizontalView}。`
+                `✅ ${layoutLabel}已从首张所在侧观察：` +
+                `theta=${(initialCameraTheta * 180 / Math.PI).toFixed(2)}°，` +
+                `水平镜像视图=${mirrorHorizontalView}。`
             );
         }
 
@@ -9812,7 +9826,7 @@
                 modeParts.push(`原始剖面比例 · 深度显示×${depthDisplayScale.toFixed(2)}`);
             }
             if (mirrorHorizontalView) modeParts.push("水平镜像");
-            modeParts.push("RTK坐标未变");
+            modeParts.push("剖面坐标未变");
             displayModeNote.textContent = modeParts.join(" · ");
             container.appendChild(displayModeNote);
         }
@@ -10577,35 +10591,46 @@
     }
 
     /**
-     * 以第一张剖面的道方向作为局部横轴，将全部剖面投影到该坐标系后生成包围盒。
-     * 调用方必须先确认是多张平行剖面；本函数只调整坐标框朝向，不改动任何剖面或RTK位置。
+     * 根据首张剖面的道方向和整组剖面的横向推进方向，统一确定初始观察侧。
+     * 该标定同时适用于平行测线和 Z 字路径，只控制相机/画面显示，不修改剖面数据或世界坐标。
      */
-    function addAxesAlignedToFirstProfile(scene, geometries, maxDepth, groundY = 0, depthDisplayScale = 1) {
+    function getGprProfileViewCalibration(geometries) {
         const validGeometries = (Array.isArray(geometries) ? geometries : []).filter(Boolean);
-        if (!scene || validGeometries.length < 2 || !(maxDepth > 0)) return false;
+        if (validGeometries.length < 2) return null;
 
-        const reference = validGeometries[0];
-        const referenceDirection = getGprProfileHorizontalDirection(reference);
-        if (!referenceDirection) return false;
-        // 局部 +X 始终沿首张剖面的 RTK 道序，不移动或反转任何雷达数据。
-        const xDirX = referenceDirection.x;
-        const xDirZ = referenceDirection.z;
-        const firstCenter = reference._fromRtk ? getGprProfileHorizontalCenter(reference) : null;
-        const lastCenter = reference._fromRtk
-            ? getGprProfileHorizontalCenter(validGeometries[validGeometries.length - 1])
-            : null;
-        const firstToLastAcross = firstCenter && lastCenter
-            ? (lastCenter.x - firstCenter.x) * -xDirZ + (lastCenter.z - firstCenter.z) * xDirX
-            : 0;
-        // 若后续测线位于默认 +Z 侧，改从 -Z 侧观察，确保首张在前。
-        // 此时屏幕横向需要镜像，才能同时让采集方向从左到右；镜像仅作用于视图。
+        const referenceGeometry = validGeometries[0];
+        const referenceDirection = getGprProfileHorizontalDirection(referenceGeometry);
+        const firstCenter = getGprProfileHorizontalCenter(referenceGeometry);
+        const lastCenter = getGprProfileHorizontalCenter(validGeometries[validGeometries.length - 1]);
+        if (!referenceDirection || !firstCenter || !lastCenter) return null;
+
+        const firstToLastAcross =
+            (lastCenter.x - firstCenter.x) * -referenceDirection.z +
+            (lastCenter.z - firstCenter.z) * referenceDirection.x;
+        if (!Number.isFinite(firstToLastAcross)) return null;
+
+        // 若后续剖面位于首张道方向的左侧，相机改从另一侧观察；
+        // 画布同时水平镜像，使首张的道序在屏幕上仍为从左到右。
         const mirrorHorizontalView = firstToLastAcross > 0;
-        const zDirX = mirrorHorizontalView ? xDirZ : -xDirZ;
-        const zDirZ = mirrorHorizontalView ? -xDirX : xDirX;
-        const phi = Math.atan2(xDirZ, xDirX);
+        const cameraDirection = {
+            x: mirrorHorizontalView ? referenceDirection.z : -referenceDirection.z,
+            z: mirrorHorizontalView ? -referenceDirection.x : referenceDirection.x
+        };
 
+        return {
+            referenceGeometry,
+            referenceDirection,
+            firstCenter,
+            lastCenter,
+            firstToLastAcross,
+            mirrorHorizontalView,
+            cameraDirection
+        };
+    }
+
+    function collectGprProfileHorizontalPoints(geometries) {
         const horizontalPoints = [];
-        validGeometries.forEach(geometry => {
+        (Array.isArray(geometries) ? geometries : []).filter(Boolean).forEach(geometry => {
             const traceX = geometry.traceX;
             const traceY = geometry.traceY;
             if (
@@ -10631,6 +10656,247 @@
                 z: startZ + length * Math.sin(geometryPhi)
             });
         });
+        return horizontalPoints;
+    }
+
+    function buildGprHorizontalConvexHull(points) {
+        const sorted = (Array.isArray(points) ? points : [])
+            .map(point => ({ x: Number(point?.x), z: Number(point?.z) }))
+            .filter(point => Number.isFinite(point.x) && Number.isFinite(point.z))
+            .sort((a, b) => a.x - b.x || a.z - b.z);
+        const unique = [];
+        sorted.forEach(point => {
+            const previous = unique[unique.length - 1];
+            if (!previous || Math.abs(point.x - previous.x) > 1e-9 || Math.abs(point.z - previous.z) > 1e-9) {
+                unique.push(point);
+            }
+        });
+        if (unique.length <= 2) return unique;
+
+        const cross = (origin, a, b) =>
+            (a.x - origin.x) * (b.z - origin.z) -
+            (a.z - origin.z) * (b.x - origin.x);
+        const lower = [];
+        unique.forEach(point => {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 1e-10) {
+                lower.pop();
+            }
+            lower.push(point);
+        });
+        const upper = [];
+        for (let i = unique.length - 1; i >= 0; i--) {
+            const point = unique[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 1e-10) {
+                upper.pop();
+            }
+            upper.push(point);
+        }
+        lower.pop();
+        upper.pop();
+        return lower.concat(upper);
+    }
+
+    /**
+     * 在 X/Z 平面上用凸包边方向扫描最小面积旋转包围矩形。
+     * 面积近似相等时优先选择短边更窄的候选，并始终把较长边作为局部 X/Distance 轴。
+     */
+    function computeMinimumAreaGprRectangle(points, referenceDirection = null) {
+        const hull = buildGprHorizontalConvexHull(points);
+        if (hull.length < 2) return null;
+
+        let best = null;
+        const edgeCount = hull.length === 2 ? 1 : hull.length;
+        for (let i = 0; i < edgeCount; i++) {
+            const a = hull[i];
+            const b = hull[(i + 1) % hull.length];
+            const edgeX = b.x - a.x;
+            const edgeZ = b.z - a.z;
+            const edgeLength = Math.hypot(edgeX, edgeZ);
+            if (!(edgeLength > 1e-9)) continue;
+
+            const u = { x: edgeX / edgeLength, z: edgeZ / edgeLength };
+            const v = { x: -u.z, z: u.x };
+            let minU = Infinity;
+            let maxU = -Infinity;
+            let minV = Infinity;
+            let maxV = -Infinity;
+            hull.forEach(point => {
+                const along = point.x * u.x + point.z * u.z;
+                const across = point.x * v.x + point.z * v.z;
+                minU = Math.min(minU, along);
+                maxU = Math.max(maxU, along);
+                minV = Math.min(minV, across);
+                maxV = Math.max(maxV, across);
+            });
+
+            const spanU = Math.max(0, maxU - minU);
+            const spanV = Math.max(0, maxV - minV);
+            const area = spanU * spanV;
+            const shortSide = Math.min(spanU, spanV);
+            const areaTolerance = best ? Math.max(1e-10, best.area * 1e-10) : 0;
+            const isWorseThanBest = best && (
+                area > best.area + areaTolerance ||
+                (Math.abs(area - best.area) <= areaTolerance && shortSide >= best.shortSide - 1e-10)
+            );
+            if (isWorseThanBest) {
+                continue;
+            }
+
+            if (spanU >= spanV) {
+                best = {
+                    xAxis: u,
+                    zAxis: v,
+                    minX: minU,
+                    maxX: maxU,
+                    minZ: minV,
+                    maxZ: maxV,
+                    length: spanU,
+                    width: spanV,
+                    area,
+                    shortSide
+                };
+            } else {
+                // 将原法向 v 升格为长边方向；新 zAxis=-u 以保持右手坐标系。
+                best = {
+                    xAxis: v,
+                    zAxis: { x: -u.x, z: -u.z },
+                    minX: minV,
+                    maxX: maxV,
+                    minZ: -maxU,
+                    maxZ: -minU,
+                    length: spanV,
+                    width: spanU,
+                    area,
+                    shortSide
+                };
+            }
+        }
+        if (!best) return null;
+
+        // 矩形本身在 180° 方向上等价；使长边正向尽量与首张剖面道序一致，
+        // 可避免轻微坐标抖动导致 Distance 轴在两次渲染间突然反向。
+        if (
+            referenceDirection &&
+            Number.isFinite(Number(referenceDirection.x)) &&
+            Number.isFinite(Number(referenceDirection.z)) &&
+            best.xAxis.x * Number(referenceDirection.x) + best.xAxis.z * Number(referenceDirection.z) < 0
+        ) {
+            best.xAxis = { x: -best.xAxis.x, z: -best.xAxis.z };
+            best.zAxis = { x: -best.zAxis.x, z: -best.zAxis.z };
+            const oldMinX = best.minX;
+            const oldMaxX = best.maxX;
+            const oldMinZ = best.minZ;
+            const oldMaxZ = best.maxZ;
+            best.minX = -oldMaxX;
+            best.maxX = -oldMinX;
+            best.minZ = -oldMaxZ;
+            best.maxZ = -oldMinZ;
+        }
+
+        best.angleRad = Math.atan2(best.xAxis.z, best.xAxis.x);
+        best.hull = hull;
+        return best;
+    }
+
+    /**
+     * 为 Z 字/非平行剖面生成最小面积旋转长方体。
+     * 水平面只包围最终渲染的剖面坐标，竖直面仍使用真实 Depth 刻度和显示深度倍率。
+     */
+    function addMinimumBoundingAxesFromProfiles(
+        scene,
+        geometries,
+        maxDepth,
+        groundY = 0,
+        depthDisplayScale = 1
+    ) {
+        if (!scene || !(maxDepth > 0)) return false;
+        const validGeometries = (Array.isArray(geometries) ? geometries : []).filter(Boolean);
+        if (validGeometries.length < 2) return false;
+        const horizontalPoints = collectGprProfileHorizontalPoints(validGeometries);
+        if (horizontalPoints.length < 2) return false;
+
+        const firstGeometry = validGeometries[0];
+        const referenceDirection = getGprProfileHorizontalDirection(firstGeometry);
+        const rectangle = computeMinimumAreaGprRectangle(horizontalPoints, referenceDirection);
+        if (!rectangle) return false;
+
+        const horizontalSpan = Math.max(rectangle.length, rectangle.width, 0.01);
+        const margin = Math.max(0.02, horizontalSpan * 0.015);
+        const safeDepthDisplayScale = Number.isFinite(Number(depthDisplayScale)) && Number(depthDisplayScale) > 0
+            ? Number(depthDisplayScale)
+            : 1;
+        const displayedMaxDepth = maxDepth * safeDepthDisplayScale;
+        const localBounds = {
+            minX: rectangle.minX - margin,
+            maxX: rectangle.maxX + margin,
+            minY: groundY - displayedMaxDepth,
+            maxY: groundY,
+            minZ: rectangle.minZ - margin,
+            maxZ: rectangle.maxZ + margin
+        };
+
+        addAxes(scene, localBounds, displayedMaxDepth, groundY, maxDepth);
+        const axisGroup = window.gprAxesGroup;
+        if (!axisGroup || !window.boxCenter) return false;
+
+        const localCenter = window.boxCenter.clone();
+        axisGroup.rotation.y = -rectangle.angleRad;
+        axisGroup.name = "按全部GPR剖面最小旋转包围矩形生成的地下环境长方体";
+        axisGroup.userData.faceVisibilityInLocalAxes = true;
+        axisGroup.userData.boxCenterLocal = localCenter;
+        axisGroup.userData.referenceProfilePhiRad = rectangle.angleRad;
+        axisGroup.userData.minimumBoundingRectangle = {
+            lengthM: rectangle.length,
+            widthM: rectangle.width,
+            areaM2: rectangle.area,
+            angleRad: rectangle.angleRad,
+            sourcePointCount: horizontalPoints.length,
+            hullPointCount: rectangle.hull.length,
+            marginM: margin
+        };
+        axisGroup.updateMatrixWorld(true);
+        window.boxCenter = localCenter.clone().applyMatrix4(axisGroup.matrixWorld);
+        window.gprAxesReferencePhiRad = rectangle.angleRad;
+
+        console.log(
+            `✅ Z字GPR剖面已使用最小旋转包围矩形：` +
+            `长边 ${rectangle.length.toFixed(3)}m，短边 ${rectangle.width.toFixed(3)}m，` +
+            `方位角 ${(rectangle.angleRad * 180 / Math.PI).toFixed(2)}°，` +
+            `凸包顶点 ${rectangle.hull.length} 个。`
+        );
+        return true;
+    }
+
+    /**
+     * 以第一张剖面的道方向作为局部横轴，将全部剖面投影到该坐标系后生成包围盒。
+     * 调用方必须先确认是多张平行剖面；本函数只调整坐标框朝向，不改动任何剖面或RTK位置。
+     */
+    function addAxesAlignedToFirstProfile(
+        scene,
+        geometries,
+        maxDepth,
+        groundY = 0,
+        depthDisplayScale = 1,
+        viewCalibration = null
+    ) {
+        const validGeometries = (Array.isArray(geometries) ? geometries : []).filter(Boolean);
+        if (!scene || validGeometries.length < 2 || !(maxDepth > 0)) return false;
+
+        const calibration = viewCalibration || getGprProfileViewCalibration(validGeometries);
+        if (!calibration) return false;
+        const reference = calibration.referenceGeometry;
+        const referenceDirection = calibration.referenceDirection;
+        // 局部 +X 始终沿首张剖面的 RTK 道序，不移动或反转任何雷达数据。
+        const xDirX = referenceDirection.x;
+        const xDirZ = referenceDirection.z;
+        // 若后续测线位于默认 +Z 侧，改从 -Z 侧观察，确保首张在前。
+        // 此时屏幕横向需要镜像，才能同时让采集方向从左到右；镜像仅作用于视图。
+        const mirrorHorizontalView = calibration.mirrorHorizontalView;
+        const zDirX = calibration.cameraDirection.x;
+        const zDirZ = calibration.cameraDirection.z;
+        const phi = Math.atan2(xDirZ, xDirX);
+
+        const horizontalPoints = collectGprProfileHorizontalPoints(validGeometries);
         if (horizontalPoints.length < 2) return false;
 
         let minAlong = Infinity;
