@@ -18,12 +18,12 @@ public class GprDetection {
     private double x2;
     private double y2;
 
-    // 原始矩阵坐标中的波形顶点；定位不可靠时为 null。
+    // YOLO Pose 预测的原始矩阵坐标中的波形顶点；置信度不足时为 null。
     private Double apexCol;
     private Double apexRow;
-    // 模板匹配强度的 0～1 归一化值，不是统计校准过的概率。
+    // 模型输出的关键点置信度，范围为 0～1。
     private Double apexScore;
-    // bilateral 或 singleWing，供界面区分单侧推定的顶点。
+    // 当前模型输出为 pose；保留该字段以兼容旧版 bilateral/singleWing 数据。
     private String apexMethod;
 
     public GprDetection(int classId, String label, double confidence,

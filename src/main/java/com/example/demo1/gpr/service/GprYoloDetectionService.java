@@ -26,11 +26,11 @@ import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 
 /**
- * 使用训练好的 YOLO11 ONNX 模型识别偏移前 GPR 双曲线。
+ * 使用训练好的 YOLO11 Pose ONNX 模型识别偏移前 GPR 双曲线及其顶点。
  *
  * <p>模型输入与训练 PNG 保持一致：rawData -> 绝对值 95.5% 分位数截断
  * -> 线性灰度 -> 居中 letterbox 到 640x640。模型输出在后端完成置信度过滤、
- * NMS 和原始矩阵坐标反算，前端只负责绘制。</p>
+ * NMS、检测框和关键点的原始矩阵坐标反算，前端只负责绘制。</p>
  */
 @Service
 public class GprYoloDetectionService implements DisposableBean {
@@ -38,12 +38,16 @@ public class GprYoloDetectionService implements DisposableBean {
     private static final Logger LOGGER = LoggerFactory.getLogger(GprYoloDetectionService.class);
     private static final float LETTERBOX_GRAY = 114.0f / 255.0f;
     private static final String[] CLASS_NAMES = {"cable"};
+    private static final int BOX_FEATURE_COUNT = 4;
+    private static final int KEYPOINT_DIMENSIONS = 3;
+    private static final int KEYPOINT_COUNT = 1;
 
     private final OrtEnvironment environment = OrtEnvironment.getEnvironment();
     private final Resource modelResource;
     private final boolean enabled;
     private final int inputSize;
     private final double confidenceThreshold;
+    private final double keypointThreshold;
     private final double iouThreshold;
     private final int maxDetections;
     private final double grayscalePercentile;
@@ -54,10 +58,11 @@ public class GprYoloDetectionService implements DisposableBean {
 
     public GprYoloDetectionService(
             ResourceLoader resourceLoader,
-            @Value("${gpr.yolo.model:classpath:/models/gpr-hyperbola-yolo11n.onnx}") String modelLocation,
+            @Value("${gpr.yolo.model:classpath:/models/gpr-hyperbola-apex-yolo11n-pose.onnx}") String modelLocation,
             @Value("${gpr.yolo.enabled:true}") boolean enabled,
             @Value("${gpr.yolo.input-size:640}") int inputSize,
             @Value("${gpr.yolo.confidence-threshold:0.50}") double confidenceThreshold,
+            @Value("${gpr.yolo.keypoint-threshold:0.25}") double keypointThreshold,
             @Value("${gpr.yolo.iou-threshold:0.45}") double iouThreshold,
             @Value("${gpr.yolo.max-detections:50}") int maxDetections,
             @Value("${gpr.yolo.grayscale-percentile:0.955}") double grayscalePercentile
@@ -66,6 +71,7 @@ public class GprYoloDetectionService implements DisposableBean {
         this.enabled = enabled;
         this.inputSize = Math.max(32, inputSize);
         this.confidenceThreshold = clamp(confidenceThreshold, 0.0, 1.0);
+        this.keypointThreshold = clamp(keypointThreshold, 0.0, 1.0);
         this.iouThreshold = clamp(iouThreshold, 0.0, 1.0);
         this.maxDetections = Math.max(1, maxDetections);
         this.grayscalePercentile = clamp(grayscalePercentile, 0.5, 0.999);
@@ -95,13 +101,7 @@ public class GprYoloDetectionService implements DisposableBean {
                     if (result.size() == 0) {
                         return List.of();
                     }
-                    List<GprDetection> detections = decodeOutput(result.get(0).getValue(), input);
-                    try {
-                        GprApexLocator.locateAll(rawData, detections);
-                    } catch (RuntimeException apexError) {
-                        LOGGER.warn("GPR 顶点定位失败，保留 YOLO 检测框: {}", apexError.getMessage());
-                    }
-                    return detections;
+                    return decodeOutput(result.get(0).getValue(), input);
                 }
             }
         } catch (Exception ex) {
@@ -110,7 +110,7 @@ public class GprYoloDetectionService implements DisposableBean {
         }
     }
 
-    private synchronized OrtSession ensureSession() throws IOException, OrtException {
+    synchronized OrtSession ensureSession() throws IOException, OrtException {
         if (session != null) {
             return session;
         }
@@ -162,10 +162,10 @@ public class GprYoloDetectionService implements DisposableBean {
         );
         int resizedWidth = Math.max(1, (int) Math.round(sourceWidth * scale));
         int resizedHeight = Math.max(1, (int) Math.round(sourceHeight * scale));
-        double padX = (inputSize - resizedWidth) / 2.0;
-        double padY = (inputSize - resizedHeight) / 2.0;
-        int left = (int) Math.round(padX - 0.1);
-        int top = (int) Math.round(padY - 0.1);
+        double halfPadX = (inputSize - resizedWidth) / 2.0;
+        double halfPadY = (inputSize - resizedHeight) / 2.0;
+        int left = (int) Math.round(halfPadX - 0.1);
+        int top = (int) Math.round(halfPadY - 0.1);
 
         int planeSize = inputSize * inputSize;
         float[] tensorData = new float[3 * planeSize];
@@ -204,12 +204,12 @@ public class GprYoloDetectionService implements DisposableBean {
                 sourceWidth,
                 sourceHeight,
                 scale,
-                padX,
-                padY
+                left,
+                top
         );
     }
 
-    private List<GprDetection> decodeOutput(Object outputValue, PreprocessedInput input) {
+    List<GprDetection> decodeOutput(Object outputValue, PreprocessedInput input) {
         if (!(outputValue instanceof float[][][] output) || output.length == 0 || output[0].length == 0) {
             throw new IllegalArgumentException("不支持的 YOLO 输出类型: " + outputValue.getClass().getName());
         }
@@ -218,8 +218,15 @@ public class GprYoloDetectionService implements DisposableBean {
         boolean channelFirst = predictions.length <= predictions[0].length;
         int featureCount = channelFirst ? predictions.length : predictions[0].length;
         int candidateCount = channelFirst ? predictions[0].length : predictions.length;
-        if (featureCount < 5) {
-            throw new IllegalArgumentException("YOLO 输出特征数不足: " + featureCount);
+        int classFeatureStart = BOX_FEATURE_COUNT;
+        int keypointFeatureStart = classFeatureStart + CLASS_NAMES.length;
+        int expectedFeatureCount = keypointFeatureStart
+                + KEYPOINT_COUNT * KEYPOINT_DIMENSIONS;
+        if (featureCount < expectedFeatureCount) {
+            throw new IllegalArgumentException(
+                    "YOLO Pose 输出特征数不足: " + featureCount
+                            + "，期望至少 " + expectedFeatureCount
+            );
         }
 
         List<GprDetection> candidates = new ArrayList<>();
@@ -231,11 +238,13 @@ public class GprYoloDetectionService implements DisposableBean {
 
             int bestClassId = 0;
             double bestConfidence = -Double.MAX_VALUE;
-            for (int featureIndex = 4; featureIndex < featureCount; featureIndex++) {
+            for (int featureIndex = classFeatureStart;
+                 featureIndex < keypointFeatureStart;
+                 featureIndex++) {
                 double confidence = outputValue(predictions, channelFirst, featureIndex, candidateIndex);
                 if (confidence > bestConfidence) {
                     bestConfidence = confidence;
-                    bestClassId = featureIndex - 4;
+                    bestClassId = featureIndex - classFeatureStart;
                 }
             }
             if (!Double.isFinite(bestConfidence) || bestConfidence < confidenceThreshold) {
@@ -258,7 +267,7 @@ public class GprYoloDetectionService implements DisposableBean {
             String label = bestClassId >= 0 && bestClassId < CLASS_NAMES.length
                     ? CLASS_NAMES[bestClassId]
                     : "class_" + bestClassId;
-            candidates.add(new GprDetection(
+            GprDetection detection = new GprDetection(
                     bestClassId,
                     label,
                     bestConfidence,
@@ -266,7 +275,42 @@ public class GprYoloDetectionService implements DisposableBean {
                     y1,
                     x2,
                     y2
-            ));
+            );
+
+            double apexModelX = outputValue(
+                    predictions,
+                    channelFirst,
+                    keypointFeatureStart,
+                    candidateIndex
+            );
+            double apexModelY = outputValue(
+                    predictions,
+                    channelFirst,
+                    keypointFeatureStart + 1,
+                    candidateIndex
+            );
+            double apexConfidence = outputValue(
+                    predictions,
+                    channelFirst,
+                    keypointFeatureStart + 2,
+                    candidateIndex
+            );
+            double apexCol = (apexModelX - input.padX) / input.scale;
+            double apexRow = (apexModelY - input.padY) / input.scale;
+            if (Double.isFinite(apexCol)
+                    && Double.isFinite(apexRow)
+                    && Double.isFinite(apexConfidence)
+                    && apexConfidence >= keypointThreshold
+                    && apexCol >= 0.0
+                    && apexCol <= input.sourceWidth - 1.0
+                    && apexRow >= 0.0
+                    && apexRow <= input.sourceHeight - 1.0) {
+                detection.setApexCol(apexCol);
+                detection.setApexRow(apexRow);
+                detection.setApexScore(clamp(apexConfidence, 0.0, 1.0));
+                detection.setApexMethod("pose");
+            }
+            candidates.add(detection);
         }
 
         return nonMaximumSuppression(candidates);
@@ -363,7 +407,7 @@ public class GprYoloDetectionService implements DisposableBean {
         }
     }
 
-    private static class PreprocessedInput {
+    static final class PreprocessedInput {
         private final float[] tensorData;
         private final int sourceWidth;
         private final int sourceHeight;
@@ -371,7 +415,7 @@ public class GprYoloDetectionService implements DisposableBean {
         private final double padX;
         private final double padY;
 
-        private PreprocessedInput(
+        PreprocessedInput(
                 float[] tensorData,
                 int sourceWidth,
                 int sourceHeight,

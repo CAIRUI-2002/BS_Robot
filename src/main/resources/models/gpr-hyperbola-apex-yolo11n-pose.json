@@ -1,0 +1,44 @@
+{
+  "model": "YOLO11n-pose",
+  "purpose": "GPR hyperbola box and apex detection",
+  "trained_at": "2026-10-07",
+  "best_epoch": 61,
+  "input": {
+    "name": "images",
+    "shape": [1, 3, 640, 640],
+    "letterbox_value": 114,
+    "grayscale_percentile": 0.955
+  },
+  "output": {
+    "name": "output0",
+    "shape": [1, 8, 8400],
+    "features": [
+      "center_x",
+      "center_y",
+      "width",
+      "height",
+      "cable_confidence",
+      "apex_x",
+      "apex_y",
+      "apex_confidence"
+    ]
+  },
+  "dataset": {
+    "images": 259,
+    "instances": 488,
+    "train_images": 182,
+    "validation_images": 52,
+    "test_images": 25,
+    "test_instances": 49
+  },
+  "test_metrics": {
+    "pytorch_pose_precision": 0.9428,
+    "pytorch_pose_recall": 0.8980,
+    "pytorch_pose_map50": 0.9372,
+    "onnx_pose_precision": 0.9544,
+    "onnx_pose_recall": 0.8776,
+    "onnx_pose_map50": 0.9646,
+    "onnx_pose_map50_95": 0.9523
+  },
+  "sha256": "2DBBF299CA58527DFE2AE7A8BEB0A31A25E00440177590194846C25424361568"
+}
