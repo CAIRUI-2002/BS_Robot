@@ -278,6 +278,7 @@
         straightPlanRmseM: 0.12,
         straightDepthRmseM: 0.10,
         straightMaxTurnAngleDeg: 8,
+        bendDirectionMinTurnAngleDeg: 3,
         monotonicShiftM: 0.08,
         maxRadiusRatio: 4.0,
         maxQuadraticCorrectionM: 0.35,
@@ -295,8 +296,8 @@
     };
 
     // ✅ 管道三维连接平滑配置
-    // 说明：相邻剖面圆圈连接时，若同一条管道跨越 3 个及以上剖面，
-    // 不再逐段生成硬直圆柱，而是根据多个圆心生成 Catmull-Rom 平滑管道。
+    // 说明：只有判定为弯曲的管线才根据多个圆心生成 Catmull-Rom 平滑管道。
+    // 直管（包括斜向直管）始终使用拟合后的首末点生成单根直圆柱，避免测点偏差造成视觉弯曲。
     const PIPE_SMOOTH_CONFIG = {
         enabled: true,
         minPointsForSmooth: 3,
@@ -8369,6 +8370,21 @@
         return Math.acos(cosine) * 180 / Math.PI;
     }
 
+    // 分别在“剖面推进方向-剖面内位置”和“剖面推进方向-深度”平面上计算有符号转角。
+    // 符号相反代表弯曲方向反转；绝对值很小的转角只视为测点抖动。
+    function getGprPipeTrackSignedTurnAngleDeg(a, b, c, valueKey) {
+        const v1t = b.trackT - a.trackT;
+        const v1v = b[valueKey] - a[valueKey];
+        const v2t = c.trackT - b.trackT;
+        const v2v = c[valueKey] - b[valueKey];
+        const len1 = Math.hypot(v1t, v1v);
+        const len2 = Math.hypot(v2t, v2v);
+        if (!(len1 > 1e-8) || !(len2 > 1e-8)) return 0;
+        const cross = v1t * v2v - v1v * v2t;
+        const dot = v1t * v2t + v1v * v2v;
+        return Math.atan2(cross, dot) * 180 / Math.PI;
+    }
+
     function getGprPipeTrackBendRadiusM(a, b, c) {
         const ab = Math.hypot(b.trackS - a.trackS, b.trackT - a.trackT);
         const bc = Math.hypot(c.trackS - b.trackS, c.trackT - b.trackT);
@@ -8683,6 +8699,11 @@
         let maxTurnAngleDeg = 0;
         let minBendRadiusM = Infinity;
         let monotonicTripleCount = 0;
+        let planBendSign = 0;
+        let depthBendSign = 0;
+        let planBendDirectionChanged = false;
+        let depthBendDirectionChanged = false;
+        const minDirectionTurnDeg = PIPE_TRACK_CONFIG.bendDirectionMinTurnAngleDeg || 3;
 
         for (let i = 1; i < points.length - 1; i++) {
             const previous = points[i - 1];
@@ -8692,6 +8713,30 @@
             maxTurnAngleDeg = Math.max(maxTurnAngleDeg, turnAngleDeg);
             const bendRadiusM = getGprPipeTrackBendRadiusM(previous, current, next);
             if (Number.isFinite(bendRadiusM)) minBendRadiusM = Math.min(minBendRadiusM, bendRadiusM);
+
+            const planSignedTurn = getGprPipeTrackSignedTurnAngleDeg(
+                previous,
+                current,
+                next,
+                "trackS"
+            );
+            if (Math.abs(planSignedTurn) >= minDirectionTurnDeg) {
+                const sign = Math.sign(planSignedTurn);
+                if (planBendSign !== 0 && sign !== planBendSign) planBendDirectionChanged = true;
+                planBendSign = sign;
+            }
+
+            const depthSignedTurn = getGprPipeTrackSignedTurnAngleDeg(
+                previous,
+                current,
+                next,
+                "trackDepth"
+            );
+            if (Math.abs(depthSignedTurn) >= minDirectionTurnDeg) {
+                const sign = Math.sign(depthSignedTurn);
+                if (depthBendSign !== 0 && sign !== depthBendSign) depthBendDirectionChanged = true;
+                depthBendSign = sign;
+            }
 
             const delta1 = current.trackS - previous.trackS;
             const delta2 = next.trackS - current.trackS;
@@ -8713,6 +8758,13 @@
             planFit.rmse <= PIPE_TRACK_CONFIG.fragmentMergeStraightPlanRmseM &&
             depthFit.rmse <= PIPE_TRACK_CONFIG.fragmentMergeStraightDepthRmseM;
         const isStraight = isNormallyStraight || isMergedFragmentStraight;
+        // C 形轨迹的有效转角保持同号，继续使用曲线插值；S 形轨迹会出现正负转角切换，
+        // 对这类“不是始终向同一方向弯曲”的连接结果做整体直线拟合。
+        const bendDirectionChanged = planBendDirectionChanged || depthBendDirectionChanged;
+        const straightenInflectedTrack = !isStraight && bendDirectionChanged;
+        const renderAsStraight = isStraight || straightenInflectedTrack;
+        const isOblique = renderAsStraight &&
+            Math.abs(planFit.slope) >= Math.tan(8 * Math.PI / 180);
         const isSmoothCurve =
             maxTurnAngleDeg <= PIPE_TRACK_CONFIG.maxTurnAngleDeg &&
             (!Number.isFinite(minBendRadiusM) || minBendRadiusM >= PIPE_TRACK_CONFIG.minBendRadiusM);
@@ -8723,8 +8775,11 @@
         return {
             ...track,
             points,
-            trajectoryType: isStraight ? "straight" : "curved",
-            isOblique: isStraight && Math.abs(planFit.slope) >= Math.tan(8 * Math.PI / 180),
+            trajectoryType: renderAsStraight ? "straight" : "curved",
+            isOblique,
+            straightenInflectedTrack,
+            planBendDirectionChanged,
+            depthBendDirectionChanged,
             planFit,
             depthFit,
             maxTurnAngleDeg,
@@ -8801,6 +8856,7 @@
         let renderedTrackCount = 0;
         let straightCount = 0;
         let curvedCount = 0;
+        let straightenedInflectionCount = 0;
 
         pipelineEntries.forEach((entry, index) => {
             const track = entry.track;
@@ -8824,7 +8880,24 @@
                 : getGprPipeTrackRenderPoints(track, frame);
             const averageRadius = track.points.reduce((sum, item) => sum + item.radius, 0) / track.points.length;
             const pipeGroup = new THREE.Group();
-            let mesh = createSmoothTubeThroughPoints(centerlinePoints, averageRadius, renderColorHex);
+            // 直管/斜向直管只用拟合后的首末两点生成单根圆柱。
+            // 弯曲方向发生反转的 S 形轨迹也在此拉直；单向弯曲的 C 形轨迹继续走曲线插值。
+            const useStraightCylinder = track.trajectoryType === "straight" &&
+                (!cableAlignment || track.isOblique || track.straightenInflectedTrack) &&
+                centerlinePoints.length >= 2;
+            const renderCenterlinePoints = useStraightCylinder
+                ? [centerlinePoints[0], centerlinePoints[centerlinePoints.length - 1]]
+                : centerlinePoints;
+            let mesh = useStraightCylinder
+                ? createHollowCylinderBetween(
+                    renderCenterlinePoints[0],
+                    renderCenterlinePoints[1],
+                    averageRadius
+                )
+                : createSmoothTubeThroughPoints(renderCenterlinePoints, averageRadius, renderColorHex);
+            if (mesh && useStraightCylinder && mesh.material?.color) {
+                mesh.material.color.setHex(renderColorHex);
+            }
 
             if (mesh) {
                 const trajectoryName = cableAlignment
@@ -8834,11 +8907,12 @@
                         : track.isOblique
                             ? "自动识别斜向直管"
                             : "自动识别直管";
-                registerGprPipePickMesh(mesh, centerlinePoints, {
+                registerGprPipePickMesh(mesh, renderCenterlinePoints, {
                     source: "unified",
                     name: trajectoryName,
                     trajectoryType: track.trajectoryType,
                     isOblique: track.isOblique,
+                    straightenedInflection: track.straightenInflectedTrack,
                     colorHex: defaultColorHex,
                     colorKey: entry.colorKey,
                     legacyColorKey: entry.legacyColorKey,
@@ -8851,11 +8925,11 @@
 
             // TubeGeometry 极端情况下创建失败时，逐段圆柱兜底，保证已确认轨迹仍可见。
             if (pipeGroup.children.length === 0) {
-                for (let i = 0; i < centerlinePoints.length - 1; i++) {
-                    mesh = createHollowCylinderBetween(centerlinePoints[i], centerlinePoints[i + 1], averageRadius);
+                for (let i = 0; i < renderCenterlinePoints.length - 1; i++) {
+                    mesh = createHollowCylinderBetween(renderCenterlinePoints[i], renderCenterlinePoints[i + 1], averageRadius);
                     if (!mesh) continue;
                     if (mesh.material?.color) mesh.material.color.setHex(renderColorHex);
-                    registerGprPipePickMesh(mesh, [centerlinePoints[i], centerlinePoints[i + 1]], {
+                    registerGprPipePickMesh(mesh, [renderCenterlinePoints[i], renderCenterlinePoints[i + 1]], {
                         source: "unified",
                         name: track.trajectoryType === "curved" ? "自动识别弯曲管道/电缆" : "自动识别直管",
                         trajectoryType: track.trajectoryType,
@@ -8871,7 +8945,10 @@
                 connectionGroup.add(pipeGroup);
                 renderedTrackCount++;
                 if (track.trajectoryType === "curved") curvedCount++;
-                else straightCount++;
+                else {
+                    straightCount++;
+                    if (track.straightenInflectedTrack) straightenedInflectionCount++;
+                }
             }
         });
 
@@ -8887,6 +8964,7 @@
             trackCount: renderedTrackCount,
             straightCount,
             curvedCount,
+            straightenedInflectionCount,
             monotonicTrackCount: tracks.filter(track => track.monotonicTripleCount > 0).length,
             fragmentMergeCount: trackingResult.fragmentMergeCount
         };
@@ -8895,7 +8973,7 @@
             `✅ GPR统一管线追踪完成：${prepared.inputPointCount} 个顶点，` +
             `去重后 ${prepared.deduplicatedPointCount} 个，连接 ${renderedTrackCount} 条` +
             `（直线/斜管 ${straightCount}，弯曲管线 ${curvedCount}，` +
-            `短管段合并 ${trackingResult.fragmentMergeCount} 处）。`
+            `反向弯折拉直 ${straightenedInflectionCount} 条，短管段合并 ${trackingResult.fragmentMergeCount} 处）。`
         );
         return stats;
     }
