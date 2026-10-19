@@ -176,7 +176,8 @@
                         <button id="btnStartGpr">开始处理</button>
                         <button id="btnToggleMigration" class="action-btn-small" aria-pressed="false"
                             title="控制下一次GPR处理是否执行速度搜索和 Stolt F-K 偏移；默认关闭">偏移成像: OFF</button>
-                        <button id="btnToggleAnnotation" class="action-btn-small">显示标注: OFF</button>
+                        <button id="btnToggleAnnotation" class="action-btn-small" aria-pressed="false"
+                            title="开启后隐藏三维剖面，仅显示已连接的管道">显示标注: OFF</button>
                         <button id="btnToggleSlices" class="action-btn-small">二维剖面: OFF</button>
 
                         <input type="file" id="pcdLocalFileInput" accept=".pcd,.json" multiple style="display: none;" />
@@ -962,7 +963,7 @@
     <script src="/js/stomp.min.js"></script>
     <script src="/js/reader.js"></script>
     <script src="/js/fisheye-webgl.js"></script>
-    <script src="/js/home.js?v=20261005-gpr-migration-toggle-apex-pipes"></script>
+    <script src="/js/home.js?v=20261010-gpr-pipe-only-view"></script>
 </body>
 
 </html>

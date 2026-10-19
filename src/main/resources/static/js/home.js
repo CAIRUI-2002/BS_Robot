@@ -4704,12 +4704,14 @@
         if (btnAnno) {
             btnAnno.textContent = "显示标注: " + (showAnnotation ? "ON" : "OFF");
             btnAnno.classList.toggle("active", showAnnotation);
+            btnAnno.setAttribute("aria-pressed", showAnnotation ? "true" : "false");
         }
 
         annotation3DGroups.forEach(g => g.visible = showAnnotation);
         if (window.gprSlicesGroup) {
-            // 原始剖面上的识别框和顶点始终可见；按钮只控制管线连接标注。
-            window.gprSlicesGroup.visible = true;
+            // 管道视图与原始剖面互斥：开启标注时隐藏全部三维剖面，
+            // 关闭标注时恢复剖面，避免剖面纹理遮挡已经连接好的管道。
+            window.gprSlicesGroup.visible = !showAnnotation;
         }
     }
 
@@ -5845,13 +5847,13 @@
                     const stats = window.gprPipeTrackingStats;
                     if (stats.trackCount > 0) {
                         setStatus(
-                            `已显示标注并连接 ${stats.trackCount} 条管线` +
+                            `已隐藏三维剖面，仅显示 ${stats.trackCount} 条已连接管线` +
                             `（直线/斜管 ${stats.straightCount} 条，弯曲管线 ${stats.curvedCount} 条` +
                             `${stats.fragmentMergeCount > 0 ? `，短管段合并 ${stats.fragmentMergeCount} 处` : ""}）。`,
                             "success"
                         );
                     } else {
-                        setStatus("已显示顶点标注；未找到跨越至少 2 张相邻剖面的连续管线。", "warning");
+                        setStatus("已隐藏三维剖面；未找到跨越至少 2 张相邻剖面的连续管线。", "warning");
                     }
                 }
                 if (!nextShow) {
@@ -5864,19 +5866,14 @@
                         activeForcedPipeGroupId = null;
                         updateForcedPipeAnnotationUI();
                     }
+                    setStatus("已恢复显示三维剖面。", "success");
                 }
                 if (segmentSelect && !segmentSelect.disabled) {
                     const idx = parseInt(segmentSelect.value, 10);
                     if (!isNaN(idx)) showSegment(idx);
                 }
 
-                // 控制 3D 顶点管线和人工强制连接标记的显示状态。
-                annotation3DGroups.forEach(g => g.visible = showAnnotation);
-
-                // 原始三维剖面及其识别框/顶点始终显示；按钮只切换管线连接及人工标记。
-                if (window.gprSlicesGroup) {
-                    window.gprSlicesGroup.visible = true;
-                }
+                // 三维管线与剖面的互斥显隐已由 setAnnotationButtonState 统一处理。
             });
         }
         // 👇 新增：二维剖面显隐按钮绑定逻辑
@@ -9016,8 +9013,8 @@
 
         // ✅ 新增：创建一个专门用于存放雷达二维剖面的分组，方便一键隐藏
         window.gprSlicesGroup = new THREE.Group();
-        // 原始剖面、识别框和顶点始终保留；“显示标注”只控制红圈和管线连接。
-        window.gprSlicesGroup.visible = true;
+        // 保持当前按钮状态：管道视图开启时，新建场景也不能让剖面重新出现。
+        window.gprSlicesGroup.visible = !showAnnotation;
         world.add(window.gprSlicesGroup);
 
         // 3. 计算几何包围盒 + 最大深度（单位：m）
