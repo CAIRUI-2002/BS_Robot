@@ -10,4 +10,11 @@ public class CablePoint {
     private Double lat;
     private Double lon;
     private Double depth;
+    private Double depthM;
+    private Double depthUncertaintyM;
+    private String depthConfidence;
+    private String depthSource;
+    private Double sM;
+    private Integer depthMeasurementCount;
+    private Boolean depthFinalized;
 }

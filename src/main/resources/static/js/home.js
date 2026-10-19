@@ -23,6 +23,119 @@
     };
     const ROBOT_CAMERA_CALIBRATION_URL = "/config/robot-camera-calibration.json";
     const ROBOT_CAMERA_DIRECTIONS = ["front", "back"];
+    const PIPELINE_DEPTH_API = Object.freeze({
+        start: "/api/pipeline-depth/session/start",
+        pose: "/api/pipeline-depth/pose",
+        cablePoint: "/api/pipeline-depth/cable-point",
+        cablePath: "/api/pipeline-depth/cable-path",
+        finalize: "/api/pipeline-depth/session/finalize"
+    });
+    let pipelineDepthSessionActive = false;
+    let pipelineDepthSessionStartPromise = null;
+    let pipelineDepthEventChain = Promise.resolve();
+    let pipelineDepthPointSequence = 0;
+    let pipelineDepthLastPoseAt = 0;
+
+    function queuePipelineDepthRequest(url, body) {
+        const run = async () => {
+            const response = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: body === undefined ? undefined : JSON.stringify(body)
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.ok === false) {
+                throw new Error(result.error || `实时深度服务请求失败：${response.status}`);
+            }
+            if (Array.isArray(result.nodes)) {
+                window.g_pipelineDepthMap = result.nodes;
+                if (typeof window.applyPipelineDepthMap === "function") {
+                    window.applyPipelineDepthMap(result.nodes);
+                }
+            }
+            return result;
+        };
+        pipelineDepthEventChain = pipelineDepthEventChain.catch(() => undefined).then(run).catch(error => {
+            pipelineDepthSessionActive = false;
+            throw error;
+        });
+        return pipelineDepthEventChain;
+    }
+
+    window.startPipelineDepthSession = function (reason = "inspection", force = false) {
+        if (pipelineDepthSessionActive && !force) return Promise.resolve({ ok: true, active: true });
+        if (pipelineDepthSessionStartPromise && !force) return pipelineDepthSessionStartPromise;
+        let startPromise;
+        startPromise = queuePipelineDepthRequest(PIPELINE_DEPTH_API.start, { reason })
+            .then(result => {
+                pipelineDepthSessionActive = true;
+                pipelineDepthPointSequence = 0;
+                pipelineDepthLastPoseAt = 0;
+                return result;
+            })
+            .catch(error => {
+                pipelineDepthSessionActive = false;
+                console.warn("实时管线深度会话启动失败：", error);
+                throw error;
+            })
+            .finally(() => {
+                if (pipelineDepthSessionStartPromise === startPromise) {
+                    pipelineDepthSessionStartPromise = null;
+                }
+            });
+        pipelineDepthSessionStartPromise = startPromise;
+        return startPromise;
+    };
+
+    window.finalizePipelineDepthSession = function () {
+        if (!pipelineDepthSessionActive) return Promise.resolve({ ok: true, active: false });
+        pipelineDepthSessionActive = false;
+        return queuePipelineDepthRequest(PIPELINE_DEPTH_API.finalize)
+            .catch(error => {
+                console.warn("实时管线深度会话结束失败：", error);
+                throw error;
+            });
+    };
+
+    window.sendPipelineDepthPose = function (pose) {
+        if (!pipelineDepthSessionActive || !pose) return;
+        const now = Date.now();
+        if (now - pipelineDepthLastPoseAt < 100) return;
+        const xM = Number(pose.x);
+        const yM = Number(pose.y);
+        if (!Number.isFinite(xM) || !Number.isFinite(yM)) return;
+        pipelineDepthLastPoseAt = now;
+        queuePipelineDepthRequest(PIPELINE_DEPTH_API.pose, { xM, yM })
+            .catch(error => console.warn("实时深度位姿同步失败：", error));
+    };
+
+    window.sendPipelineDepthCablePoint = async function (point) {
+        if (!point) return;
+        const xM = Number(point.x);
+        const yM = Number(point.y);
+        if (!Number.isFinite(xM) || !Number.isFinite(yM)) return;
+        if (!pipelineDepthSessionActive) {
+            await window.startPipelineDepthSession("cable_recording");
+            const existingPath = Array.isArray(window.savedCablePath) ? window.savedCablePath : [];
+            if (existingPath.length >= 2) {
+                const recoveryPath = existingPath.map(item => ({ x: Number(item.x), y: Number(item.y) }))
+                    .filter(item => Number.isFinite(item.x) && Number.isFinite(item.y));
+                await queuePipelineDepthRequest(PIPELINE_DEPTH_API.cablePath, recoveryPath);
+            }
+        }
+        const pointId = `point-${++pipelineDepthPointSequence}`;
+        return queuePipelineDepthRequest(PIPELINE_DEPTH_API.cablePoint, { pointId, xM, yM });
+    };
+
+    window.replacePipelineDepthCablePath = async function (points, reason = "loaded_path") {
+        const validPoints = Array.isArray(points)
+            ? points.map(point => ({ x: Number(point.x), y: Number(point.y) }))
+                .filter(point => Number.isFinite(point.x) && Number.isFinite(point.y))
+            : [];
+        await window.startPipelineDepthSession(reason, true);
+        if (validPoints.length < 2) return { ok: true, nodes: [] };
+        return queuePipelineDepthRequest(PIPELINE_DEPTH_API.cablePath, validPoints);
+    };
     const robotCameraReaders = {
         front: null,
         back: null
@@ -6361,14 +6474,28 @@
                         angleEl.style.color = Math.abs(Number(angle) - 90) <= 3 ? '#00ff00' : '#ffcc00';
                     }
 
-                    // ✅ 废弃卡尔曼滤波：上位机仅在突变时发深度，用全局变量接住，等待 3D 引擎回溯绑定
+                    // 保留原始值仅用于诊断；真实埋深由后端实时估计器统一输出（单位 m）。
                     if (depth !== null) {
                         window.g_pipelineRawDepth = depth;
-                        window.g_newDepthReceived = depth; // 核心：将突变深度存入专门的回溯变量
                     }
 
                 } catch (e) {
                     console.error("管线数据解析错误:", e);
+                }
+            });
+
+            // 深度估计结果与方向信号分离推送，避免把管线仪原始值误当成真实厘米值。
+            stompClient.subscribe('/topic/pipeline-depth', function (message) {
+                try {
+                    const data = JSON.parse(message.body);
+                    if (Array.isArray(data.nodes)) {
+                        window.g_pipelineDepthMap = data.nodes;
+                        if (typeof window.applyPipelineDepthMap === 'function') {
+                            window.applyPipelineDepthMap(data.nodes);
+                        }
+                    }
+                } catch (e) {
+                    console.error("实时管线深度数据解析错误:", e);
                 }
             });
 
@@ -12296,6 +12423,8 @@
                             lbl.textContent = "⚡ 自动巡线中";
                             lbl.style.color = "#ffaa00"; // 橙色高亮
                         }
+                        window.startPipelineDepthSession("auto_tracking")
+                            .catch(err => setStatus("自动巡线已开启，但实时深度服务不可用：" + err.message, "error"));
                     } else {
                         // === 关闭状态 ===
                         // 恢复默认，文字改为“启动”
@@ -12309,6 +12438,10 @@
                         if (lbl) {
                             lbl.textContent = "运动 (常规)";
                             lbl.style.color = "#00ff00";
+                        }
+                        if (!window.isManualDrawingCableActive) {
+                            window.finalizePipelineDepthSession()
+                                .catch(err => console.warn("停止巡线时结束实时深度会话失败：", err));
                         }
                     }
                 })
@@ -12648,14 +12781,21 @@
         if (btnManualDraw) {
             btnManualDraw.onclick = function () {
                 isManualDrawingCable = !isManualDrawingCable;
+                window.isManualDrawingCableActive = isManualDrawingCable;
                 if (isManualDrawingCable) {
                     this.innerText = "⏹ 结束绘制";
                     this.classList.add('drawing-active');
                     setStatus("手动绘制模式：当前路径记录为电缆", "success");
+                    window.startPipelineDepthSession("manual_drawing")
+                        .catch(err => setStatus("手动绘制已开启，但实时深度服务不可用：" + err.message, "error"));
                 } else {
                     this.innerText = "📍 手动绘制电缆";
                     this.classList.remove('drawing-active');
                     setStatus("手动绘制结束", "warning");
+                    if (!isAutoTracking) {
+                        window.finalizePipelineDepthSession()
+                            .catch(err => console.warn("结束手动绘制时完成深度计算失败：", err));
+                    }
                 }
             };
         }
@@ -13758,10 +13898,57 @@
         let lastCablePos = new THREE.Vector3(-999, -999, 0);
         let lastSignal = -1;
         let currentCableMesh = null;
-        let lastDepthUpdateIdx = 0; // ✅ 新增：用于记录上一次绑定深度的游标位置
         const PIPELINE_FEATURE_SIDE_OFFSET_M = 0.16; // 特征点允许保留较明显的左右定位
         const PIPELINE_TRACK_SIDE_OFFSET_M = 0.07;   // 源版本连续补点只作轻微修正，避免把 1/2 信号画成锯齿线
         let lastPathGroundLiftRefreshMs = 0;
+
+        function bindDepthNodesToPath(path, nodes) {
+            if (!Array.isArray(path) || path.length === 0 || !Array.isArray(nodes) || nodes.length === 0) return;
+            let nodeIndex = 0;
+            for (const point of path) {
+                const px = Number(point.x);
+                const py = Number(point.y);
+                if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+                while (nodeIndex + 1 < nodes.length) {
+                    const current = nodes[nodeIndex];
+                    const next = nodes[nodeIndex + 1];
+                    const currentDist = Math.hypot(px - Number(current.x_m), py - Number(current.y_m));
+                    const nextDist = Math.hypot(px - Number(next.x_m), py - Number(next.y_m));
+                    if (nextDist > currentDist) break;
+                    nodeIndex++;
+                }
+                const node = nodes[nodeIndex];
+                const depthM = node.depth_m === null || node.depth_m === undefined
+                    ? NaN
+                    : Number(node.depth_m);
+                const uncertaintyM = node.uncertainty_1sigma_m === null || node.uncertainty_1sigma_m === undefined
+                    ? NaN
+                    : Number(node.uncertainty_1sigma_m);
+                point.userData = point.userData || {};
+                point.userData.depth = Number.isFinite(depthM) ? depthM : null;
+                point.userData.depthM = Number.isFinite(depthM) ? depthM : null;
+                point.userData.depthUncertaintyM = Number.isFinite(uncertaintyM)
+                    ? uncertaintyM
+                    : null;
+                point.userData.depthConfidence = node.confidence || "unknown";
+                point.userData.depthSource = node.source || "unknown";
+                point.userData.sM = Number.isFinite(Number(node.s_m)) ? Number(node.s_m) : null;
+                point.userData.depthMeasurementCount = Number(node.measurement_count_at_node || 0);
+                point.userData.depthFinalized = node.finalized === true;
+            }
+        }
+
+        window.applyPipelineDepthMap = function (nodes) {
+            if (!Array.isArray(nodes)) return;
+            window.g_pipelineDepthMap = nodes;
+            bindDepthNodesToPath(cablePoints, nodes);
+            if (Array.isArray(window.savedCablePath) && window.savedCablePath !== cablePoints) {
+                bindDepthNodesToPath(window.savedCablePath, nodes);
+            }
+        };
+        if (Array.isArray(window.g_pipelineDepthMap) && window.g_pipelineDepthMap.length > 0) {
+            window.applyPipelineDepthMap(window.g_pipelineDepthMap);
+        }
 
         function rememberPathGroundLiftState(mesh, visiblePoints) {
             if (!mesh || !visiblePoints) return mesh;
@@ -14068,6 +14255,8 @@
             const x = Number(p.x);
             const y = Number(p.y);
             const gps = getGpsFromSlamPoint(x, y, p);
+            const data = p.userData || p;
+            const depthM = data.depthM ?? data.depth ?? null;
 
             return {
                 x,
@@ -14075,12 +14264,23 @@
                 z: Number(p.z ?? 0.08),
                 lat: gps ? gps.lat : null,
                 lon: gps ? gps.lon : null,
-                depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
+                depth: depthM,
+                depthM: depthM,
+                depthUncertaintyM: data.depthUncertaintyM ?? null,
+                depthConfidence: data.depthConfidence ?? null,
+                depthSource: data.depthSource ?? null,
+                sM: data.sM ?? null,
+                depthMeasurementCount: data.depthMeasurementCount ?? null,
+                depthFinalized: data.depthFinalized === true
             };
         }
 
         function vectorCablePoint(p) {
             const projected = getCurrentSlamFromInspectionGps(p);
+            // 新记录使用明确的米制 depthM；旧记录只有 depth，沿用旧界面的厘米换算规则。
+            const restoredDepthM = p.depthM != null
+                ? Number(p.depthM)
+                : (p.depth != null ? Number(p.depth) / 100 : null);
             const v = new THREE.Vector3(
                 projected.x,
                 projected.y,
@@ -14089,7 +14289,14 @@
             const gps = getStoredInspectionGps(p);
 
             v.userData = {
-                depth: p.depth ?? null,
+                depth: Number.isFinite(restoredDepthM) ? restoredDepthM : null,
+                depthM: Number.isFinite(restoredDepthM) ? restoredDepthM : null,
+                depthUncertaintyM: p.depthUncertaintyM ?? null,
+                depthConfidence: p.depthConfidence ?? null,
+                depthSource: p.depthSource ?? null,
+                sM: p.sM ?? null,
+                depthMeasurementCount: p.depthMeasurementCount ?? null,
+                depthFinalized: p.depthFinalized === true,
                 lat: gps ? gps.lat : null,
                 lon: gps ? gps.lon : null,
                 originalX: Number(p.x),
@@ -14289,6 +14496,10 @@
                     btn.textContent = "⏳ 保存中...";
                 }
 
+                // 先完成空间平滑，让保存结果包含当前会话的最终深度值。
+                await window.finalizePipelineDepthSession().catch(error => {
+                    console.warn("最终深度计算不可用，继续保存已有路径数据：", error);
+                });
                 const payload = await collectCurrentInspectionPayload();
 
                 const res = await fetch(INSPECTION_API.saveResult, {
@@ -15139,10 +15350,9 @@
 
                     document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
 
-                    // ✅ 修改：将弹窗深度更新为绑定的真实数值
-                    // 假设 Python 发送的深度单位是 cm，如果是 m 请去掉 / 100
+                    // 弹窗样式保持不变；融合后的路径深度已经统一为 m。
                     if (hitDepth != null) {
-                        document.getElementById('popupDepth').textContent = (hitDepth / 100).toFixed(2) + " m";
+                        document.getElementById('popupDepth').textContent = Number(hitDepth).toFixed(2) + " m";
                     } else {
                         document.getElementById('popupDepth').textContent = "未检测到";
                     }
@@ -15928,7 +16138,14 @@
                     x: roundNumber(p.x, 5),
                     y: roundNumber(p.y, 5),
                     z: roundNumber(p.z ?? 0.08, 5),
-                    depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null)
+                    depth: p.userData ? (p.userData.depth ?? null) : (p.depth ?? null),
+                    depthM: p.userData ? (p.userData.depthM ?? p.userData.depth ?? null) : (p.depthM ?? p.depth ?? null),
+                    depthUncertaintyM: p.userData ? (p.userData.depthUncertaintyM ?? null) : (p.depthUncertaintyM ?? null),
+                    depthConfidence: p.userData ? (p.userData.depthConfidence ?? null) : (p.depthConfidence ?? null),
+                    depthSource: p.userData ? (p.userData.depthSource ?? null) : (p.depthSource ?? null),
+                    sM: p.userData ? (p.userData.sM ?? null) : (p.sM ?? null),
+                    depthMeasurementCount: p.userData ? (p.userData.depthMeasurementCount ?? null) : (p.depthMeasurementCount ?? null),
+                    depthFinalized: p.userData ? p.userData.depthFinalized === true : p.depthFinalized === true
                 })).filter(p => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z))
                 : [];
 
@@ -16244,8 +16461,11 @@
             btnClearCable.onclick = function () {
                 cablePoints.length = 0;
                 segmentPoints.length = 0;
-                lastDepthUpdateIdx = 0; // ✅ 新增：重置深度绑定游标
                 lastCablePos.set(-999, -999, 0);
+                window.savedCablePath = [];
+                window.g_pipelineDepthMap = [];
+                window.startPipelineDepthSession("clear_path", true)
+                    .catch(err => console.warn("清空管线路径时重置深度会话失败：", err));
 
                 if (currentCableMesh) {
                     cableGroup.remove(currentCableMesh);
@@ -16303,7 +16523,6 @@
                         // 2. 清空当前地图上的旧电缆数据及显示网格
                         cablePoints.length = 0;
                         segmentPoints.length = 0;
-                        lastDepthUpdateIdx = 0;
                         if (currentCableMesh) {
                             cableGroup.remove(currentCableMesh);
                             currentCableMesh.geometry.dispose();
@@ -16348,6 +16567,13 @@
                         for (let i = 0; i < displayPoints.length; i++) {
                             displayPoints[i].userData = {
                                 depth: cablePoints[i].userData.depth,
+                                depthM: cablePoints[i].userData.depthM ?? cablePoints[i].userData.depth ?? null,
+                                depthUncertaintyM: cablePoints[i].userData.depthUncertaintyM ?? null,
+                                depthConfidence: cablePoints[i].userData.depthConfidence ?? null,
+                                depthSource: cablePoints[i].userData.depthSource ?? null,
+                                sM: cablePoints[i].userData.sM ?? null,
+                                depthMeasurementCount: cablePoints[i].userData.depthMeasurementCount ?? null,
+                                depthFinalized: cablePoints[i].userData.depthFinalized === true,
                                 source: cablePoints[i].userData.source,
                                 signal: cablePoints[i].userData.signal
                             };
@@ -16356,6 +16582,8 @@
                         // 5. 挂载到全局变量，激活随后的柔性并入跟踪算法 (Flexible Merge)
                         window.savedCablePath = displayPoints;
                         window.syncCablePathPrediction?.(true);
+                        window.replacePipelineDepthCablePath(displayPoints, "kml_path")
+                            .catch(err => console.warn("KML 管线路径同步到深度估计器失败：", err));
 
                         // 6. 构造 CatmullRom 连续曲线并在 3D Scene 中生成黄色粗线条管线
                         const visibleCablePoints = liftPathDisplayPointsAboveGround(displayPoints, cableGroup.position.z);
@@ -17056,6 +17284,7 @@
                         updatedAt: Date.now()
                     };
                     window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
+                    window.sendPipelineDepthPose(currentRobotPose);
 
                     updateNavLine();
                     updateDistanceUI();
@@ -17367,10 +17596,11 @@
 
                             cablePoints.push(cablePt);
                             lastCablePos = cablePt;
+                            window.sendPipelineDepthCablePoint(cablePt)
+                                .catch(err => console.warn("新增管线点同步到深度估计器失败：", err));
 
                             if (cablePoints.length > 2000) {
                                 cablePoints.shift();
-                                if (lastDepthUpdateIdx > 0) lastDepthUpdateIdx--;
                             }
 
                             if (cablePoints.length > 3) {
@@ -17387,6 +17617,13 @@
                                 for (let i = 0; i < displayPoints.length; i++) {
                                     displayPoints[i].userData = {
                                         depth: cablePoints[i].userData.depth,
+                                        depthM: cablePoints[i].userData.depthM ?? cablePoints[i].userData.depth ?? null,
+                                        depthUncertaintyM: cablePoints[i].userData.depthUncertaintyM ?? null,
+                                        depthConfidence: cablePoints[i].userData.depthConfidence ?? null,
+                                        depthSource: cablePoints[i].userData.depthSource ?? null,
+                                        sM: cablePoints[i].userData.sM ?? null,
+                                        depthMeasurementCount: cablePoints[i].userData.depthMeasurementCount ?? null,
+                                        depthFinalized: cablePoints[i].userData.depthFinalized === true,
                                         source: cablePoints[i].userData.source,
                                         signal: cablePoints[i].userData.signal
                                     };
@@ -17407,37 +17644,6 @@
                     }
                     lastSignal = sig;
 
-                    // ==========================================
-                    // 🌟 深度区间回溯绑定 (完全保留原有代码，不动)
-                    // ==========================================
-                    // ... (下方是你原本的 depth 绑定代码，直接原样保留即可)
-
-                    // ==========================================
-                    // 🌟 核心修改：接收到突变深度时，执行“区间回溯绑定”
-                    // ==========================================
-                    if (window.g_newDepthReceived !== null && window.g_newDepthReceived !== undefined) {
-                        let incomingDepth = window.g_newDepthReceived;
-                        window.g_newDepthReceived = null; // 消费掉该次深度数据，防止下一帧重复绑定
-
-                        if (cablePoints.length > 0) {
-                            // 1. 回溯绑定原始路径点 (从上一次游标位置，一直绑到当前最新位置)
-                            for (let i = lastDepthUpdateIdx; i < cablePoints.length; i++) {
-                                cablePoints[i].userData.depth = incomingDepth;
-                            }
-                            console.log(`📍 深度段落回溯绑定完成！区间: [${lastDepthUpdateIdx} ~ ${cablePoints.length - 1}], 深度值: ${incomingDepth}cm`);
-
-                            // 2. 同步更新已经卡尔曼平滑后的显示路径 (window.savedCablePath)
-                            // 以防用户恰好点中了平滑后的曲线段
-                            if (window.savedCablePath && window.savedCablePath.length === cablePoints.length) {
-                                for (let i = lastDepthUpdateIdx; i < window.savedCablePath.length; i++) {
-                                    window.savedCablePath[i].userData.depth = incomingDepth;
-                                }
-                            }
-
-                            // 3. 更新游标！下一次上位机再发突变深度时，就会从这个位置开始往后绑
-                            lastDepthUpdateIdx = cablePoints.length;
-                        }
-                    }
                 }
             }
 

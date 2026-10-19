@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.example.demo1.model.CablePoint;
+import com.example.demo1.service.PipelineDepthService;
 import com.example.demo1.service.VirtualGamepadService;
 
 @RestController
@@ -20,6 +21,9 @@ public class PipelineController {
     @Autowired
     private VirtualGamepadService gamepadService;
 
+    @Autowired
+    private PipelineDepthService pipelineDepthService;
+
     /**
      * ✅ 调用的接口
      * URL: http://<电脑IP>:8080/api/pipeline/update?signal=1&depth=15
@@ -27,8 +31,22 @@ public class PipelineController {
     @GetMapping("/update")
     public String updateSignal(@RequestParam int signal,
                                @RequestParam(required = false) Float depth,
-                               @RequestParam(required = false, name = "angle") Float angle) {
+                               @RequestParam(required = false, name = "angle") Float angle,
+                               @RequestParam(required = false) String sampleId,
+                               @RequestParam(required = false) Double captureTMs,
+                               @RequestParam(required = false) Double backendReceiveTMs) {
+        long receiptTimeMs = System.currentTimeMillis();
         gamepadService.updatePipelineSignal(signal, depth, angle);
+        pipelineDepthService.addSignal(signal, receiptTimeMs);
+        if (depth != null) {
+            pipelineDepthService.addDepth(
+                    sampleId,
+                    depth.doubleValue(),
+                    captureTMs,
+                    backendReceiveTMs,
+                    receiptTimeMs
+            );
+        }
         return "success: signal=" + signal + ", depth=" + depth + ", angle=" + angle;
     }
 
