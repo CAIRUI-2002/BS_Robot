@@ -57,11 +57,16 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private volatile int pipelineSignal = 0;
     private volatile long lastSignalTime = 0;
 
-    // 上一次真正参与运动控制的左右信号
-    // 只记录 1 或 2，不记录中心信号 0
-    private volatile int lastAppliedPipelineDirection = 0;
+    // 上一次收到的有效左右信号
+    // 只记录 1 或 2，不记录中心信号 0，用于识别 1 <-> 2 连续跳变
+    private volatile int lastReceivedPipelineDirection = 0;
 
-    // 信号从 1 跳变为 2，或者从 2 跳变为 1 后，强制反转的结束时间
+    // 信号从 1 跳变为 2，或者从 2 跳变为 1 后，临时视为位于电缆正上方
+    private volatile long signalJumpCenterEndTime = 0L;
+
+    // 记录最近一次左右跳变及原有的强制反向转向结束时间。
+    // 第一次跨线保留原来的“停止前进并转向”逻辑；短时间内再次跳变才判定为中心抖动。
+    private volatile long lastDirectionJumpTime = 0L;
     private volatile long signalReversalEndTime = 0L;
 
     // 自动巡线参数，可由前端通过 setAutoSpeeds 动态修改
@@ -77,17 +82,19 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private static final float MIN_AUTO_FORWARD_SPEED = 0.08f;
     private static final float YAW_SMOOTHING = 0.22f;
 
-    // 管线仪左右信号发生反转后，强制转向持续时间
-    private static final long SIGNAL_REVERSAL_HOLD_MS = 550L;
+    // 两次左右跳变间隔不超过该时间时，判定为电缆正上方的连续抖动。
+    private static final long CONTINUOUS_SIGNAL_JUMP_WINDOW_MS = 350L;
 
-    // 信号反转时直接使用的偏航指令
+    // 连续跳变后保持中心状态的持续时间；后续跳变会不断续期。
+    private static final long SIGNAL_JUMP_CENTER_HOLD_MS = 250L;
+
+    // 保留原有的跨线控制参数：停止前进并按当前方向强制转向。
+    private static final long SIGNAL_REVERSAL_HOLD_MS = 550L;
     private static final float SIGNAL_REVERSAL_YAW = 0.45f;
+    private static final float SIGNAL_REVERSAL_FORWARD_RATIO = 0.0f;
 
     // 到达电缆中心时的前进速度比例
     private static final float CENTER_FORWARD_RATIO = 0.35f;
-
-    // 信号反转期间的前进速度比例；0 表示先停止前进并完成反向转向
-    private static final float SIGNAL_REVERSAL_FORWARD_RATIO = 0.0f;
 
     // 自动巡线偏航平滑状态
     private float lastAutoYawCmd = 0.0f;
@@ -141,8 +148,46 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * @param angleDeg 管线仪罗盘角度，仅透传给前端显示，不参与自动巡线
      */
     public void updatePipelineSignal(int signal, Float depth, Float angleDeg) {
-        this.pipelineSignal = signal;
         long now = System.currentTimeMillis();
+        boolean validDirection = signal == 1 || signal == 2;
+
+        // 左右信号发生 1 <-> 2 跳变时，将短时间内的连续跳变视为位于电缆正上方。
+        // 在数据接收处识别跳变，避免两个信号在 20Hz 运动控制循环之间快速切换而被漏掉。
+        if (validDirection) {
+            boolean directionJumped = lastReceivedPipelineDirection != 0
+                    && signal != lastReceivedPipelineDirection;
+            if (directionJumped) {
+                boolean continuousJump = lastDirectionJumpTime != 0L
+                        && now - lastDirectionJumpTime <= CONTINUOUS_SIGNAL_JUMP_WINDOW_MS;
+
+                // 每次真正跨线都保留原来的停车转向动作；如果属于连续抖动，中心状态具有更高优先级。
+                signalReversalEndTime = now + SIGNAL_REVERSAL_HOLD_MS;
+                if (continuousJump) {
+                    signalJumpCenterEndTime = now + SIGNAL_JUMP_CENTER_HOLD_MS;
+                    System.out.println(
+                            "📍 管线仪左右连续跳变："
+                                    + lastReceivedPipelineDirection
+                                    + " -> "
+                                    + signal
+                                    + "，按电缆中心状态保持 "
+                                    + SIGNAL_JUMP_CENTER_HOLD_MS
+                                    + "ms");
+                } else {
+                    System.out.println(
+                            "🔄 管线仪方向反转："
+                                    + lastReceivedPipelineDirection
+                                    + " -> "
+                                    + signal
+                                    + "，停止前进并转向 "
+                                    + SIGNAL_REVERSAL_HOLD_MS
+                                    + "ms");
+                }
+                lastDirectionJumpTime = now;
+            }
+            lastReceivedPipelineDirection = signal;
+        }
+
+        this.pipelineSignal = signal;
         this.lastSignalTime = now;
         // 推送到 /topic/pipeline，将单值改为对象
         if (template != null) {
@@ -169,11 +214,13 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     public void setAutoTracking(boolean enable) {
         this.isAutoTracking = enable;
         if (enable) {
-            // 每次启动时重置偏航和反转状态
+            // 每次启动时重置偏航和左右跳变中心状态
             this.lastAutoYawCmd = 0.0f;
 
-            // 重置管线仪方向反转状态
-            this.lastAppliedPipelineDirection = 0;
+            // 重置管线仪左右跳变中心状态
+            this.lastReceivedPipelineDirection = 0;
+            this.signalJumpCenterEndTime = 0L;
+            this.lastDirectionJumpTime = 0L;
             this.signalReversalEndTime = 0L;
 
             updateCommand(0, 0, 0, 0, 3);
@@ -271,37 +318,18 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                 // 直接使用当前管线仪信号，不继承中心信号之前的旧方向。
                 int activeDirection = pipelineSignal;
                 boolean validDirection = activeDirection == 1 || activeDirection == 2;
-
-                // 识别 1 -> 2 或 2 -> 1 的跨线方向反转。
-                boolean directionReversed = validDirection
-                        && lastAppliedPipelineDirection != 0
-                        && activeDirection != lastAppliedPipelineDirection;
-
-                if (directionReversed) {
-                    signalReversalEndTime = now + SIGNAL_REVERSAL_HOLD_MS;
-                    lastAutoYawCmd = 0.0f;
-
-                    System.out.println(
-                            "🔄 管线仪方向反转："
-                                    + lastAppliedPipelineDirection
-                                    + " -> "
-                                    + activeDirection
-                                    + "，强制反向转向 "
-                                    + SIGNAL_REVERSAL_HOLD_MS
-                                    + "ms");
-                }
-
-                // 中心信号 0 不覆盖上一次有效方向，使 1 -> 0 -> 2 仍能识别为反转。
-                if (validDirection) {
-                    lastAppliedPipelineDirection = activeDirection;
-                }
-
-                boolean signalReversalActive = now < signalReversalEndTime;
+                boolean signalJumpCenterActive = now < signalJumpCenterEndTime;
+                boolean signalReversalActive = validDirection && now < signalReversalEndTime;
 
                 float targetYaw;
 
-                if (signalReversalActive) {
-                    // 跨线后立即建立反向偏航，不经过慢速平滑。
+                if (signalJumpCenterActive) {
+                    // 左右连续跳变说明机器狗位于电缆中心附近：停止偏航，保持当前朝向继续前进。
+                    lastAutoYawCmd = 0.0f;
+                    finalYaw = 0.0f;
+
+                } else if (signalReversalActive) {
+                    // 连续跳变停止后，恢复原有的跨线动作：先停止前进并完成反向转向。
                     targetYaw = activeDirection == 1
                             ? -SIGNAL_REVERSAL_YAW
                             : SIGNAL_REVERSAL_YAW;
@@ -338,8 +366,11 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                         ? 0.0f
                         : Math.max(this.autoForwardSpeed, MIN_AUTO_FORWARD_SPEED);
 
-                if (signalReversalActive) {
-                    // 方向反转期间优先完成转向。
+                if (signalJumpCenterActive) {
+                    // 跳变中心状态复用现有中心速度比例，保持朝向低速通过中心区域。
+                    finalVx = baseForward * CENTER_FORWARD_RATIO;
+                } else if (signalReversalActive) {
+                    // 保留原有逻辑：跨线后先停止前进并完成转向，再恢复向前运动。
                     finalVx = baseForward * SIGNAL_REVERSAL_FORWARD_RATIO;
                 } else if (pipelineSignal == 0) {
                     // 到达电缆中心时减速，给后续反向留出响应时间。
