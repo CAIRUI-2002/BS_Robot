@@ -46,9 +46,18 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private volatile float vz = 0; // ✅ 新增：高度方向速度
     private volatile float vyaw = 0; // 转向
     private volatile int currentMode = 0;
+    // 运动模式与控制权必须分开记录。机器狗可以仍处于步态模式，但上位机已经停止发包、让出控制权。
+    private volatile boolean upperControlActive = false;
+    // 自主导航/寻找破损点由前端显式续租；任务运行期间不能按手动控制的 350ms 超时释放。
+    private volatile boolean autonomousControlHold = false;
+    private volatile long lastAutonomousControlHoldTime = 0L;
     private volatile long lastManualCommandTime = System.currentTimeMillis();
     private volatile boolean manualCommandTimedOut = false;
     private static final long MANUAL_COMMAND_TIMEOUT_MS = 350L;
+    // 手动指令超时后再发送约 3 帧零速度，确认停车；随后完全停止运动包和控制心跳。
+    private static final long CONTROL_RELEASE_STOP_BURST_MS = 150L;
+    // 自主任务也必须有失联保护，防止浏览器崩溃后永久占用机器狗控制权。
+    private static final long AUTONOMOUS_CONTROL_HOLD_TIMEOUT_MS = 1500L;
 
     // ✅ 新增：自动巡线相关参数
     private volatile boolean isAutoTracking = false; // 是否开启自动巡线
@@ -110,7 +119,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         // 👇 新增：启动 UDP 监听线程接收机器狗主动上报的状态数据
         startUdpListener();
 
-        // 1. 心跳 (10Hz) - 保持连接必须
+        // 1. 控制心跳 (10Hz) - 仅在上位机持有控制权时发送，空闲时让原厂手柄接管
         scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, 100, TimeUnit.MILLISECONDS);
 
         // 2. 运动指令 (20Hz) - 负责发送移动控制
@@ -211,7 +220,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     /**
      * 开启/关闭自动巡线模式
      */
-    public void setAutoTracking(boolean enable) {
+    public synchronized void setAutoTracking(boolean enable) {
         this.isAutoTracking = enable;
         if (enable) {
             // 每次启动时重置偏航和左右跳变中心状态
@@ -231,19 +240,37 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             this.vy = 0;
             this.vz = 0; // ✅ 可选：安全起见，也将 vz 归零
             this.vyaw = 0;
-            System.out.println("🛑 自动巡线已停止");
+            // 从下一帧开始进入短暂的零速度停车窗口，窗口结束后自动释放控制权。
+            acquireUpperControl();
+            this.lastManualCommandTime = System.currentTimeMillis() - MANUAL_COMMAND_TIMEOUT_MS;
+            this.manualCommandTimedOut = false;
+            System.out.println("🛑 自动巡线已停止，正在停车并释放上位机控制权");
         }
     }
 
     /**
      * 更新控制指令 (手动/模式切换)
      */
-    public void updateCommand(float v, float y, float w, float z, int mode) {
+    public synchronized void updateCommand(float v, float y, float w, float z, int mode) {
+        updateCommand(v, y, w, z, mode, false);
+    }
+
+    /**
+     * 更新控制指令，并显式声明自主任务是否需要持续持有控制权。
+     * 自主任务必须持续刷新 holdControl；若浏览器失联，后端仍会在租约超时后安全释放。
+     */
+    public synchronized void updateCommand(float v, float y, float w, float z, int mode, boolean holdControl) {
+        acquireUpperControl();
         this.vx = v;
         this.vy = y;
         this.vyaw = w;
         this.vz = z; // ✅ 更新高度速度
-        this.lastManualCommandTime = System.currentTimeMillis();
+        long now = System.currentTimeMillis();
+        this.lastManualCommandTime = now;
+        this.autonomousControlHold = holdControl;
+        if (holdControl) {
+            this.lastAutonomousControlHoldTime = now;
+        }
         this.manualCommandTimedOut = false;
 
         // 防止重复发送相同的模式切换指令
@@ -277,7 +304,33 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     }
 
     private void sendHeartbeat() {
-        sendJsonCommand(100, 100, null);
+        // 部分底层控制器会把心跳视为控制租约续期。释放后继续发送心跳，
+        // 可能导致即使不再发送运动包，原厂手柄仍然无法重新获得控制权。
+        if (upperControlActive) {
+            sendJsonCommand(100, 100, null);
+        }
+    }
+
+    private void acquireUpperControl() {
+        if (!upperControlActive) {
+            upperControlActive = true;
+            // 重新接管时先恢复控制会话，再发送模式或运动指令。
+            sendJsonCommand(100, 100, null);
+            System.out.println("🎮 上位机已取得机器狗运动控制权");
+        }
+    }
+
+    private void releaseUpperControl() {
+        if (!upperControlActive || isAutoTracking || autonomousControlHold) {
+            return;
+        }
+
+        this.vx = 0.0f;
+        this.vy = 0.0f;
+        this.vz = 0.0f;
+        this.vyaw = 0.0f;
+        this.upperControlActive = false;
+        System.out.println("🕹️ 上位机已停止发送运动包和控制心跳，控制权已让给原厂手柄");
     }
 
     private float clamp(float v, float min, float max) {
@@ -293,7 +346,31 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * 运动控制循环 (20Hz)
      * 负责计算并发送当前的速度参数
      */
-    private void sendMotionLoop() {
+    private synchronized void sendMotionLoop() {
+        if (!upperControlActive) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long manualIdleTime = now - this.lastManualCommandTime;
+        boolean autonomousHoldActive = autonomousControlHold
+                && now - lastAutonomousControlHoldTime < AUTONOMOUS_CONTROL_HOLD_TIMEOUT_MS;
+
+        if (autonomousControlHold && !autonomousHoldActive) {
+            autonomousControlHold = false;
+            System.out.println("⚠️ 自主运动控制租约超过 " + AUTONOMOUS_CONTROL_HOLD_TIMEOUT_MS
+                    + "ms 未刷新，已停止自主运动并准备释放控制权");
+        }
+
+        // 自动巡线关闭或手动控制停止后，先保留一个很短的零速度发送窗口，
+        // 超过窗口后必须彻底停止发包；持续发送零速度同样会覆盖原厂手柄。
+        if (!isAutoTracking
+                && !autonomousHoldActive
+                && manualIdleTime >= MANUAL_COMMAND_TIMEOUT_MS + CONTROL_RELEASE_STOP_BURST_MS) {
+            releaseUpperControl();
+            return;
+        }
+
         // ✅ 修正：解除对 currentMode == 1 的拦截，允许在站立状态下调整高度和姿态
         if (currentMode == 0 || currentMode == 2 || currentMode == 4) {
             return;
@@ -306,8 +383,6 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
         if (isAutoTracking) {
             // --- A. 自动巡线：使用固定偏航跟线，不再执行 S 型正弦摆动 ---
-            long now = System.currentTimeMillis();
-
             // 管线仪信号超时：超过 1 秒没有新数据，立即停车。
             if (now - lastSignalTime > PIPELINE_TIMEOUT_MS) {
                 finalVx = 0.0f;
@@ -382,7 +457,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         } else {
             // --- B. 手动遥控逻辑 ---
             // 浏览器控制循环失联时不能无限重复最后一条转向指令。
-            manualCommandExpired = System.currentTimeMillis() - this.lastManualCommandTime > MANUAL_COMMAND_TIMEOUT_MS;
+            manualCommandExpired = manualIdleTime >= MANUAL_COMMAND_TIMEOUT_MS;
             if (manualCommandExpired) {
                 finalVx = 0.0f;
                 finalVy = 0.0f;
@@ -393,7 +468,8 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
                         Math.abs(this.vz) > 0.0001f;
                 if (hadActiveCommand && !this.manualCommandTimedOut) {
                     this.manualCommandTimedOut = true;
-                    System.out.println("⚠️ 运动指令超过 " + MANUAL_COMMAND_TIMEOUT_MS + "ms 未刷新，已由看门狗自动停车");
+                    System.out.println("⚠️ 运动指令超过 " + MANUAL_COMMAND_TIMEOUT_MS
+                            + "ms 未刷新，正在发送最后的零速度停车帧并释放控制权");
                 }
             } else {
                 // 直接使用前端传来的值 (前端滑条已直接改变了 this.vx / this.vy)

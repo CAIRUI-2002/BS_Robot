@@ -244,8 +244,25 @@
     const STOMP_RECONNECT_BASE_DELAY_MS = 1000;
     const STOMP_RECONNECT_MAX_DELAY_MS = 10000;
     const ROBOT_CONTROL_DISCONNECTED_EVENT = "robot-control-disconnected";
+    const robotAutonomousControlOwners = new Set();
     let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
     let isArmBusy = false;           // ✅ 补充定义：机械臂忙碌状态锁
+
+    function acquireRobotAutonomousControl(owner) {
+        if (!owner) return;
+        robotAutonomousControlOwners.add(owner);
+        console.log(`🔒 自主任务持有机器狗控制权: ${owner}`);
+    }
+
+    function releaseRobotAutonomousControl(owner) {
+        if (!owner) return;
+        robotAutonomousControlOwners.delete(owner);
+        console.log(`🔓 自主任务释放机器狗控制权: ${owner}`);
+    }
+
+    function isRobotAutonomousControlHeld() {
+        return robotAutonomousControlOwners.size > 0;
+    }
 
     // ⚙️ 机器人运动参数配置
     const SPEEDS = {
@@ -6281,6 +6298,7 @@
             clearInterval(motionTimer);
             motionTimer = null;
         }
+        robotAutonomousControlOwners.clear();
         window.dispatchEvent(new Event(ROBOT_CONTROL_DISCONNECTED_EVENT));
     }
 
@@ -6646,7 +6664,9 @@
                 'w': w,
                 'y': y || 0.0,
                 'z': z || 0.0,    // ✅ 这里现在是高度速度
-                'mode': mode || 0.0 // ✅ 这里现在是模式指令
+                'mode': mode || 0.0, // ✅ 这里现在是模式指令
+                // 自主导航/寻找破损点运行期间显式续租，避免被手动控制超时逻辑释放。
+                'holdControl': isRobotAutonomousControlHeld() ? 1.0 : 0.0
             });
             try {
                 client.send("/app/move", {}, payload);
@@ -15479,6 +15499,7 @@
                 updateDistanceUI();
             }
 
+            acquireRobotAutonomousControl("navigation");
             isNavigating = true;
             lastRuntimeObstacleCheckAt = 0;
             latestRuntimeNavObstacles = new Set();
@@ -15501,8 +15522,14 @@
 
         function stopNav(isSuccess) {
             const wasNavigating = isNavigating || navInterval !== null;
+            const willContinueTracking = (isCableTrackingMode || isFaultFindingMode)
+                && cableTrackingState === 'TO_START'
+                && isSuccess;
             isNavigating = false;
             if (navInterval) { clearInterval(navInterval); navInterval = null; }
+            // 到达切入点后还会立即进入下一段自主任务，此时不能释放控制权。
+            // 只有整个导航/跟踪/寻找任务真正结束时，才让后端进入安全停车和释放流程。
+            if (!willContinueTracking) releaseRobotAutonomousControl("navigation");
             if (typeof sendMoveCommand === 'function') sendMoveCommand(0, 0, 0, 0.0, 0.0, true);
             // 手动停止时补发一帧零速度，降低单帧 WebSocket/UDP 丢包导致的继续运动风险。
             if (wasNavigating && typeof sendMoveCommand === 'function') {

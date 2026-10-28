@@ -30,8 +30,9 @@ public void handleMove(Map<String, Double> cmd) {
     // ✅ 修正：从新的 mode 字段读取模式，不再从 z 读取
     float modeVal   = cmd.getOrDefault("mode", 0.0).floatValue();
     int mode = (int) modeVal;
+    boolean holdControl = cmd.getOrDefault("holdControl", 0.0) > 0.5;
 
     // 调用 Service
-    gamepadService.updateCommand(v_forward, y_strafe, w_turn, v_height, mode);
+    gamepadService.updateCommand(v_forward, y_strafe, w_turn, v_height, mode, holdControl);
 }
 }
