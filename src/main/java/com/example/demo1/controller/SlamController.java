@@ -35,8 +35,7 @@ public class SlamController {
         return ResponseEntity.ok(Map.of(
                 "connected", slamCacheService.isConnected(),
                 "pointCount", slamCacheService.getPointCount(),
-                "messageCount", slamCacheService.getMessageCount()
-        ));
+                "messageCount", slamCacheService.getMessageCount()));
     }
 
     /**
@@ -48,7 +47,8 @@ public class SlamController {
         List<Point3D> points = slamCacheService.getAllPoints();
 
         if (points == null || points.isEmpty()) {
-            byte[] msg = "当前后端 SLAM 点云缓存为空，已拒绝生成空 PCD。请确认 Java 后端已连接 10.21.31.104:9090，并且正在收到 slam_data。".getBytes(StandardCharsets.UTF_8);
+            byte[] msg = "当前后端 SLAM 点云缓存为空，已拒绝生成空 PCD。请确认 Java 后端已连接 10.21.31.104:9090，并且正在收到 slam_data。"
+                    .getBytes(StandardCharsets.UTF_8);
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .contentType(new MediaType("text", "plain", StandardCharsets.UTF_8))
                     .body(msg);
@@ -94,7 +94,8 @@ public class SlamController {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
-        headers.setContentDisposition(ContentDisposition.attachment().filename(fileName, StandardCharsets.UTF_8).build());
+        headers.setContentDisposition(
+                ContentDisposition.attachment().filename(fileName, StandardCharsets.UTF_8).build());
         headers.setContentLength(fileBytes.length);
 
         return new ResponseEntity<>(fileBytes, headers, HttpStatus.OK);

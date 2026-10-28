@@ -147,8 +147,7 @@ public class SlamCacheService {
                                 p.get(2).asDouble(),
                                 p.size() > 3 ? p.get(3).asInt(255) : 255,
                                 p.size() > 4 ? p.get(4).asInt(255) : 255,
-                                p.size() > 5 ? p.get(5).asInt(255) : 255
-                        );
+                                p.size() > 5 ? p.get(5).asInt(255) : 255);
                     }
                 }
             } else {
@@ -159,8 +158,7 @@ public class SlamCacheService {
                             scanNode.get(i + 2).asDouble(),
                             i + 3 < scanNode.size() ? scanNode.get(i + 3).asInt(255) : 255,
                             i + 4 < scanNode.size() ? scanNode.get(i + 4).asInt(255) : 255,
-                            i + 5 < scanNode.size() ? scanNode.get(i + 5).asInt(255) : 255
-                    );
+                            i + 5 < scanNode.size() ? scanNode.get(i + 5).asInt(255) : 255);
                 }
             }
 
@@ -189,8 +187,7 @@ public class SlamCacheService {
                     z,
                     clampColor(r),
                     clampColor(g),
-                    clampColor(b)
-            ));
+                    clampColor(b)));
         }
     }
 
