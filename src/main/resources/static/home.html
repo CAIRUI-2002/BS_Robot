@@ -358,12 +358,12 @@
                                 <div class="header-btn-group">
                                     <button id="btnStartPointCloudLidar" class="header-btn-mini lidar-start-btn"
                                         title="向点云激光雷达发送启动指令">
-                                        启动点云雷达
+                                        启动激光雷达
                                     </button>
 
                                     <button id="btnStopPointCloudLidar" class="header-btn-mini lidar-stop-btn"
                                         title="向点云激光雷达发送关闭指令">
-                                        关闭点云雷达
+                                        关闭激光雷达
                                     </button>
 
                                     <button id="btnTogglePointCloudScan" class="header-btn-mini"
@@ -378,6 +378,10 @@
                                         <div class="dropdown-content">
                                             <button id="btnManualDrawCable" class="dropdown-item" type="button">
                                                 📍 手动绘制电缆
+                                            </button>
+                                            <button id="btnTrackCableOverlay" class="dropdown-item cable-track-btn"
+                                                type="button" title="沿当前电缆路径开始自动跟踪">
+                                                ⚡ 跟踪电缆
                                             </button>
                                             <input type="file" id="kmlFileInput" accept=".kml" style="display: none;" />
                                             <button id="btnLoadKml" class="dropdown-item" type="button">
@@ -445,6 +449,10 @@
                                         ✖ 清除
                                     </button>
                                 </div>
+                                <button id="btnCameraFollow" class="camera-follow-toggle" type="button"
+                                    aria-pressed="false" title="开启后相机视角中心将实时跟随机器狗">
+                                    ◎ 视角跟随
+                                </button>
                                 <div id="realtimeGpsOverlay" class="realtime-gps-overlay">
                                     🛰️ RTK: <span id="realtimeGpsText">等待定位...</span>
                                 </div>

@@ -236,6 +236,14 @@
 
     // ROS 机器人相关
     let stompClient = null;          // WebSocket 客户端
+    let stompConnecting = false;
+    let stompReconnectTimer = null;
+    let stompReconnectAttempts = 0;
+    let stompConnectionGeneration = 0;
+    let stompReconnectEnabled = true;
+    const STOMP_RECONNECT_BASE_DELAY_MS = 1000;
+    const STOMP_RECONNECT_MAX_DELAY_MS = 10000;
+    const ROBOT_CONTROL_DISCONNECTED_EVENT = "robot-control-disconnected";
     let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
     let isArmBusy = false;           // ✅ 补充定义：机械臂忙碌状态锁
 
@@ -5976,6 +5984,12 @@
         });
         // ✅ G. 绑定新增的模式切换按钮 (防重复终极版)
         let dogStandWalkTimer = null;
+        window.addEventListener(ROBOT_CONTROL_DISCONNECTED_EVENT, function () {
+            if (dogStandWalkTimer) {
+                clearTimeout(dogStandWalkTimer);
+                dogStandWalkTimer = null;
+            }
+        });
         if (btnDogStand) {
             // 使用 dataset 在 DOM 元素上存储状态，防止变量污染
             // 0 = 趴下, 1 = 站立
@@ -6244,7 +6258,74 @@
     // 3. WebSocket 与 机器人控制函数
     // ==========================================
 
+    function clearStompReconnectTimer() {
+        if (stompReconnectTimer !== null) {
+            window.clearTimeout(stompReconnectTimer);
+            stompReconnectTimer = null;
+        }
+    }
+
+    function closeStompTransport(client) {
+        if (!client || !client.ws) return;
+        try {
+            if (client.ws.readyState !== WebSocket.CLOSED && client.ws.readyState !== WebSocket.CLOSING) {
+                client.ws.close();
+            }
+        } catch (error) {
+            console.warn("关闭旧的机器狗主控制连接失败:", error);
+        }
+    }
+
+    function stopContinuousRobotCommands() {
+        if (motionTimer) {
+            clearInterval(motionTimer);
+            motionTimer = null;
+        }
+        window.dispatchEvent(new Event(ROBOT_CONTROL_DISCONNECTED_EVENT));
+    }
+
+    function scheduleStompReconnect() {
+        if (!stompReconnectEnabled || stompReconnectTimer !== null || stompConnecting) return;
+        if (navigator.onLine === false) {
+            updateConnectionUI(false, "网络离线");
+            return;
+        }
+
+        const delay = Math.min(
+            STOMP_RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.min(stompReconnectAttempts, 4)),
+            STOMP_RECONNECT_MAX_DELAY_MS
+        );
+        stompReconnectAttempts += 1;
+        updateConnectionUI(false, "重连中");
+        console.warn(`⚠️ 机器狗主控制连接已断开，${Math.ceil(delay / 1000)} 秒后自动重连...`);
+
+        stompReconnectTimer = window.setTimeout(() => {
+            stompReconnectTimer = null;
+            connectWebSocket();
+        }, delay);
+    }
+
+    function handleStompConnectionFailure(client, error) {
+        if (client && stompClient !== client) return;
+
+        console.error("机器狗主控制连接失败:", error);
+        stompConnectionGeneration += 1;
+        stompConnecting = false;
+        if (!client || stompClient === client) stompClient = null;
+        closeStompTransport(client);
+        stopContinuousRobotCommands();
+        updateConnectionUI(false);
+        scheduleStompReconnect();
+    }
+
     function connectWebSocket() {
+        if (!stompReconnectEnabled) return;
+        if (stompConnecting || (stompClient && stompClient.connected)) return;
+        if (navigator.onLine === false) {
+            updateConnectionUI(false, "网络离线");
+            return;
+        }
+
         console.log("正在尝试建立 WebSocket 连接 (机器狗)...");
         if (typeof SockJS === 'undefined' || typeof Stomp === 'undefined') {
             console.error("缺少 SockJS 或 Stomp 库");
@@ -6252,18 +6333,38 @@
             return;
         }
 
-        const socket = new SockJS('/ws');
-        stompClient = Stomp.over(socket);
-        stompClient.debug = null;
+        stompConnecting = true;
+        const connectionGeneration = ++stompConnectionGeneration;
+        let socket;
+        let client;
+        try {
+            socket = new SockJS('/ws');
+            client = Stomp.over(socket);
+        } catch (error) {
+            stompConnecting = false;
+            console.error("创建机器狗主控制连接失败:", error);
+            scheduleStompReconnect();
+            return;
+        }
 
-        stompClient.connect({}, function (frame) {
+        stompClient = client;
+        client.debug = null;
+        client.heartbeat.outgoing = 10000;
+        client.heartbeat.incoming = 10000;
+
+        client.connect({}, function (frame) {
+            if (connectionGeneration !== stompConnectionGeneration || stompClient !== client) return;
+
+            stompConnecting = false;
+            stompReconnectAttempts = 0;
+            clearStompReconnectTimer();
             console.log('%c✅ WebSocket 连接成功！', 'color: green; font-weight: bold;');
             updateConnectionUI(true);
 
             // ==================================================
             // 🌟 新增：订阅机器狗实时设备状态 (电量与照明灯)
             // ==================================================
-            stompClient.subscribe('/topic/robot_status', function (message) {
+            client.subscribe('/topic/robot_status', function (message) {
                 try {
                     const statusData = JSON.parse(message.body);
                     const readNumber = (value) => {
@@ -6331,7 +6432,7 @@
             // ==================================================
             // 🌟 新增：订阅管线仪数据
             // ==================================================
-            stompClient.subscribe('/topic/pipeline', function (message) {
+            client.subscribe('/topic/pipeline', function (message) {
                 try {
                     // 解析后端发来的 JSON {signal: 0, depth: 15.0}
                     var data = JSON.parse(message.body);
@@ -6375,7 +6476,7 @@
             // ==================================================
             // 🌟 新增：订阅 GPS 数据，并进行自动标定
             // ==================================================
-            stompClient.subscribe('/topic/gps', function (message) {
+            client.subscribe('/topic/gps', function (message) {
                 try {
                     const gpsData = JSON.parse(message.body);
                     // 只有在信号良好 (qual > 0) 时才处理
@@ -6400,14 +6501,14 @@
             });
 
         }, function (error) {
-            console.error('WebSocket 连接失败:', error);
-            updateConnectionUI(false);
+            if (connectionGeneration !== stompConnectionGeneration) return;
+            handleStompConnectionFailure(client, error);
         });
     }
 
 
     // ✅ 新增：专门用于更新左侧连接状态 UI 的函数
-    function updateConnectionUI(isConnected) {
+    function updateConnectionUI(isConnected, disconnectedText = "离线") {
         const badge = $("robotConnectionBadge");
         if (!badge) return;
 
@@ -6415,10 +6516,33 @@
             badge.textContent = "在线";
             badge.className = "status-badge online"; // 切换为绿色样式
         } else {
-            badge.textContent = "离线";
+            badge.textContent = disconnectedText;
             badge.className = "status-badge offline"; // 切换为红色样式
         }
     }
+
+    window.addEventListener("offline", function () {
+        clearStompReconnectTimer();
+        const oldClient = stompClient;
+        stompConnectionGeneration += 1;
+        stompClient = null;
+        stompConnecting = false;
+        closeStompTransport(oldClient);
+        stopContinuousRobotCommands();
+        updateConnectionUI(false, "网络离线");
+    });
+
+    window.addEventListener("online", function () {
+        console.log("🌐 网络已恢复，立即重连机器狗主控制通道...");
+        clearStompReconnectTimer();
+        stompReconnectAttempts = 0;
+        connectWebSocket();
+    });
+
+    window.addEventListener("beforeunload", function () {
+        stompReconnectEnabled = false;
+        clearStompReconnectTimer();
+    });
 
     // 优化后的运动处理函数 (已集成滑条速度控制)
     function handleMotion(btnId, action) {
@@ -6515,7 +6639,8 @@
     // ✅ 修改后的发送函数：增加了 UI 状态更新
     // 增加 z 参数，并将 mode 独立出来
     function sendMoveCommand(v, w, y, z = 0.0, mode = 0.0, showLog = true) {
-        if (stompClient && stompClient.connected) {
+        const client = stompClient;
+        if (client && client.connected) {
             const payload = JSON.stringify({
                 'v': v,
                 'w': w,
@@ -6523,7 +6648,13 @@
                 'z': z || 0.0,    // ✅ 这里现在是高度速度
                 'mode': mode || 0.0 // ✅ 这里现在是模式指令
             });
-            stompClient.send("/app/move", {}, payload);
+            try {
+                client.send("/app/move", {}, payload);
+            } catch (error) {
+                if (showLog) console.warn("⚠️ 机器狗控制指令发送失败，准备重连:", error);
+                handleStompConnectionFailure(client, error);
+                return;
+            }
 
             // ============================================
             // 🌟 新增：实时更新左侧“运行模式”文字
@@ -12508,6 +12639,18 @@
         const pressedKeys = new Set();
         let keyboardTimer = null;
 
+        window.addEventListener(ROBOT_CONTROL_DISCONNECTED_EVENT, function () {
+            if (keyboardTimer) {
+                clearInterval(keyboardTimer);
+                keyboardTimer = null;
+            }
+            pressedKeys.clear();
+            Object.values(keyMap).forEach(id => {
+                const btn = document.getElementById(id);
+                if (btn) btn.classList.remove('active');
+            });
+        });
+
         // ✅ 新增：处理键盘组合运动逻辑
         function updateKeyboardMotion() {
             // 1. 获取速度设定
@@ -13291,7 +13434,6 @@
         const width = container.clientWidth || 400;
         const height = container.clientHeight || 300;
         const scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x111111, 0.02);
 
         const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 1000);
         camera.up.set(0, 0, 1);
@@ -14524,6 +14666,7 @@
         let isNavigating = false;
         let navInterval = null;
         let currentRobotPose = { x: 0, y: 0, yaw: 0, updatedAt: 0 };
+        let isCameraFollowEnabled = false;
         window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：挂载到全局
 
         // 核心路径变量
@@ -14549,6 +14692,30 @@
             camera.up.set(0, 0, 1);
         }
         updateCamera();
+
+        const btnCameraFollow = document.getElementById('btnCameraFollow');
+        function updateCameraFollowButton() {
+            if (!btnCameraFollow) return;
+            btnCameraFollow.classList.toggle('follow-active', isCameraFollowEnabled);
+            btnCameraFollow.setAttribute('aria-pressed', String(isCameraFollowEnabled));
+            btnCameraFollow.textContent = isCameraFollowEnabled ? '● 跟随中' : '◎ 视角跟随';
+            btnCameraFollow.title = isCameraFollowEnabled
+                ? '点击关闭相机实时跟随'
+                : '开启后相机视角中心将实时跟随机器狗';
+        }
+
+        if (btnCameraFollow) {
+            updateCameraFollowButton();
+            btnCameraFollow.addEventListener('click', () => {
+                isCameraFollowEnabled = !isCameraFollowEnabled;
+                updateCameraFollowButton();
+
+                if (isCameraFollowEnabled) {
+                    orbitTarget.copy(dogGroup.position);
+                    updateCamera();
+                }
+            });
+        }
 
         function updateDistanceUI() {
             if (navPath.length > 0 && currentRobotPose) {
@@ -15372,9 +15539,8 @@
                     // 恢复两个按钮 UI
                     const btn1 = document.getElementById("btnTrackCableOverlay");
                     if (btn1) {
-                        btn1.innerText = "⚡ 跟踪电缆";
-                        btn1.style.color = "#00ccff";
-                        btn1.style.border = "1px solid #00ccff";
+                        btn1.textContent = "⚡ 跟踪电缆";
+                        btn1.classList.remove("cable-tracking-active");
                     }
                     const btn2 = document.getElementById("btnFindFaultOverlay");
                     if (btn2) {
@@ -15386,6 +15552,13 @@
                 if (isSuccess) calculateAvgError();
             }
         }
+
+        window.addEventListener(ROBOT_CONTROL_DISCONNECTED_EVENT, function () {
+            if (isNavigating || navInterval !== null) {
+                console.warn("⚠️ 主控制连接断开，已停止当前导航任务。");
+                stopNav(false);
+            }
+        });
 
         function resetFaultFindingRuntimeState() {
             bsState = 'INACTIVE';
@@ -16387,35 +16560,11 @@
             };
         }
 
-        // ✅✅✅ 新增：注入“跟踪电缆”悬浮按钮逻辑
-        (function injectCableTrackButton() {
-            // 创建按钮
-            const btnTrack = document.createElement('button');
-            btnTrack.innerText = "⚡ 跟踪电缆";
-            btnTrack.id = "btnTrackCableOverlay";
-            // 设置样式：悬浮在 pathMapArea 右上角
-            btnTrack.style.position = "absolute";
-            // ✅✅✅ 修改 2: 将按钮位置下移到 200px，位于“清除”按钮下方
-            btnTrack.style.top = "200px";
-            btnTrack.style.right = "10px";
-            btnTrack.style.zIndex = "999";
-            btnTrack.style.padding = "8px 12px";
-            btnTrack.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
-            btnTrack.style.border = "1px solid #00ccff";
-            btnTrack.style.color = "#00ccff";
-            btnTrack.style.borderRadius = "4px";
-            btnTrack.style.cursor = "pointer";
-            btnTrack.style.fontSize = "14px";
-            btnTrack.style.fontWeight = "bold";
-            btnTrack.style.transition = "all 0.3s";
+        // 顶部工具栏“跟踪电缆”按钮逻辑
+        (function bindCableTrackingButtons() {
+            const btnTrack = document.getElementById('btnTrackCableOverlay');
+            if (!btnTrack) return;
 
-            // 鼠标悬停效果
-            btnTrack.onmouseover = () => { btnTrack.style.backgroundColor = "rgba(0, 204, 255, 0.2)"; };
-            btnTrack.onmouseout = () => { btnTrack.style.backgroundColor = "rgba(0, 0, 0, 0.6)"; };
-
-            container.appendChild(btnTrack);
-
-            // 点击事件逻辑
             btnTrack.onclick = function () {
                 if (isFaultFindingMode) {
                     alert("⚠️ 请先停止寻找破损点模式！");
@@ -16436,9 +16585,8 @@
                 }
 
                 isCableTrackingMode = true;
-                btnTrack.innerText = "⏹ 停止跟踪";
-                btnTrack.style.color = "#ff4444";
-                btnTrack.style.border = "1px solid #ff4444";
+                btnTrack.textContent = "⏹ 停止跟踪";
+                btnTrack.classList.add("cable-tracking-active");
 
                 // 转换数据格式方便计算
                 const pathPoints = window.savedCablePath.map(p => ({ x: p.x, y: p.y }));
@@ -17115,9 +17263,16 @@
                     }
 
                     if (isFirstFrame) {
-                        orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
-                        updateCamera();
                         isFirstFrame = false;
+                        if (!isCameraFollowEnabled) {
+                            orbitTarget.x = px; orbitTarget.y = py; orbitTarget.z = 0;
+                            updateCamera();
+                        }
+                    }
+
+                    if (isCameraFollowEnabled) {
+                        orbitTarget.copy(dogGroup.position);
+                        updateCamera();
                     }
 
                     const trailZOffset = -0.9;
@@ -18018,6 +18173,39 @@
             }
             rotBase.addEventListener('pointerup', handleRotUp);
             rotBase.addEventListener('pointercancel', handleRotUp);
+        });
+
+        window.addEventListener(ROBOT_CONTROL_DISCONNECTED_EVENT, function () {
+            isTransDragging = false;
+            isRotDragging = false;
+            targetV = 0;
+            targetY = 0;
+            targetW = 0;
+            t_visualDx = 0;
+            t_visualDy = 0;
+            r_visualDx = 0;
+
+            if (sendTimer) {
+                clearInterval(sendTimer);
+                sendTimer = null;
+            }
+            if (renderFrameId) {
+                cancelAnimationFrame(renderFrameId);
+                renderFrameId = null;
+            }
+
+            transStick.style.transform = 'translate(0px, 0px)';
+            if (transStatus) {
+                transStatus.textContent = "等待操作...";
+                transStatus.style.color = "";
+            }
+            rotSticks.forEach((stick, index) => {
+                if (stick) stick.style.transform = 'translate(0px, 0px)';
+                if (rotStatuses[index]) {
+                    rotStatuses[index].textContent = "等待操作...";
+                    rotStatuses[index].style.color = "";
+                }
+            });
         });
 
         // 急停按钮绑定保持不变

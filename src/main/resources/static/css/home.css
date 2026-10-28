@@ -2421,6 +2421,18 @@ input[type="range"]::-webkit-slider-thumb {
     background: rgba(0, 120, 200, 0.8);
 }
 
+.cable-track-btn.cable-tracking-active {
+    color: #ffffff;
+    border-color: #ff5555;
+    background: rgba(190, 30, 30, 0.72);
+    box-shadow: 0 0 7px rgba(255, 70, 70, 0.45);
+}
+
+.cable-track-btn.cable-tracking-active:hover {
+    border-color: #ff8888;
+    background: rgba(220, 35, 35, 0.82);
+}
+
 .lidar-start-btn:disabled,
 .lidar-stop-btn:disabled {
     opacity: 0.75;
@@ -2931,6 +2943,38 @@ input[type="range"]::-webkit-slider-thumb {
 .nav-overlay-btn.danger:hover {
     background: rgba(200, 0, 0, 0.4);
     border-color: #f00;
+}
+
+/* 点云地图右上角的小型视角跟随开关 */
+.camera-follow-toggle {
+    position: absolute;
+    top: 164px;
+    right: 10px;
+    z-index: 999;
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid rgba(140, 190, 220, 0.42);
+    border-radius: 12px;
+    background: rgba(7, 22, 34, 0.78);
+    color: #b9d3e2;
+    font-size: 11px;
+    line-height: 22px;
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+    transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.camera-follow-toggle:hover {
+    color: #ffffff;
+    border-color: rgba(190, 225, 245, 0.8);
+    background: rgba(18, 48, 66, 0.9);
+}
+
+.camera-follow-toggle.follow-active {
+    color: #66ffb3;
+    border-color: rgba(102, 255, 179, 0.8);
+    background: rgba(0, 90, 58, 0.72);
 }
 
 /* ==========================================
