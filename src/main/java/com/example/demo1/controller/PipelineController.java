@@ -21,15 +21,25 @@ public class PipelineController {
     private VirtualGamepadService gamepadService;
 
     /**
-     * ✅ 调用的接口
-     * URL: http://<电脑IP>:8080/api/pipeline/update?signal=1&depth=15
+     * 管线探测模块数据入口。
+     * 旧接口兼容：/api/pipeline/update?signal=1&depth=98
+     * V3 推荐：/api/pipeline/update?signal=1&rawDepthCm=98&captureTimeMs=...&backendReceiveTimeMs=...
+     * rawDepthCm/depth 的单位均为 cm；V3 估计结果在前端以 m 保存。
      */
     @GetMapping("/update")
     public String updateSignal(@RequestParam int signal,
             @RequestParam(required = false) Float depth,
+            @RequestParam(required = false) Float rawDepthCm,
+            @RequestParam(required = false) Long captureTimeMs,
+            @RequestParam(required = false) Long backendReceiveTimeMs,
             @RequestParam(required = false, name = "angle") Float angle) {
-        gamepadService.updatePipelineSignal(signal, depth, angle);
-        return "success: signal=" + signal + ", depth=" + depth + ", angle=" + angle;
+        Float raw = rawDepthCm != null ? rawDepthCm : depth;
+        gamepadService.updatePipelineSignal(signal, raw, angle, captureTimeMs, backendReceiveTimeMs);
+        return "success: signal=" + signal
+                + ", rawDepthCm=" + raw
+                + ", angle=" + angle
+                + ", captureTimeMs=" + captureTimeMs
+                + ", backendReceiveTimeMs=" + backendReceiveTimeMs;
     }
 
     /**
