@@ -54,7 +54,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     private volatile long lastManualCommandTime = System.currentTimeMillis();
     private volatile boolean manualCommandTimedOut = false;
     private static final long MANUAL_COMMAND_TIMEOUT_MS = 350L;
-    // 手动指令超时后再发送约 3 帧零速度，确认停车；随后完全停止运动包和控制心跳。
+    // 手动指令超时后再发送约 3 帧零速度，确认停车；随后停止运动包，但状态心跳继续运行。
     private static final long CONTROL_RELEASE_STOP_BURST_MS = 150L;
     // 自主任务也必须有失联保护，防止浏览器崩溃后永久占用机器狗控制权。
     private static final long AUTONOMOUS_CONTROL_HOLD_TIMEOUT_MS = 1500L;
@@ -119,7 +119,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         // 👇 新增：启动 UDP 监听线程接收机器狗主动上报的状态数据
         startUdpListener();
 
-        // 1. 控制心跳 (10Hz) - 仅在上位机持有控制权时发送，空闲时让原厂手柄接管
+        // 1. 状态心跳 (10Hz) - 后端运行期间始终发送，用于持续接收机器狗状态上报
         scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, 100, TimeUnit.MILLISECONDS);
 
         // 2. 运动指令 (20Hz) - 负责发送移动控制
@@ -317,18 +317,14 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     }
 
     private void sendHeartbeat() {
-        // 部分底层控制器会把心跳视为控制租约续期。释放后继续发送心跳，
-        // 可能导致即使不再发送运动包，原厂手柄仍然无法重新获得控制权。
-        if (upperControlActive) {
-            sendJsonCommand(100, 100, null);
-        }
+        // 协议要求持续发送心跳，机器狗会向心跳来源 IP/端口上报实时状态和异常状态。
+        // 心跳只负责维持状态通道；运动控制权通过是否发送 Command=21 运动包来区分。
+        sendJsonCommand(100, 100, null);
     }
 
     private void acquireUpperControl() {
         if (!upperControlActive) {
             upperControlActive = true;
-            // 重新接管时先恢复控制会话，再发送模式或运动指令。
-            sendJsonCommand(100, 100, null);
             System.out.println("🎮 上位机已取得机器狗运动控制权");
         }
     }
@@ -343,7 +339,7 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         this.vz = 0.0f;
         this.vyaw = 0.0f;
         this.upperControlActive = false;
-        System.out.println("🕹️ 上位机已停止发送运动包和控制心跳，控制权已让给原厂手柄");
+        System.out.println("🕹️ 上位机已停止发送运动包，状态心跳保持运行，运动控制权已让给原厂手柄");
     }
 
     private float clamp(float v, float min, float max) {
