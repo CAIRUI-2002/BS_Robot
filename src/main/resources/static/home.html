@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <title>巡检机器人作业平台</title>
-    <link rel="stylesheet" href="/css/home.css?v=20261005-gpr-migration-toggle" />
+    <link rel="stylesheet" href="/css/home.css?v=20261102-nav-icons" />
 </head>
 
 <body>
@@ -16,7 +16,12 @@
                 <nav class="cyber-nav nav-left-wing">
                     <div class="nav-item active" id="btnRobotNav">
                         <div class="nav-content">
-                            <span class="nav-icon">🖥️</span>
+                            <span class="nav-icon nav-icon-line" aria-hidden="true">
+                                <svg viewBox="0 0 20 20" focusable="false">
+                                    <rect x="2.75" y="3.5" width="14.5" height="10.5" rx="1.5"></rect>
+                                    <path d="M7 17h6M10 14v3"></path>
+                                </svg>
+                            </span>
                             <span class="nav-text">机器人控制与导航</span>
                         </div>
                         <div class="active-glow-bar"></div>
@@ -24,7 +29,12 @@
 
                     <div class="nav-item" id="btnPathFault">
                         <div class="nav-content">
-                            <span class="nav-icon">📍</span>
+                            <span class="nav-icon nav-icon-line" aria-hidden="true">
+                                <svg viewBox="0 0 20 20" focusable="false">
+                                    <path d="M10 18s5.5-5.1 5.5-10A5.5 5.5 0 0 0 4.5 8c0 4.9 5.5 10 5.5 10Z"></path>
+                                    <circle cx="10" cy="8" r="2"></circle>
+                                </svg>
+                            </span>
                             <span class="nav-text">路径查找与故障定位</span>
                         </div>
                         <div class="active-glow-bar"></div>
@@ -118,6 +128,18 @@
                                     <span id="batteryRightValue" class="info-value" style="font-weight: bold;">--
                                         %</span>
                                 </div>
+                            </div>
+
+                            <div class="info-item">
+                                <span class="info-label">管线探测传感器：</span>
+                                <span id="pipelineSensorBadge" class="status-badge offline" role="status"
+                                    aria-live="polite">离线</span>
+                            </div>
+
+                            <div class="info-item">
+                                <span class="info-label">声磁协同传感器：</span>
+                                <span id="acousticMagneticSensorBadge" class="status-badge offline" role="status"
+                                    aria-live="polite">离线</span>
                             </div>
 
                             <div class="info-item">
@@ -400,7 +422,7 @@
 
                                     <div class="dropdown-group">
                                         <button class="header-btn-mini dropdown-toggle">
-                                            🧹 清理数据 ▼
+                                            清理数据 ▼
                                         </button>
                                         <div class="dropdown-content">
                                             <button id="btnClearCloud" class="dropdown-item">消除点云</button>
@@ -976,7 +998,7 @@
     <script src="/js/reader.js"></script>
     <script src="/js/fisheye-webgl.js"></script>
     <script src="/js/pipeline_depth_v3.js?v=20261028-v3-rts-final"></script>
-    <script src="/js/home.js?v=20261028-pipeline-depth-v3-rts"></script>
+    <script src="/js/home.js?v=20261102-sensor-status"></script>
 </body>
 
 </html>

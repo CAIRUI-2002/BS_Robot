@@ -315,6 +315,21 @@
     const STOMP_RECONNECT_BASE_DELAY_MS = 1000;
     const STOMP_RECONNECT_MAX_DELAY_MS = 10000;
     const ROBOT_CONTROL_DISCONNECTED_EVENT = "robot-control-disconnected";
+    const SENSOR_DATA_TIMEOUT_MS = 3000;
+    const SENSOR_STATUS_CHECK_INTERVAL_MS = 500;
+    const sensorDataStatus = {
+        pipeline: {
+            badgeId: "pipelineSensorBadge",
+            name: "管线探测传感器",
+            lastReceivedAt: null
+        },
+        acousticMagnetic: {
+            badgeId: "acousticMagneticSensorBadge",
+            name: "声磁协同传感器",
+            lastReceivedAt: null
+        }
+    };
+    let sensorStatusWatchdogTimer = null;
     const robotAutonomousControlOwners = new Set();
     let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
     let isArmBusy = false;           // ✅ 补充定义：机械臂忙碌状态锁
@@ -422,6 +437,55 @@
     // ==========================================
 
     function $(id) { return document.getElementById(id); }
+
+    function renderSensorDataStatus(sensorKey, isNormal) {
+        const sensor = sensorDataStatus[sensorKey];
+        if (!sensor) return;
+
+        const badge = $(sensor.badgeId);
+        if (!badge) return;
+
+        badge.textContent = isNormal ? "正常" : "离线";
+        badge.className = `status-badge ${isNormal ? "online" : "offline"}`;
+        badge.title = isNormal
+            ? `正在接收${sensor.name}数据`
+            : `超过 ${SENSOR_DATA_TIMEOUT_MS / 1000} 秒未收到${sensor.name}数据`;
+    }
+
+    function markSensorDataReceived(sensorKey) {
+        const sensor = sensorDataStatus[sensorKey];
+        if (!sensor) return;
+
+        sensor.lastReceivedAt = Date.now();
+        renderSensorDataStatus(sensorKey, true);
+    }
+
+    function markSensorOffline(sensorKey) {
+        const sensor = sensorDataStatus[sensorKey];
+        if (!sensor) return;
+
+        sensor.lastReceivedAt = null;
+        renderSensorDataStatus(sensorKey, false);
+    }
+
+    function checkSensorDataFreshness() {
+        const now = Date.now();
+        Object.entries(sensorDataStatus).forEach(([sensorKey, sensor]) => {
+            if (sensor.lastReceivedAt !== null && now - sensor.lastReceivedAt > SENSOR_DATA_TIMEOUT_MS) {
+                markSensorOffline(sensorKey);
+            }
+        });
+    }
+
+    function initSensorStatusWatchdog() {
+        if (sensorStatusWatchdogTimer !== null) return;
+
+        checkSensorDataFreshness();
+        sensorStatusWatchdogTimer = window.setInterval(
+            checkSensorDataFreshness,
+            SENSOR_STATUS_CHECK_INTERVAL_MS
+        );
+    }
 
     const OPERATION_STATUS_HISTORY_LIMIT = 3;
     const GPR_PROGRESS_STATUS_KEY = "gpr-processing-progress";
@@ -5848,6 +5912,7 @@
         const btnDogStand = $("btnDogStand");  // 机器狗站立/趴下
 
         // --- B. 初始化 WebSocket 连接 (机器狗) ---
+        initSensorStatusWatchdog();
         connectWebSocket();
 
         // --- C. 面板切换逻辑 (一体化同步版) ---
@@ -6404,6 +6469,7 @@
         closeStompTransport(client);
         stopContinuousRobotCommands();
         updateConnectionUI(false);
+        markSensorOffline("pipeline");
         scheduleStompReconnect();
     }
 
@@ -6539,6 +6605,9 @@
                         pathPointCount: data.pathPointCount
                     };
 
+                    if (signal !== null && signal !== undefined && Number.isFinite(Number(signal))) {
+                        markSensorDataReceived("pipeline");
+                    }
                     updatePipelineDisplay(signal);
 
                     // 存入全局变量，并记录 V3 的带时间戳 012 事件。
@@ -6638,6 +6707,8 @@
         closeStompTransport(oldClient);
         stopContinuousRobotCommands();
         updateConnectionUI(false, "网络离线");
+        markSensorOffline("pipeline");
+        markSensorOffline("acousticMagnetic");
     });
 
     window.addEventListener("online", function () {
@@ -6650,6 +6721,10 @@
     window.addEventListener("beforeunload", function () {
         stompReconnectEnabled = false;
         clearStompReconnectTimer();
+        if (sensorStatusWatchdogTimer !== null) {
+            window.clearInterval(sensorStatusWatchdogTimer);
+            sensorStatusWatchdogTimer = null;
+        }
     });
 
     // 优化后的运动处理函数 (已集成滑条速度控制)
@@ -12466,10 +12541,16 @@
                             channel1Data = msg.mag_data;
                             channel2Data = msg.snd_data;
                             processSignals(msg.mag_data, msg.snd_data);
+                            if (msg.mag_data.length > 0 && msg.snd_data.length > 0) {
+                                markSensorDataReceived("acousticMagnetic");
+                            }
                         } else if (msg.ch1 && msg.ch2) {
                             channel1Data = msg.ch1;
                             channel2Data = msg.ch2;
                             processSignals(msg.ch1, msg.ch2);
+                            if (msg.ch1.length > 0 && msg.ch2.length > 0) {
+                                markSensorDataReceived("acousticMagnetic");
+                            }
                         }
                     }
                 } catch (e) {
@@ -12482,6 +12563,7 @@
 
                 console.warn("声磁 WebSocket 连接异常:", err);
                 updateSignalConnectionStatus("● ERROR", "#f00");
+                markSensorOffline("acousticMagnetic");
                 socket.close();
             };
 
@@ -12491,6 +12573,7 @@
                 signalWs = null;
                 clearSignalHeartbeat();
                 updateSignalConnectionStatus("● OFFLINE", "#f00");
+                markSensorOffline("acousticMagnetic");
                 scheduleSignalReconnect();
             };
         }

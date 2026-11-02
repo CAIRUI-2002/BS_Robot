@@ -251,6 +251,32 @@ body {
     font-size: 16px;
 }
 
+/* 顶部主导航的简约线性图标：颜色随按钮状态统一变化，避免彩色 Emoji 过于抢眼。 */
+.nav-icon-line {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 18px;
+}
+
+.nav-icon-line svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.nav-item:hover .nav-icon-line,
+.nav-item.active .nav-icon-line {
+    filter: drop-shadow(0 0 4px rgba(0, 229, 255, 0.75));
+}
+
 /* 中间纯 CSS 渲染的炫酷大标题容器 */
 .header-title-box {
     position: relative;
