@@ -317,6 +317,8 @@
     const ROBOT_CONTROL_DISCONNECTED_EVENT = "robot-control-disconnected";
     const SENSOR_DATA_TIMEOUT_MS = 3000;
     const SENSOR_STATUS_CHECK_INTERVAL_MS = 500;
+    const LIGHT_STATUS_STALE_MS = 3000;
+    const LIGHT_COMMAND_CONFIRM_TIMEOUT_MS = 5000;
     const sensorDataStatus = {
         pipeline: {
             badgeId: "pipelineSensorBadge",
@@ -330,6 +332,21 @@
         }
     };
     let sensorStatusWatchdogTimer = null;
+    const lightControlState = {
+        front: {
+            buttonId: "lightFrontButton",
+            name: "前侧",
+            actual: null
+        },
+        back: {
+            buttonId: "lightBackButton",
+            name: "后侧",
+            actual: null
+        }
+    };
+    let lightStatusLastReceivedAt = null;
+    let pendingLightCommand = null;
+    let nextLightCommandId = 0;
     const robotAutonomousControlOwners = new Set();
     let motionTimer = null;          // ✅ 运动控制定时器 (用于实现长按连续移动)
     let isArmBusy = false;           // ✅ 补充定义：机械臂忙碌状态锁
@@ -438,6 +455,171 @@
 
     function $(id) { return document.getElementById(id); }
 
+    function isBinaryLightState(value) {
+        return value === 0 || value === 1;
+    }
+
+    function areAllLightStatesKnown() {
+        return Object.values(lightControlState).every(light => isBinaryLightState(light.actual));
+    }
+
+    function renderLightControlButtons() {
+        const allStatesKnown = areAllLightStatesKnown();
+
+        Object.entries(lightControlState).forEach(([side, light]) => {
+            const button = $(light.buttonId);
+            if (!button) return;
+
+            button.className = "light-control-btn";
+
+            if (pendingLightCommand && pendingLightCommand.changedSide === side) {
+                const turningOn = pendingLightCommand.targets[side] === 1;
+                button.textContent = turningOn ? "开启中..." : "关闭中...";
+                button.classList.add("pending");
+                button.disabled = true;
+                button.title = `指令已发送，正在等待${light.name}照明灯状态确认`;
+                return;
+            }
+
+            if (!allStatesKnown) {
+                button.textContent = "状态未知";
+                button.classList.add("unknown");
+                button.disabled = true;
+                button.title = "尚未收到完整的前、后照明灯状态";
+                return;
+            }
+
+            const isOn = light.actual === 1;
+            button.textContent = isOn ? "关闭" : "开启";
+            button.classList.add(isOn ? "action-off" : "action-on");
+            button.disabled = pendingLightCommand !== null;
+            button.title = pendingLightCommand
+                ? "另一条照明灯控制指令正在等待状态确认"
+                : `当前${light.name}照明灯已${isOn ? "开启" : "关闭"}，点击${isOn ? "关闭" : "开启"}`;
+        });
+    }
+
+    function clearPendingLightCommand() {
+        if (!pendingLightCommand) return null;
+
+        const command = pendingLightCommand;
+        if (command.timerId !== null) {
+            window.clearTimeout(command.timerId);
+        }
+        pendingLightCommand = null;
+        return command;
+    }
+
+    function confirmPendingLightCommandFromStatus() {
+        if (!pendingLightCommand) return;
+
+        const matchesTarget = Object.entries(pendingLightCommand.targets)
+            .every(([side, target]) => lightControlState[side].actual === target);
+        if (!matchesTarget) return;
+
+        const command = clearPendingLightCommand();
+        const light = lightControlState[command.changedSide];
+        const resultText = command.targets[command.changedSide] === 1 ? "开启" : "关闭";
+        const message = `${light.name}照明灯已${resultText}`;
+        setStatus(message, "success");
+        addSystemMessage(message, "success");
+    }
+
+    function updateLightControlStatuses(front, back) {
+        const normalizedFront = Number(front);
+        const normalizedBack = Number(back);
+        if (!isBinaryLightState(normalizedFront) || !isBinaryLightState(normalizedBack)) return;
+
+        lightControlState.front.actual = normalizedFront;
+        lightControlState.back.actual = normalizedBack;
+        lightStatusLastReceivedAt = Date.now();
+        confirmPendingLightCommandFromStatus();
+        renderLightControlButtons();
+    }
+
+    function markLightControlsUnavailable() {
+        lightStatusLastReceivedAt = null;
+        lightControlState.front.actual = null;
+        lightControlState.back.actual = null;
+        clearPendingLightCommand();
+        renderLightControlButtons();
+    }
+
+    function checkLightControlFreshness(now = Date.now()) {
+        if (lightStatusLastReceivedAt === null || now - lightStatusLastReceivedAt <= LIGHT_STATUS_STALE_MS) {
+            return;
+        }
+
+        lightStatusLastReceivedAt = null;
+        lightControlState.front.actual = null;
+        lightControlState.back.actual = null;
+        renderLightControlButtons();
+    }
+
+    async function requestLightToggle(side) {
+        const light = lightControlState[side];
+        if (!light || pendingLightCommand || !areAllLightStatesKnown()) return;
+        if (lightStatusLastReceivedAt === null || Date.now() - lightStatusLastReceivedAt > LIGHT_STATUS_STALE_MS) {
+            markLightControlsUnavailable();
+            return;
+        }
+
+        const targets = {
+            front: lightControlState.front.actual,
+            back: lightControlState.back.actual
+        };
+        targets[side] = light.actual === 1 ? 0 : 1;
+
+        const commandId = ++nextLightCommandId;
+        pendingLightCommand = {
+            id: commandId,
+            changedSide: side,
+            targets,
+            timerId: null
+        };
+        pendingLightCommand.timerId = window.setTimeout(() => {
+            if (!pendingLightCommand || pendingLightCommand.id !== commandId) return;
+
+            const timedOutCommand = clearPendingLightCommand();
+            renderLightControlButtons();
+            const action = timedOutCommand.targets[side] === 1 ? "开启" : "关闭";
+            const message = `${light.name}照明灯${action}指令未得到设备状态确认`;
+            setStatus(message, "error");
+            addSystemMessage(message, "error");
+        }, LIGHT_COMMAND_CONFIRM_TIMEOUT_MS);
+        renderLightControlButtons();
+
+        try {
+            const response = await fetch("/api/robot/lights", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(targets)
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || result.success === false) {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+        } catch (error) {
+            // 若状态回传已先一步确认成功，忽略随后到达的 HTTP 异常，避免覆盖真实设备状态。
+            if (!pendingLightCommand || pendingLightCommand.id !== commandId) return;
+
+            clearPendingLightCommand();
+            renderLightControlButtons();
+            const message = `${light.name}照明灯控制指令发送失败：${error.message || error}`;
+            setStatus(message, "error");
+            addSystemMessage(message, "error");
+        }
+    }
+
+    function initLightControlButtons() {
+        Object.entries(lightControlState).forEach(([side, light]) => {
+            const button = $(light.buttonId);
+            if (!button) return;
+            button.addEventListener("click", () => requestLightToggle(side));
+        });
+        renderLightControlButtons();
+    }
+
     function renderSensorDataStatus(sensorKey, isNormal) {
         const sensor = sensorDataStatus[sensorKey];
         if (!sensor) return;
@@ -475,6 +657,7 @@
                 markSensorOffline(sensorKey);
             }
         });
+        checkLightControlFreshness(now);
     }
 
     function initSensorStatusWatchdog() {
@@ -5912,6 +6095,7 @@
         const btnDogStand = $("btnDogStand");  // 机器狗站立/趴下
 
         // --- B. 初始化 WebSocket 连接 (机器狗) ---
+        initLightControlButtons();
         initSensorStatusWatchdog();
         connectWebSocket();
 
@@ -6469,6 +6653,7 @@
         closeStompTransport(client);
         stopContinuousRobotCommands();
         updateConnectionUI(false);
+        markLightControlsUnavailable();
         markSensorOffline("pipeline");
         scheduleStompReconnect();
     }
@@ -6553,30 +6738,11 @@
                         elBatRight.style.color = batteryRight < 20 ? '#ff4444' : '#00ff00';
                     }
 
-                    // 3. 更新前侧照明灯状态徽章
-                    const elLightFront = document.getElementById('lightFrontBadge');
+                    // 3. 使用机器狗真实状态统一更新前、后照明灯控制按钮。
                     const lightFront = readNumber(statusData.lightFront);
-                    if (elLightFront && statusData.lightFront !== undefined) {
-                        if (lightFront === 1) {
-                            elLightFront.textContent = '开启';
-                            elLightFront.className = 'status-badge online';
-                        } else {
-                            elLightFront.textContent = '关闭';
-                            elLightFront.className = 'status-badge offline';
-                        }
-                    }
-
-                    // 4. 更新后侧照明灯状态徽章
-                    const elLightBack = document.getElementById('lightBackBadge');
                     const lightBack = readNumber(statusData.lightBack);
-                    if (elLightBack && statusData.lightBack !== undefined) {
-                        if (lightBack === 1) {
-                            elLightBack.textContent = '开启';
-                            elLightBack.className = 'status-badge online';
-                        } else {
-                            elLightBack.textContent = '关闭';
-                            elLightBack.className = 'status-badge offline';
-                        }
+                    if (lightFront !== null && lightBack !== null) {
+                        updateLightControlStatuses(lightFront, lightBack);
                     }
 
                 } catch (e) {
@@ -6707,6 +6873,7 @@
         closeStompTransport(oldClient);
         stopContinuousRobotCommands();
         updateConnectionUI(false, "网络离线");
+        markLightControlsUnavailable();
         markSensorOffline("pipeline");
         markSensorOffline("acousticMagnetic");
     });
@@ -6725,6 +6892,7 @@
             window.clearInterval(sensorStatusWatchdogTimer);
             sensorStatusWatchdogTimer = null;
         }
+        clearPendingLightCommand();
     });
 
     // 优化后的运动处理函数 (已集成滑条速度控制)

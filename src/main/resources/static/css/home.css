@@ -1564,6 +1564,69 @@ screen and (max-height: 800px) {
     color: #ff4d4d;
 }
 
+/* 前后照明灯：按钮文字表示下一步可执行的动作。 */
+.light-control-btn {
+    min-width: 58px;
+    height: 25px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    font-family: "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 19px;
+    cursor: pointer;
+    transition: color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease,
+        box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.light-control-btn.action-on {
+    border: 1px solid #00e676;
+    background: rgba(0, 230, 118, 0.14);
+    color: #36f58f;
+    box-shadow: 0 0 6px rgba(0, 230, 118, 0.3);
+}
+
+.light-control-btn.action-off {
+    border: 1px solid #ff5a67;
+    background: rgba(255, 60, 75, 0.14);
+    color: #ff6673;
+    box-shadow: 0 0 6px rgba(255, 60, 75, 0.25);
+}
+
+.light-control-btn.pending {
+    min-width: 68px;
+    border: 1px solid #ffbd2e;
+    background: rgba(255, 189, 46, 0.14);
+    color: #ffd166;
+    cursor: wait;
+}
+
+.light-control-btn.unknown {
+    min-width: 68px;
+    border: 1px solid rgba(145, 174, 198, 0.45);
+    background: rgba(82, 108, 130, 0.15);
+    color: rgba(201, 220, 235, 0.65);
+    cursor: not-allowed;
+}
+
+.light-control-btn.action-on:not(:disabled):hover,
+.light-control-btn.action-off:not(:disabled):hover {
+    color: #fff;
+    border-color: #00e5ff;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.48);
+    transform: translateY(-1px);
+}
+
+.light-control-btn:disabled {
+    transform: none;
+}
+
+.light-control-btn.action-on:disabled,
+.light-control-btn.action-off:disabled {
+    cursor: not-allowed;
+    opacity: 0.72;
+}
+
 /* ====== 路径查找及故障定点面板布局 ====== */
 .path-fault-panel {
     width: 100%;

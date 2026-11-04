@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <title>巡检机器人作业平台</title>
-    <link rel="stylesheet" href="/css/home.css?v=20261102-nav-icons" />
+    <link rel="stylesheet" href="/css/home.css?v=20261102-light-control" />
 </head>
 
 <body>
@@ -144,12 +144,14 @@
 
                             <div class="info-item">
                                 <span class="info-label">前侧照明灯：</span>
-                                <span id="lightFrontBadge" class="status-badge offline">关闭</span>
+                                <button id="lightFrontButton" class="light-control-btn unknown" type="button"
+                                    disabled>状态未知</button>
                             </div>
 
                             <div class="info-item">
                                 <span class="info-label">后侧照明灯：</span>
-                                <span id="lightBackBadge" class="status-badge offline">关闭</span>
+                                <button id="lightBackButton" class="light-control-btn unknown" type="button"
+                                    disabled>状态未知</button>
                             </div>
 
                         </div>
@@ -998,7 +1000,7 @@
     <script src="/js/reader.js"></script>
     <script src="/js/fisheye-webgl.js"></script>
     <script src="/js/pipeline_depth_v3.js?v=20261028-v3-rts-final"></script>
-    <script src="/js/home.js?v=20261102-sensor-status"></script>
+    <script src="/js/home.js?v=20261102-light-control"></script>
 </body>
 
 </html>

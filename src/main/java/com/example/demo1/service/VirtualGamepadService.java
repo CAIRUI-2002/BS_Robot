@@ -142,6 +142,22 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
     }
 
     /**
+     * 设置机器狗前、后侧照明灯。
+     *
+     * @param front 0=关闭，1=开启
+     * @param back  0=关闭，1=开启
+     * @return UDP 指令是否成功交给本机网络栈发送；设备是否执行由后续状态上报确认
+     */
+    public boolean setLights(int front, int back) {
+        if ((front != 0 && front != 1) || (back != 0 && back != 1)) {
+            throw new IllegalArgumentException("照明灯状态只能是 0 或 1");
+        }
+
+        String items = String.format("\"Front\": %d, \"Back\": %d", front, back);
+        return sendJsonCommand(1101, 2, items);
+    }
+
+    /**
      * 保留现有路径同步接口以兼容 Controller 和前端。
      * 路径数据不再用于弯道识别、模式切换或运动控制。
      */
@@ -607,12 +623,12 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
         }
     }
 
-    private void sendJsonCommand(int type, int command, String items) {
+    private boolean sendJsonCommand(int type, int command, String items) {
         String json = buildJson(type, command, items);
-        sendUdp(json);
+        return sendUdp(json);
     }
 
-    private void sendUdp(String json) {
+    private boolean sendUdp(String json) {
         try {
             byte[] jsonBytes = json.getBytes("UTF-8");
             int len = jsonBytes.length;
@@ -635,8 +651,10 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
             DatagramPacket packet = new DatagramPacket(packetData, packetData.length,
                     InetAddress.getByName(ROBOT_IP), ROBOT_PORT);
             socket.send(packet);
+            return true;
         } catch (Exception e) {
             System.err.println("UDP Error: " + e.getMessage());
+            return false;
         }
     }
 
