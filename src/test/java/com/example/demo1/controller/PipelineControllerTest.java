@@ -21,18 +21,18 @@ class PipelineControllerTest {
     private PipelineController controller;
 
     @Test
-    void rawDepthCmTakesPriorityAndTimestampsAreForwarded() {
-        String response = controller.updateSignal(0, 98.0f, 101.0f, 1000L, 1050L, 90.0f);
+    void rawDepthCmAliasTakesPriority() {
+        String response = controller.updateSignal(0, 98.0f, 101.0f, 90.0f);
 
-        verify(gamepadService).updatePipelineSignal(0, 101.0f, 90.0f, 1000L, 1050L);
-        assertTrue(response.contains("rawDepthCm=101.0"));
+        verify(gamepadService).updatePipelineSignal(0, 101.0f, 90.0f);
+        assertTrue(response.contains("depthCm=101.0"));
     }
 
     @Test
     void legacyDepthParameterRemainsCompatible() {
-        String response = controller.updateSignal(1, 98.0f, null, null, null, null);
+        String response = controller.updateSignal(1, 98.0f, null, null);
 
-        verify(gamepadService).updatePipelineSignal(1, 98.0f, null, null, null);
-        assertTrue(response.contains("rawDepthCm=98.0"));
+        verify(gamepadService).updatePipelineSignal(1, 98.0f, null);
+        assertTrue(response.contains("depthCm=98.0"));
     }
 }

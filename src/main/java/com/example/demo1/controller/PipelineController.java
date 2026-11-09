@@ -22,24 +22,18 @@ public class PipelineController {
 
     /**
      * 管线探测模块数据入口。
-     * 旧接口兼容：/api/pipeline/update?signal=1&depth=98
-     * V3 推荐：/api/pipeline/update?signal=1&rawDepthCm=98&captureTimeMs=...&backendReceiveTimeMs=...
-     * rawDepthCm/depth 的单位均为 cm；V3 估计结果在前端以 m 保存。
+     * depth/rawDepthCm 的单位均为 cm；rawDepthCm 仅作为旧发送端的参数别名保留。
      */
     @GetMapping("/update")
     public String updateSignal(@RequestParam int signal,
             @RequestParam(required = false) Float depth,
             @RequestParam(required = false) Float rawDepthCm,
-            @RequestParam(required = false) Long captureTimeMs,
-            @RequestParam(required = false) Long backendReceiveTimeMs,
             @RequestParam(required = false, name = "angle") Float angle) {
-        Float raw = rawDepthCm != null ? rawDepthCm : depth;
-        gamepadService.updatePipelineSignal(signal, raw, angle, captureTimeMs, backendReceiveTimeMs);
+        Float depthCm = rawDepthCm != null ? rawDepthCm : depth;
+        gamepadService.updatePipelineSignal(signal, depthCm, angle);
         return "success: signal=" + signal
-                + ", rawDepthCm=" + raw
-                + ", angle=" + angle
-                + ", captureTimeMs=" + captureTimeMs
-                + ", backendReceiveTimeMs=" + backendReceiveTimeMs;
+                + ", depthCm=" + depthCm
+                + ", angle=" + angle;
     }
 
     /**

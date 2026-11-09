@@ -169,18 +169,10 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
      * 接收管线仪数据的接口 (供 Controller 调用)
      * 
      * @param signal   0=正中，1=向右找线，2=向左找线
-     * @param rawDepthCm 管线仪原始深度（cm），可为空
+     * @param depthCm 管线仪深度（cm），可为空；仅 10–500 cm 会透传给前端
      * @param angleDeg 管线仪罗盘角度，仅透传给前端显示，不参与自动巡线
      */
-    public void updatePipelineSignal(int signal, Float rawDepthCm, Float angleDeg) {
-        updatePipelineSignal(signal, rawDepthCm, angleDeg, null, null);
-    }
-
-    /**
-     * 接收带采集时间信息的管线仪数据。时间戳用于前端恢复深度采集时刻的位置。
-     */
-    public void updatePipelineSignal(int signal, Float rawDepthCm, Float angleDeg,
-            Long captureTimeMs, Long backendReceiveTimeMs) {
+    public void updatePipelineSignal(int signal, Float depthCm, Float angleDeg) {
         long now = System.currentTimeMillis();
         boolean validDirection = signal == 1 || signal == 2;
 
@@ -222,16 +214,18 @@ public class VirtualGamepadService implements InitializingBean, DisposableBean {
 
         this.pipelineSignal = signal;
         this.lastSignalTime = now;
+        Float validDepthCm = depthCm != null
+                && Float.isFinite(depthCm)
+                && depthCm >= 10.0f
+                && depthCm <= 500.0f
+                        ? depthCm
+                        : null;
         // 推送到 /topic/pipeline，将单值改为对象
         if (template != null) {
             Map<String, Object> payload = new HashMap<>();
             payload.put("signal", signal);
-            payload.put("depth", rawDepthCm);
-            payload.put("rawDepthCm", rawDepthCm);
+            payload.put("depth", validDepthCm);
             payload.put("depthUnit", "cm");
-            payload.put("captureTimeMs", captureTimeMs);
-            payload.put("backendReceiveTimeMs", backendReceiveTimeMs);
-            payload.put("serverReceiveTimeMs", now);
             payload.put("angle", angleDeg);
             payload.put("rawAngle", angleDeg);
             // 以下字段保留为中性值，兼容仍在读取旧弯道状态的前端代码。

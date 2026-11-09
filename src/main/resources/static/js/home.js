@@ -71,76 +71,72 @@
     window.geoTransform = null;     // ✅ 多点轨迹标定结果：SLAM -> GPS局部米制坐标的二维相似变换
     window.geoCalibSamples = [];    // ✅ 多点轨迹标定采样缓存 [{x,y,lat,lon,status,t}]
 
-    // ====== 地下电缆埋深 V3 ======
-    window.pipelineDepthV3 = window.PipelineDepthEstimatorV3
-        ? new window.PipelineDepthEstimatorV3()
-        : null;
+    // ====== 地下电缆埋深：自动巡线会话采样 ======
+    const PIPELINE_DEPTH_MIN_CM = 10;
+    const PIPELINE_DEPTH_MAX_CM = 500;
+    const pipelineDepthRecording = {
+        active: false,
+        samples: [],
+        startedAtMs: null
+    };
 
-    function inferCableEstimatedDepthM(p) {
-        const ud = p?.userData || {};
-        const finalDepth = Number(ud.finalDepthM ?? p?.finalDepthM);
-        if (Number.isFinite(finalDepth)) return finalDepth;
-        const explicit = Number(ud.estimatedDepthM ?? p?.estimatedDepthM);
-        if (Number.isFinite(explicit)) return explicit;
-        const legacy = Number(ud.depth ?? p?.depth);
-        if (!Number.isFinite(legacy)) return null;
-        // 兼容旧巡检记录：旧 depth 保存的是 cm；V3 新记录的 depth 保存的是 m。
-        return legacy > 5.0 ? legacy / 100.0 : legacy;
-    }
-
-    function inferCableRawDepthCm(p) {
-        const ud = p?.userData || {};
-        const explicit = Number(ud.rawDepthCm ?? p?.rawDepthCm);
-        if (Number.isFinite(explicit)) return explicit;
-        const legacy = Number(ud.depth ?? p?.depth);
-        return Number.isFinite(legacy) && legacy > 5.0 ? legacy : null;
+    function inferCableDepthCm(p) {
+        const value = Number(p?.userData?.depth ?? p?.depth);
+        return Number.isFinite(value) && value >= PIPELINE_DEPTH_MIN_CM && value <= PIPELINE_DEPTH_MAX_CM
+            ? value
+            : null;
     }
 
     function cableDepthPlainFields(p) {
-        const ud = p?.userData || {};
-        const estimatedDepthM = inferCableEstimatedDepthM(p);
-        const numOrNull = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
-        return {
-            depth: estimatedDepthM,
-            rawDepthCm: inferCableRawDepthCm(p),
-            estimatedDepthM,
-            depthSigmaM: numOrNull(ud.depthSigmaM ?? p?.depthSigmaM),
-            depthConfidence: ud.depthConfidence ?? p?.depthConfidence ?? null,
-            depthSource: ud.depthSource ?? p?.depthSource ?? null,
-            onlineDepthM: numOrNull(ud.onlineDepthM ?? p?.onlineDepthM),
-            onlineDepthSigmaM: numOrNull(ud.onlineDepthSigmaM ?? p?.onlineDepthSigmaM),
-            finalDepthM: numOrNull(ud.finalDepthM ?? p?.finalDepthM),
-            finalDepthSigmaM: numOrNull(ud.finalDepthSigmaM ?? p?.finalDepthSigmaM),
-            finalDepthConfidence: ud.finalDepthConfidence ?? p?.finalDepthConfidence ?? null,
-            finalDepthSource: ud.finalDepthSource ?? p?.finalDepthSource ?? null,
-            depthObservationChannel: ud.depthObservationChannel ?? p?.depthObservationChannel ?? null,
-            depthSignalContext: ud.depthSignalContext ?? p?.depthSignalContext ?? null,
-            cableSM: numOrNull(ud.cableS_M ?? p?.cableSM),
-            depthUpdatedAtMs: numOrNull(ud.depthUpdatedAtMs ?? p?.depthUpdatedAtMs)
-        };
+        return { depth: inferCableDepthCm(p) };
     }
 
     function copyCableDepthUserData(targetPoint, sourcePoint) {
         if (!targetPoint) return;
         targetPoint.userData = targetPoint.userData || {};
-        const f = cableDepthPlainFields(sourcePoint);
-        targetPoint.userData.depth = f.depth;
-        targetPoint.userData.rawDepthCm = f.rawDepthCm;
-        targetPoint.userData.estimatedDepthM = f.estimatedDepthM;
-        targetPoint.userData.depthSigmaM = f.depthSigmaM;
-        targetPoint.userData.depthConfidence = f.depthConfidence;
-        targetPoint.userData.depthSource = f.depthSource;
-        targetPoint.userData.onlineDepthM = f.onlineDepthM;
-        targetPoint.userData.onlineDepthSigmaM = f.onlineDepthSigmaM;
-        targetPoint.userData.finalDepthM = f.finalDepthM;
-        targetPoint.userData.finalDepthSigmaM = f.finalDepthSigmaM;
-        targetPoint.userData.finalDepthConfidence = f.finalDepthConfidence;
-        targetPoint.userData.finalDepthSource = f.finalDepthSource;
-        targetPoint.userData.depthObservationChannel = f.depthObservationChannel;
-        targetPoint.userData.depthSignalContext = f.depthSignalContext;
-        targetPoint.userData.cableS_M = f.cableSM;
-        targetPoint.userData.depthUpdatedAtMs = f.depthUpdatedAtMs;
+        targetPoint.userData.depth = inferCableDepthCm(sourcePoint);
     }
+
+    window.beginPipelineDepthRecording = function () {
+        pipelineDepthRecording.active = true;
+        pipelineDepthRecording.samples = [];
+        pipelineDepthRecording.startedAtMs = Date.now();
+    };
+
+    window.recordPipelineDepthSample = function (value) {
+        if (!pipelineDepthRecording.active) return false;
+        const depthCm = Number(value);
+        if (!Number.isFinite(depthCm)
+            || depthCm < PIPELINE_DEPTH_MIN_CM
+            || depthCm > PIPELINE_DEPTH_MAX_CM) {
+            return false;
+        }
+
+        const cablePath = window.getPipelineDepthCablePoints?.() || [];
+        pipelineDepthRecording.samples.push({
+            depthCm,
+            pathIndex: cablePath.length > 0 ? cablePath.length - 1 : null,
+            receivedAtMs: Date.now()
+        });
+        return true;
+    };
+
+    window.finishPipelineDepthRecording = function () {
+        const samples = pipelineDepthRecording.samples.slice();
+        pipelineDepthRecording.active = false;
+        pipelineDepthRecording.samples = [];
+        pipelineDepthRecording.startedAtMs = null;
+        return window.bindRecordedPipelineDepthToPath?.(samples) || {
+            applied: false,
+            reason: 'path_not_ready',
+            sampleCount: samples.length
+        };
+    };
+
+    window.clearPipelineDepthRecordedSamples = function () {
+        pipelineDepthRecording.samples = [];
+        if (pipelineDepthRecording.active) pipelineDepthRecording.startedAtMs = Date.now();
+    };
 
     // ====== 🌊 自适应检测全局变量 ======
     const HISTORY_SIZE = 50;  // 记录最近 50 帧的数据作为背景参考
@@ -6758,8 +6754,7 @@
                     // 解析后端发来的 JSON {signal: 0, depth: 15.0}
                     var data = JSON.parse(message.body);
                     var signal = data.signal !== undefined ? data.signal : parseInt(message.body);
-                    var rawDepthCm = data.rawDepthCm !== undefined ? data.rawDepthCm
-                        : (data.depth !== undefined ? data.depth : null);
+                    var depthCm = data.depth !== undefined ? data.depth : null;
                     var angle = data.angle !== undefined ? data.angle : null;
                     var prediction = {
                         yaw: data.predictedYaw,
@@ -6776,12 +6771,9 @@
                     }
                     updatePipelineDisplay(signal);
 
-                    // 存入全局变量，并记录 V3 的带时间戳 012 事件。
+                    // 存入全局变量。深度仅在自动巡线会话中记录。
                     window.g_pipelineSignal = signal;
                     window.g_pipelinePrediction = prediction;
-                    if (window.pipelineDepthV3) {
-                        window.pipelineDepthV3.addSignal(signal, data.serverReceiveTimeMs ?? Date.now());
-                    }
 
                     // 可选：如果页面后续添加了 id="pipelineAngleValue" 的元素，这里会自动显示罗盘角度
                     const angleEl = document.getElementById('pipelineAngleValue');
@@ -6790,25 +6782,12 @@
                         angleEl.style.color = Math.abs(Number(angle) - 90) <= 3 ? '#00ff00' : '#ffcc00';
                     }
 
-                    // V3：rawDepthCm 始终保留原始厘米值；estimatedDepthM 由 V3 计算。
-                    if (rawDepthCm !== null && rawDepthCm !== undefined && window.pipelineDepthV3) {
-                        const raw = Number(rawDepthCm);
-                        if (Number.isFinite(raw) && raw > 0) {
-                            window.g_pipelineRawDepthCm = raw;
-                            const cablePath = window.getPipelineDepthCablePoints?.() || [];
-                            const obs = window.pipelineDepthV3.ingestDepth({
-                                rawDepthCm: raw,
-                                captureTimeMs: data.captureTimeMs,
-                                backendReceiveTimeMs: data.backendReceiveTimeMs,
-                                serverReceiveTimeMs: data.serverReceiveTimeMs ?? Date.now()
-                            }, cablePath);
-                            window.g_pipelineEstimatedDepthM = obs?.calibratedDepthM ?? null;
-                            if (!isAutoTracking && cablePath.length >= 2) {
-                                window.finalizePipelineDepthPath?.();
-                            } else {
-                                window.syncPipelineDepthToDisplayPath?.();
-                            }
-                        }
+                    const numericDepthCm = Number(depthCm);
+                    if (Number.isFinite(numericDepthCm)
+                        && numericDepthCm >= PIPELINE_DEPTH_MIN_CM
+                        && numericDepthCm <= PIPELINE_DEPTH_MAX_CM) {
+                        window.g_pipelineDepthCm = numericDepthCm;
+                        window.recordPipelineDepthSample?.(numericDepthCm);
                     }
 
                 } catch (e) {
@@ -12770,7 +12749,11 @@
             console.log(`🚀 发送自动巡线指令: ${isAutoTracking}`);
 
             fetch(url, { method: "POST" })
-                .then(res => res.text())
+                .then(async res => {
+                    const msg = await res.text();
+                    if (!res.ok) throw new Error(msg || `HTTP ${res.status}`);
+                    return msg;
+                })
                 .then(msg => {
                     console.log("后端反馈:", msg);
 
@@ -12783,6 +12766,7 @@
                         this.classList.add("pulsing"); // (可选) 添加呼吸灯动画效果
 
                         setStatus("自动巡线模式：运行中...", "success");
+                        window.beginPipelineDepthRecording?.();
                         const lbl = document.getElementById("currentModeLabel");
                         if (lbl) {
                             lbl.textContent = "⚡ 自动巡线中";
@@ -12796,10 +12780,11 @@
                         this.classList.remove("pulsing");
 
                         setStatus("自动巡线已停止", "warning");
-                        // 停止巡线视为当前检测段结束，使用本段全部观测执行 RTS 最终平滑。
-                        const finalSummary = window.finalizePipelineDepthPath?.();
-                        if (finalSummary) {
-                            console.log('✅ V3 最终深度已平滑并写回当前电缆：', finalSummary);
+                        const depthSummary = window.finishPipelineDepthRecording?.();
+                        if (depthSummary?.applied) {
+                            console.log('✅ 最小深度 ±5 cm 已插值并绑定到黄色电缆路径：', depthSummary);
+                        } else {
+                            console.warn('⚠️ 本次巡线没有可绑定的有效深度或路径：', depthSummary);
                         }
                         // ✅ 新增：恢复显示
                         const lbl = document.getElementById("currentModeLabel");
@@ -14267,22 +14252,22 @@
         let lastSignal = -1;
         let currentCableMesh = null;
 
-        function syncV3DepthToDisplayPath() {
-            if (!Array.isArray(window.savedCablePath) || window.savedCablePath.length !== cablePoints.length) return;
-            for (let i = 0; i < cablePoints.length; i++) {
-                copyCableDepthUserData(window.savedCablePath[i], cablePoints[i]);
-            }
-        }
-
-        // WebSocket 订阅位于 SLAM 闭包之外，通过这些窄接口访问当前路径，避免跨作用域直接引用。
+        // WebSocket 订阅位于 SLAM 闭包之外，通过窄接口记录当前路径进度并在停止巡线时绑定深度。
         window.getPipelineDepthCablePoints = function () {
             return cablePoints;
         };
-        window.syncPipelineDepthToDisplayPath = syncV3DepthToDisplayPath;
-        window.finalizePipelineDepthPath = function () {
-            if (!window.pipelineDepthV3 || cablePoints.length < 2) return null;
-            const summary = window.pipelineDepthV3.finalizePath(cablePoints);
-            syncV3DepthToDisplayPath();
+        window.bindRecordedPipelineDepthToPath = function (samples) {
+            if (!window.PipelineDepthMinInterpolation) {
+                return { applied: false, reason: 'interpolator_not_loaded', sampleCount: samples?.length || 0 };
+            }
+            const summary = window.PipelineDepthMinInterpolation.apply(cablePoints, samples, 5);
+            if (summary.applied
+                && Array.isArray(window.savedCablePath)
+                && window.savedCablePath.length === cablePoints.length) {
+                for (let i = 0; i < cablePoints.length; i++) {
+                    copyCableDepthUserData(window.savedCablePath[i], cablePoints[i]);
+                }
+            }
             return summary;
         };
         const PIPELINE_FEATURE_SIDE_OFFSET_M = 0.16; // 特征点允许保留较明显的左右定位
@@ -14617,21 +14602,6 @@
             const restoredDepth = cableDepthPlainFields(p);
             v.userData = {
                 depth: restoredDepth.depth,
-                rawDepthCm: restoredDepth.rawDepthCm,
-                estimatedDepthM: restoredDepth.estimatedDepthM,
-                depthSigmaM: restoredDepth.depthSigmaM,
-                depthConfidence: restoredDepth.depthConfidence,
-                depthSource: restoredDepth.depthSource,
-                onlineDepthM: restoredDepth.onlineDepthM,
-                onlineDepthSigmaM: restoredDepth.onlineDepthSigmaM,
-                finalDepthM: restoredDepth.finalDepthM,
-                finalDepthSigmaM: restoredDepth.finalDepthSigmaM,
-                finalDepthConfidence: restoredDepth.finalDepthConfidence,
-                finalDepthSource: restoredDepth.finalDepthSource,
-                depthObservationChannel: restoredDepth.depthObservationChannel,
-                depthSignalContext: restoredDepth.depthSignalContext,
-                cableS_M: restoredDepth.cableSM,
-                depthUpdatedAtMs: restoredDepth.depthUpdatedAtMs,
                 lat: gps ? gps.lat : null,
                 lon: gps ? gps.lon : null,
                 originalX: Number(p.x),
@@ -14762,10 +14732,6 @@
         }
 
         async function collectCurrentInspectionPayload() {
-            if (window.pipelineDepthV3 && cablePoints.length >= 2) {
-                window.pipelineDepthV3.finalizePath(cablePoints);
-                syncV3DepthToDisplayPath();
-            }
             const cablePath = Array.isArray(window.savedCablePath)
                 ? window.savedCablePath.map(plainCablePoint)
                 : [];
@@ -14887,8 +14853,8 @@
                 clearThreeGroup(faultMarkerGroup);
                 clearThreeGroup(redCableGroup);
 
-                // 历史结果为只读数据，清空实时观测和实时路径，避免污染下一次巡线。
-                window.pipelineDepthV3?.reset();
+                // 历史结果为只读数据，清空实时采样和实时路径，避免污染下一次巡线。
+                window.clearPipelineDepthRecordedSamples?.();
                 cablePoints.length = 0;
                 segmentPoints.length = 0;
                 lastCablePos.set(-999, -999, 0);
@@ -15679,9 +15645,7 @@
                     let minDistanceToSegment = Infinity;
                     let bestAccumulatedDist = 0;
                     let currentAccumulatedDist = 0;
-                    let hitDepth = null;
-                    let hitDepthSigma = null;
-                    let hitDepthConfidence = null;
+                    let hitDepthCm = null;
 
                     if (window.savedCablePath && window.savedCablePath.length > 1) {
                         for (let i = 0; i < window.savedCablePath.length - 1; i++) {
@@ -15702,18 +15666,10 @@
                             if (distToProj < minDistanceToSegment) {
                                 minDistanceToSegment = distToProj;
                                 bestAccumulatedDist = currentAccumulatedDist + (t * segLen);
-                                const d1 = inferCableEstimatedDepthM(p1);
-                                const d2 = inferCableEstimatedDepthM(p2);
-                                if (Number.isFinite(d1) && Number.isFinite(d2)) hitDepth = d1 + t * (d2 - d1);
-                                else hitDepth = Number.isFinite(d1) ? d1 : (Number.isFinite(d2) ? d2 : null);
-
-                                const s1 = Number(p1.userData?.depthSigmaM);
-                                const s2 = Number(p2.userData?.depthSigmaM);
-                                if (Number.isFinite(s1) && Number.isFinite(s2)) hitDepthSigma = s1 + t * (s2 - s1);
-                                else hitDepthSigma = Number.isFinite(s1) ? s1 : (Number.isFinite(s2) ? s2 : null);
-                                hitDepthConfidence = t < 0.5
-                                    ? (p1.userData?.depthConfidence ?? null)
-                                    : (p2.userData?.depthConfidence ?? null);
+                                const d1 = inferCableDepthCm(p1);
+                                const d2 = inferCableDepthCm(p2);
+                                if (Number.isFinite(d1) && Number.isFinite(d2)) hitDepthCm = d1 + t * (d2 - d1);
+                                else hitDepthCm = Number.isFinite(d1) ? d1 : (Number.isFinite(d2) ? d2 : null);
                             }
                             currentAccumulatedDist += segLen;
                         }
@@ -15727,17 +15683,11 @@
 
                     document.getElementById('popupDist').textContent = bestAccumulatedDist.toFixed(2);
 
-                    // V3 的 estimatedDepthM 已经是米，严禁再 /100。
-                    if (Number.isFinite(hitDepth)) {
-                        document.getElementById('popupDepth').textContent = hitDepth.toFixed(2) + " m";
+                    if (Number.isFinite(hitDepthCm)) {
+                        document.getElementById('popupDepth').textContent = (hitDepthCm / 100).toFixed(2) + " m";
                     } else {
                         document.getElementById('popupDepth').textContent = "未检测到";
                     }
-                    const sigmaEl = document.getElementById('popupDepthSigma');
-                    if (sigmaEl) sigmaEl.textContent = Number.isFinite(hitDepthSigma)
-                        ? ('±' + hitDepthSigma.toFixed(2) + ' m') : '--';
-                    const confidenceEl = document.getElementById('popupDepthConfidence');
-                    if (confidenceEl) confidenceEl.textContent = hitDepthConfidence || '--';
 
                     document.getElementById('popupGps').textContent = gpsText;
 
@@ -16849,7 +16799,7 @@
             btnClearCable.onclick = function () {
                 cablePoints.length = 0;
                 segmentPoints.length = 0;
-                window.pipelineDepthV3?.reset();
+                window.clearPipelineDepthRecordedSamples?.();
                 window.savedCablePath = [];
                 lastCablePos.set(-999, -999, 0);
 
@@ -16909,7 +16859,7 @@
                         // 2. 清空当前地图上的旧电缆数据及显示网格
                         cablePoints.length = 0;
                         segmentPoints.length = 0;
-                        window.pipelineDepthV3?.reset();
+                        window.clearPipelineDepthRecordedSamples?.();
                         window.savedCablePath = [];
                         if (currentCableMesh) {
                             cableGroup.remove(currentCableMesh);
@@ -16938,20 +16888,6 @@
                                             const cablePt = new THREE.Vector3(slamPt.x, slamPt.y, 0.08);
                                             cablePt.userData = {
                                                 depth: null,
-                                                rawDepthCm: null,
-                                                estimatedDepthM: null,
-                                                depthSigmaM: null,
-                                                depthConfidence: 'UNKNOWN',
-                                                depthSource: 'uninitialized',
-                                                onlineDepthM: null,
-                                                onlineDepthSigmaM: null,
-                                                finalDepthM: null,
-                                                finalDepthSigmaM: null,
-                                                finalDepthConfidence: null,
-                                                finalDepthSource: null,
-                                                depthObservationChannel: null,
-                                                depthSignalContext: null,
-                                                depthUpdatedAtMs: null,
                                                 timestampMs: null
                                             };
                                             cablePoints.push(cablePt);
@@ -16968,7 +16904,7 @@
                         // 4. 核心：调用卡尔曼滤波平滑算法，计算渲染曲线
                         let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints), cablePoints);
 
-                        // 将 V3 深度属性同步传导至平滑点
+                        // 将已绑定的深度同步传导至平滑点。
                         for (let i = 0; i < displayPoints.length; i++) {
                             displayPoints[i].userData = {
                                 source: cablePoints[i].userData.source,
@@ -17657,7 +17593,6 @@
                         updatedAt: poseTimeMs
                     };
                     window.currentRobotPose = currentRobotPose; // 🌟 增加这一行：每次机器狗移动时，实时同步给全局变量
-                    window.pipelineDepthV3?.addPose(px, py, poseTimeMs);
 
                     updateNavLine();
                     updateDistanceUI();
@@ -17967,35 +17902,18 @@
                         if (dist > minCablePointDist) {
                             const cablePt = candidateCablePt;
 
-                            // V3：路径点保留采样时间和完整深度状态，供深度观测按采集时刻映射。
                             cablePt.userData = {
                                 depth: null,
-                                rawDepthCm: null,
-                                estimatedDepthM: null,
-                                depthSigmaM: null,
-                                depthConfidence: 'UNKNOWN',
-                                depthSource: 'uninitialized',
-                                onlineDepthM: null,
-                                onlineDepthSigmaM: null,
-                                finalDepthM: null,
-                                finalDepthSigmaM: null,
-                                finalDepthConfidence: null,
-                                finalDepthSource: null,
-                                depthObservationChannel: null,
-                                depthSignalContext: null,
-                                depthUpdatedAtMs: null,
                                 timestampMs: Date.now(),
                                 source: isManualRecording && !isAutoRecording ? "manual" : autoRecordMode,
                                 signal: sig
                             };
 
                             cablePoints.push(cablePt);
-                            window.pipelineDepthV3?.updatePath(cablePoints);
                             lastCablePos = cablePt;
 
                             if (cablePoints.length > 2000) {
                                 cablePoints.shift();
-                                window.pipelineDepthV3?.updatePath(cablePoints);
                             }
 
                             if (cablePoints.length > 3) {
@@ -18008,7 +17926,7 @@
                                 // 调用卡尔曼平滑 (你的原有代码完全不需要动)
                                 let displayPoints = smoothCableDisplayPoints(KalmanSmoother.smooth(cablePoints));
 
-                                // 将 V3 深度属性同步给平滑后的显示点。
+                                // 将已绑定的深度同步给平滑后的显示点。
                                 for (let i = 0; i < displayPoints.length; i++) {
                                     displayPoints[i].userData = {
                                         source: cablePoints[i].userData.source,
@@ -18033,7 +17951,6 @@
                     }
                     lastSignal = sig;
 
-                    // 深度观测已在 WebSocket 接收处按采集时刻映射到路径节点，并沿路径实时估计。
                 }
             }
 
